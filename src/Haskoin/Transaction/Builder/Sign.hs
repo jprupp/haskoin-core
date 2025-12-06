@@ -60,16 +60,12 @@ import Haskoin.Util
 -- script is required.
 data SigInput = SigInput
   { -- | output script to spend
-    -- ^ output script value
     script :: !ScriptOutput,
     -- | output script value
-    -- ^ outpoint to spend
     value :: !Word64,
     -- | outpoint to spend
-    -- ^ signature type
     outpoint :: !OutPoint,
     -- | signature type
-    -- ^ redeem script
     sighash :: !SigHash,
     -- | redeem script
     redeem :: !(Maybe RedeemScript)
