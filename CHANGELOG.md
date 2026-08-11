@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/)
 and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-08-11
+
+### Changed
+
+- Make script and address parsing more strict.
+- Use smart constructors for addresses to avoid inconsistent or incorrect represtentations.
+
+### Fixed
+
+- Support Bitcoin Cash 256-bit pay-to-script-hash scripts and addresses.
+- Make addresses of incorrect length invalid.
+- Avoid decoding scripts as standard when hash or public key length incorrect.
+
 ## [1.2.2] - 2025-05-08
 
 ### Changed
