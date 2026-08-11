@@ -21,7 +21,15 @@
 -- Base58, CashAddr, Bech32 address and WIF private key serialization support.
 module Haskoin.Address
   ( -- * Addresses
-    Address,
+    Address
+      ( PubKeyAddress,
+        ScriptAddress,
+        WitnessAddress,
+        WitnessPubKeyAddress,
+        WitnessScriptAddress,
+        Script32Address,
+        CashAddress
+      ),
     isPubKeyAddress,
     isScriptAddress,
     isWitnessAddress,
