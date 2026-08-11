@@ -222,7 +222,7 @@ convertBits dat frombits tobits pad = concat . reverse <$> go dat 0 0 []
         bits' = bits + frombits
         result' =
           [ (acc' .>>. b) .&. maxv
-            | b <- [bits' - tobits, bits' - 2 * tobits .. 0]
+          | b <- [bits' - tobits, bits' - 2 * tobits .. 0]
           ]
     maxv = (1 .<<. tobits) - 1
 {-# INLINE convertBits #-}

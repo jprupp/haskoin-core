@@ -25,6 +25,8 @@ module Haskoin.Address.CashAddr
     cash32encodeType,
     cash32decode,
     cash32encode,
+    decodeVersionByte,
+    encodeVersionByte,
   )
 where
 

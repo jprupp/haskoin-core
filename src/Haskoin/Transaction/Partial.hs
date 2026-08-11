@@ -74,7 +74,7 @@ import Data.Serialize qualified as S
 import Data.String.Conversions (cs)
 import GHC.Generics (Generic)
 import GHC.Word (Word32, Word8)
-import Haskoin.Address (Address (..), pubKeyAddr)
+import Haskoin.Address (Address, pubKeyAddr, pubKeyAddress)
 import Haskoin.Crypto.Keys.Common
 import Haskoin.Crypto.Keys.Extended
 import Haskoin.Network.Common
@@ -410,7 +410,7 @@ completeSig ctx input (PayPK k) =
     }
 completeSig ctx input (PayPKHash h)
   | [(k, sig)] <- HashMap.toList input.partialSigs,
-    PubKeyAddress h == pubKeyAddr ctx k =
+    pubKeyAddress h == pubKeyAddr ctx k =
       input
         { finalScriptSig =
             Just $
@@ -442,7 +442,7 @@ completeSig ctx input (PayScriptHash h)
     scriptAppend (Script script1) (Script script2) = Script $ script1 <> script2
 completeSig ctx input (PayWitnessPKHash h)
   | [(k, sig)] <- HashMap.toList input.partialSigs,
-    PubKeyAddress h == pubKeyAddr ctx k =
+    pubKeyAddress h == pubKeyAddr ctx k =
       input {finalScriptWitness = Just [sig, marshal ctx k]}
 completeSig ctx input (PayWitnessScriptHash h)
   | Just witScript <- input.inputWitnessScript,

@@ -915,9 +915,9 @@ mineBlock :: Network -> Word32 -> BlockHeader -> BlockHeader
 mineBlock net seed h =
   head
     [ j
-      | i <- (+ seed) <$> [0 .. maxBound],
-        let j = h {nonce = i},
-        isValidPOW net j
+    | i <- (+ seed) <$> [0 .. maxBound],
+      let j = h {nonce = i},
+      isValidPOW net j
     ]
 
 -- | Generate and append new blocks (mining). Only practical in regtest network.

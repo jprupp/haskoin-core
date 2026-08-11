@@ -30,6 +30,7 @@ module Haskoin.Script.Standard
     isPayWitness,
     isPayWitnessPKHash,
     isPayWitnessScriptHash,
+    isPayScript32Hash,
     isDataCarrier,
     encodeOutput,
     decodeOutput,
@@ -98,6 +99,8 @@ data ScriptOutput
       { version :: !Word8,
         bytes :: !ByteString
       }
+  | -- | pay to a script hash (256-bit)
+    PayScript32Hash {hash256 :: !Hash256}
   | -- | provably unspendable data carrier
     DataCarrier {bytes :: !ByteString}
   deriving (Eq, Show, Read, Generic, NFData)
@@ -148,6 +151,11 @@ isPayWitness :: ScriptOutput -> Bool
 isPayWitness (PayWitness _ _) = True
 isPayWitness _ = False
 
+-- | Is script paying to 256-bit script hash?
+isPayScript32Hash :: ScriptOutput -> Bool
+isPayScript32Hash (PayScript32Hash _) = True
+isPayScript32Hash _ = False
+
 -- | Is script a data carrier output?
 isDataCarrier :: ScriptOutput -> Bool
 isDataCarrier (DataCarrier _) = True
@@ -158,24 +166,37 @@ isDataCarrier _ = False
 decodeOutput :: Ctx -> Script -> Either String ScriptOutput
 decodeOutput ctx s = case s.ops of
   -- Pay to PubKey
-  [OP_PUSHDATA bs _, OP_CHECKSIG] ->
-    PayPK <$> unmarshal ctx bs
+  [OP_PUSHDATA bs _, OP_CHECKSIG]
+    | B.length bs == 33 || B.length bs == 65 ->
+        PayPK <$> unmarshal ctx bs
+    | otherwise ->
+        Left "decodeOutput: public key must be 33 or 65 bytes long"
   -- Pay to PubKey Hash
-  [OP_DUP, OP_HASH160, OP_PUSHDATA bs _, OP_EQUALVERIFY, OP_CHECKSIG] ->
-    PayPKHash <$> runGetS deserialize bs
+  [OP_DUP, OP_HASH160, OP_PUSHDATA bs _, OP_EQUALVERIFY, OP_CHECKSIG]
+    | B.length bs == 20 ->
+        PayPKHash <$> runGetS deserialize bs
+    | otherwise ->
+        Left "decodeOutput: public key hash must be 20 bytes long"
   -- Pay to Script Hash
-  [OP_HASH160, OP_PUSHDATA bs _, OP_EQUAL] ->
-    PayScriptHash <$> runGetS deserialize bs
+  [OP_HASH160, OP_PUSHDATA bs _, OP_EQUAL]
+    | B.length bs == 20 ->
+        PayScriptHash <$> runGetS deserialize bs
+    | otherwise ->
+        Left "decodeOutput: script hash must be 20 bytes long"
+  -- Pay to 256-bit Script Hash
+  [OP_HASH256, OP_PUSHDATA bs _, OP_EQUAL]
+    | B.length bs == 32 ->
+        PayScript32Hash <$> runGetS deserialize bs
+    | otherwise ->
+        Left "decodeOutput: script hash must be 32 bytes long"
   -- Pay to Witness
   [OP_0, OP_PUSHDATA bs OPCODE]
     | B.length bs == 20 ->
         PayWitnessPKHash <$> runGetS deserialize bs
     | B.length bs == 32 ->
         PayWitnessScriptHash <$> runGetS deserialize bs
-    | B.length bs /= 20 && B.length bs /= 32 ->
-        Left
-          "decodeOutput: invalid version 0 segwit \
-          \(must be 20 or 32 bytes)"
+    | otherwise ->
+        Left "decodeOutput: version 0 segwit must be 20 or 32 bytes long"
   -- Other Witness
   [ver, OP_PUSHDATA bs _]
     | Just wv <- opWitnessVersion ver,
@@ -293,8 +314,11 @@ matchPayMulSig ctx (Script ops) = case splitAt (length ops - 2) ops of
       else Left "matchPayMulSig: Invalid M or N parameters"
   _ -> Left "matchPayMulSig: script did not match output template"
   where
-    go (OP_PUSHDATA bs _ : xs) =
-      liftM2 (:) (unmarshal ctx bs) (go xs)
+    go (OP_PUSHDATA bs _ : xs)
+      | B.length bs == 33 || B.length bs == 65 =
+          liftM2 (:) (unmarshal ctx bs) (go xs)
+      | otherwise =
+          Left "matchPayMulSig: public key must be 33 or 65 bytes long"
     go [] =
       Right []
     go _ =

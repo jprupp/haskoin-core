@@ -232,17 +232,16 @@ testMarshalJson ::
 testMarshalJson gen = do
   prop ("MarshalJSON marshalValue/unmarshalValue identity for " <> name) $
     forAll gen $
-      \(s, a) -> a `shouldSatisfy` marshalJsonID s
+      \(s, a) -> val s a `shouldBe` Just a
   prop ("MarshalJSON marshalEncoding/unmarshalValue identity for " <> name) $
     forAll gen $
-      \(s, a) -> a `shouldSatisfy` marshalEncodingID s
+      \(s, a) -> enc s a `shouldBe` Just a
   where
     name = show $ T.typeRep $ proxy gen
     proxy :: Gen (s, a) -> Proxy a
     proxy = const Proxy
-    marshalJsonID s a =
-      A.parseMaybe (unmarshalValue s) (marshalValue s a) == Just a
-    marshalEncodingID s a = unmarshalJSON s (marshalJSON s a) == Just a
+    val s a = A.parseMaybe (unmarshalValue s) (marshalValue s a)
+    enc s a = unmarshalJSON s (marshalJSON s a)
 
 toMap :: a -> Map.Map String a
 toMap = Map.singleton "object"

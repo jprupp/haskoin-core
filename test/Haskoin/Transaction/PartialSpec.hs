@@ -400,7 +400,7 @@ unfinalizedPkhPSBT net ctx (prvKey, pubKey) =
     prevTx =
       testUtxo [prevOut]
     prevOutScript =
-      addressToScript ctx (pubKeyAddr ctx pubKey)
+      fromJust $ addressToScript ctx (pubKeyAddr ctx pubKey)
     prevOut =
       TxOut
         { value = 200000000,

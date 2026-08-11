@@ -250,7 +250,7 @@ testBip143p2wpkh ctx =
         "619c335025c7f4012e556c2a58b2506e30b8511b53ade95ea316fd8c3286feb9"
     [op0, op1] = (.outpoint) <$> unsignedTx.inputs
     sigIn0 = SigInput (PayPK pubKey0) 625000000 op0 sigHashAll Nothing
-    WitnessPubKeyAddress h = pubKeyWitnessAddr ctx $ toPubKey ctx key1
+    Just h = addressHash160 . pubKeyWitnessAddr ctx $ toPubKey ctx key1
     sigIn1 = SigInput (PayWitnessPKHash h) 600000000 op1 sigHashAll Nothing
     generatedSignedTx = signTx btc ctx unsignedTx [sigIn0, sigIn1] [key0, key1]
 
@@ -291,7 +291,7 @@ testBip143p2shp2wpkh ctx =
       secHexKey
         "eb696a065ef48a2192da5b28b694f87544b30fae8327c4510137a922f32c6dcf"
     op0 = (head unsignedTx.inputs).outpoint
-    WitnessPubKeyAddress h = pubKeyWitnessAddr ctx $ toPubKey ctx key0
+    Just h = addressHash160 . pubKeyWitnessAddr ctx $ toPubKey ctx key0
     sigIn0 = SigInput (PayWitnessPKHash h) 1000000000 op0 sigHashAll Nothing
     generatedSignedTx = signNestedWitnessTx btc ctx unsignedTx [sigIn0] [key0]
 

@@ -101,7 +101,7 @@ bloomFilter3 ctx =
   where
     f0 = bloomCreate 2 0.001 0 BloomUpdateAll
     f1 = bloomInsert f0 $ marshal ctx p
-    f2 = bloomInsert f1 $ runPutS $ serialize (pubKeyAddr ctx p).hash160
+    f2 = bloomInsert f1 $ runPutS $ serialize $ fromJust $ addressHash160 $ pubKeyAddr ctx p
     k = fromJust $ fromWif btc "5Kg1gnAjaLfKiwhhPpGS3QfRg2m6awQvaj98JCZBZQ5SuS2F15C"
     p = derivePublicKey ctx k
     bs = fromJust $ decodeHex "038fc16b080000000000000001"

@@ -72,9 +72,8 @@ spec = prepareContext $ \ctx -> do
       forAll arbitraryTxHash $
         \h -> fromString (cs $ txHashToHex h) == h
     prop "building address tx" $
-      forAll arbitraryNetwork $ \net ->
-        forAll arbitraryAddress $
-          forAll (arbitrarySatoshi net) . testBuildAddrTx net ctx
+      forAll arbitraryNetAddress $ \(net, addr) ->
+        forAll (arbitrarySatoshi net) $ testBuildAddrTx net ctx addr
     prop "guess transaction size" $
       forAll arbitraryNetwork $ \net ->
         forAll (arbitraryAddrOnlyTxFull net ctx) (testGuessSize net ctx)
@@ -226,11 +225,11 @@ pkHashVectors =
 
 -- Transaction Properties --
 
-testBuildAddrTx :: Network -> Ctx -> Address -> TestCoin -> Bool
+testBuildAddrTx :: Network -> Ctx -> Address -> TestCoin -> IO ()
 testBuildAddrTx net ctx a (TestCoin v)
-  | isPubKeyAddress a = PayPKHash a.hash160 == out
-  | isScriptAddress a = PayScriptHash a.hash160 == out
-  | otherwise = undefined
+  | isPubKeyAddress a = (PayPKHash <$> addressHash160 a) `shouldBe` Just out
+  | isScriptAddress a = (PayScriptHash <$> addressHash160 a) `shouldBe` Just out
+  | otherwise = discard
   where
     out = either error id $ do
       tx <- buildAddrTx net ctx [] [(fromJust (addrToText net a), v)]

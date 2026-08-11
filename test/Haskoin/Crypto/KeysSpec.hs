@@ -139,7 +139,8 @@ testKeyIOValidVector ctx (a, payload, obj)
   | otherwise = do
       -- Test Addr to Script
       let addrM = textToAddr net a
-          scriptM = encodeHex . marshal ctx . addressToOutput <$> addrM
+          outputM = addressToOutput =<< addrM
+          scriptM = encodeHex . marshal ctx <$> outputM
       assertBool ("Valid Address " <> cs a) $ isJust addrM
       assertEqual "Address matches payload" (Just payload) scriptM
       let pubAsWifM = fromWif net a
@@ -210,7 +211,7 @@ testSigs ctx = forM_ sigMsg $ testSignature ctx . doubleSHA256
 sigMsg :: [B.ByteString]
 sigMsg =
   [ mconcat ["Very secret message ", C.pack (show (i :: Int)), ": 11"]
-    | i <- [0 .. 15]
+  | i <- [0 .. 15]
   ]
 
 testSignature :: Ctx -> Hash256 -> Assertion

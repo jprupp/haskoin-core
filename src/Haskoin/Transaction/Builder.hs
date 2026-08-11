@@ -210,11 +210,9 @@ greedyAddSink target guessFee continue =
           -- We have reached the goal using this coin
           if val + aTot >= goal (length acc + 1)
             then -- If we want to continue searching for better solutions
-
               if continue
                 then -- This solution is the first one or
                 -- This solution is better than the previous one
-
                   if pTot == 0 || val + aTot < pTot
                     then -- Continue searching for better solutions in the stream
                       go [] 0 (coin : acc) (val + aTot)
@@ -222,7 +220,6 @@ greedyAddSink target guessFee continue =
                     -- solution
                       return $ Just (ps, pTot - goal (length ps))
                 else -- Otherwise, return this solution
-
                   return $
                     Just (coin : acc, val + aTot - goal (length acc + 1))
             else -- We have not yet reached the goal. Add the coin to the
@@ -338,7 +335,7 @@ buildAddrTx net ctx ops rcps =
     f (aTxt, v) =
       maybeToEither ("buildAddrTx: Invalid address " <> cs aTxt) $ do
         a <- textToAddr net aTxt
-        let o = addressToOutput a
+        o <- addressToOutput a
         return (o, v)
 
 -- | Build a transaction by providing a list of outpoints as inputs

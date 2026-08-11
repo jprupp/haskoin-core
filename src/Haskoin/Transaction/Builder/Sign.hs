@@ -81,7 +81,7 @@ instance MarshalJSON Ctx SigInput where
         "sighash" .= h
       ]
         ++ [ "redeem" .= marshalValue ctx r
-             | r <- maybeToList r
+           | r <- maybeToList r
            ]
 
   marshalEncoding ctx (SigInput s v o h r) =
@@ -213,13 +213,13 @@ sigKeys ctx so rdmM keys =
   where
     zipKeys =
       [ (prv, pub)
-        | k <- keys,
-          t <- [True, False],
-          let prv = wrapSecKey t k,
-          let pub = derivePublicKey ctx prv
+      | k <- keys,
+        t <- [True, False],
+        let prv = wrapSecKey t k,
+        let pub = derivePublicKey ctx prv
       ]
     keyByHash h = fmap fst . maybeToList . findKey h $ zipKeys
-    findKey h = find $ (== h) . (.hash160) . pubKeyAddr ctx . snd
+    findKey h = find $ (== Just h) . addressHash160 . pubKeyAddr ctx . snd
 
 -- | Construct an input for a transaction given a signature, public key and data
 -- about the previous output.

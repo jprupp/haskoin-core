@@ -3,6 +3,7 @@
 
 module Haskoin.AddressSpec (spec) where
 
+import Control.Monad
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as B
 import Data.Default (def)
@@ -20,30 +21,31 @@ import Test.Hspec
 import Test.Hspec.QuickCheck
 import Test.QuickCheck
 
-identityTests :: IdentityTests
-identityTests =
+identityTests :: Network -> IdentityTests
+identityTests net =
   def
-    { readTests = [ReadBox arbitraryAddressAll],
-      serialTests = [SerialBox arbitraryAddressAll],
+    { readTests = [ReadBox (arbitraryAddress net)],
+      serialTests = [SerialBox (arbitraryAddress net)],
       marshalJsonTests = [MarshalJsonBox arbitraryNetAddress]
     }
 
 spec :: Spec
 spec = prepareContext $ \ctx -> do
-  testIdentity identityTests
+  forM_ allNets $ \net -> testIdentity $ identityTests net
   describe "Address properties" $ do
     prop "encodes and decodes base58 bytestring" $
       forAll arbitraryBS $ \bs ->
-        decodeBase58 (encodeBase58 bs) == Just bs
+        decodeBase58 (encodeBase58 bs) `shouldBe` Just bs
     prop "encodes and decodes base58 bytestring with checksum" $
       forAll arbitraryBS $ \bs ->
-        decodeBase58Check (encodeBase58Check bs) == Just bs
+        decodeBase58Check (encodeBase58Check bs) `shouldBe` Just bs
     prop "textToAddr . addrToText identity" $
       forAll arbitraryNetAddress $ \(net, a) ->
-        (textToAddr net =<< addrToText net a) == Just a
+        (textToAddr net =<< addrToText net a) `shouldBe` Just a
     prop "outputAddress . addressToOutput identity" $
-      forAll arbitraryAddress $ \a ->
-        outputAddress ctx (addressToOutput a) == Just a
+      forAll arbitraryNetAddress $ \(net, a) ->
+        not (isCashAddress a) ==>
+          (outputAddress ctx =<< addressToOutput a) `shouldBe` Just a
   describe "Address vectors" $ do
     it "Passes Base58 vectors 1" $
       mapM_ testVector vectors

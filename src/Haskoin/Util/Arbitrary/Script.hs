@@ -317,7 +317,11 @@ arbitraryMSOutputC ctx = do
 
 -- | Arbitrary 'ScriptOutput' of type 'PayScriptHash'.
 arbitrarySHOutput :: Gen ScriptOutput
-arbitrarySHOutput = PayScriptHash . (.hash160) <$> arbitraryScriptAddress
+arbitrarySHOutput = do
+  address <- arbitraryScriptAddress
+  case addressHash160 address of
+    Just h -> return $ PayScriptHash h
+    Nothing -> error "Could not get Hash160 from address"
 
 -- | Arbitrary 'ScriptOutput' of type 'DataCarrier'.
 arbitraryDCOutput :: Gen ScriptOutput

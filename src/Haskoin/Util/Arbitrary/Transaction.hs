@@ -15,6 +15,7 @@ import Control.Monad
 import Data.ByteString qualified as BS
 import Data.Either (fromRight)
 import Data.List (nub, nubBy, permutations)
+import Data.Maybe (fromMaybe)
 import Data.Word (Word64)
 import Haskoin.Address
 import Haskoin.Crypto (Ctx)
@@ -158,7 +159,9 @@ arbitraryAnyInput :: Network -> Ctx -> Bool -> Gen (SigInput, PrivateKey)
 arbitraryAnyInput net ctx pkh = do
   (k, p) <- arbitraryKeyPair ctx
   let out
-        | pkh = PayPKHash (pubKeyAddr ctx p).hash160
+        | pkh = case addressHash160 (pubKeyAddr ctx p) of
+            Just h -> PayPKHash h
+            Nothing -> error "Could not get Hash160 from address"
         | otherwise = PayPK p
   (val, op, sh) <- arbitraryInputStuff net
   return (SigInput out val op sh Nothing, k)
@@ -192,14 +195,18 @@ arbitrarySHSigInput net ctx = do
         wrapKey <$> arbitraryPKHashSigInput net ctx,
         arbitraryMSSigInput net ctx
       ]
-  let out = PayScriptHash (payToScriptAddress ctx rdm).hash160
+  let out = case addressHash160 (payToScriptAddress ctx rdm) of
+        Just h -> PayScriptHash h
+        Nothing -> error "Could not get Hash160 from address"
   return (SigInput out val op sh $ Just rdm, ks)
 
 arbitraryWPKHSigInput :: Network -> Ctx -> Gen (SigInput, PrivateKey)
 arbitraryWPKHSigInput net ctx = do
   (k, p) <- arbitraryKeyPair ctx
   (val, op, sh) <- arbitraryInputStuff net
-  let out = PayWitnessPKHash (pubKeyAddr ctx p).hash160
+  let out = case addressHash160 (pubKeyAddr ctx p) of
+        Just h -> PayWitnessPKHash h
+        Nothing -> error "Could not get Hash160 from address"
   return (SigInput out val op sh Nothing, k)
 
 arbitraryWSHSigInput :: Network -> Ctx -> Gen (SigInput, [PrivateKey])
@@ -210,7 +217,9 @@ arbitraryWSHSigInput net ctx = do
         wrapKey <$> arbitraryPKHashSigInput net ctx,
         arbitraryMSSigInput net ctx
       ]
-  let out = PayWitnessScriptHash (payToWitnessScriptAddress ctx rdm).hash256
+  let out = case addressHash256 (payToWitnessScriptAddress ctx rdm) of
+        Just h -> PayWitnessScriptHash h
+        Nothing -> error "Could not get Hash256 from address"
   return (SigInput out val op sh $ Just rdm, ks)
 
 -- | Arbitrary 'Tx' (empty 'TxIn'), 'SigInputs' and private keys that can be
@@ -268,9 +277,13 @@ arbitraryPartialTxs net ctx = do
       let pubKeys = map snd keys
           prvKeys = take nPrv $ permutations (map fst keys) !! perm
       let so = PayMulSig pubKeys m
+      let h =
+            fromMaybe
+              (error "Could not get Hash160 from address")
+              (addressHash160 (payToScriptAddress ctx so))
       elements
         [ (so, val, Nothing, prvKeys, m, n),
-          ( PayScriptHash (payToScriptAddress ctx so).hash160,
+          ( PayScriptHash h,
             val,
             Just so,
             prvKeys,

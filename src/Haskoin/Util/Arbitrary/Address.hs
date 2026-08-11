@@ -1,3 +1,5 @@
+{-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE TupleSections #-}
 
 -- |
@@ -10,6 +12,7 @@
 module Haskoin.Util.Arbitrary.Address where
 
 import qualified Data.ByteString as B
+import Data.Maybe (isJust)
 import Haskoin.Address
 import Haskoin.Network.Constants
 import Haskoin.Network.Data
@@ -18,12 +21,18 @@ import Haskoin.Util.Arbitrary.Util
 import Test.QuickCheck
 
 -- | Arbitrary pay-to-public-key-hash or pay-to-script-hash address.
-arbitraryAddress :: Gen Address
-arbitraryAddress = oneof [arbitraryPubKeyAddress, arbitraryScriptAddress]
+arbitraryBitcoinCashAddress :: Gen Address
+arbitraryBitcoinCashAddress =
+  oneof
+    [ arbitraryPubKeyAddress,
+      arbitraryScriptAddress,
+      arbitraryScript32Address,
+      arbitraryCashAddress
+    ]
 
 -- | Arbitrary address including pay-to-witness
-arbitraryAddressAll :: Gen Address
-arbitraryAddressAll =
+arbitraryBitcoinAddress :: Gen Address
+arbitraryBitcoinAddress =
   oneof
     [ arbitraryPubKeyAddress,
       arbitraryScriptAddress,
@@ -32,29 +41,34 @@ arbitraryAddressAll =
       arbitraryWitnessAddress
     ]
 
+arbitraryAddress :: Network -> Gen Address
+arbitraryAddress net =
+  if isJust net.cashAddrPrefix
+    then arbitraryBitcoinCashAddress
+    else arbitraryBitcoinAddress
+
 -- | Arbitrary valid combination of (Network, Address)
 arbitraryNetAddress :: Gen (Network, Address)
 arbitraryNetAddress = do
   net <- arbitraryNetwork
-  if net `elem` [bch, bchTest, bchTest4, bchRegTest]
-    then (net,) <$> arbitraryAddress
-    else (net,) <$> arbitraryAddressAll
+  addr <- arbitraryAddress net
+  return (net, addr)
 
 -- | Arbitrary pay-to-public-key-hash address.
 arbitraryPubKeyAddress :: Gen Address
-arbitraryPubKeyAddress = PubKeyAddress <$> arbitraryHash160
+arbitraryPubKeyAddress = pubKeyAddress <$> arbitraryHash160
 
 -- | Arbitrary pay-to-script-hash address.
 arbitraryScriptAddress :: Gen Address
-arbitraryScriptAddress = ScriptAddress <$> arbitraryHash160
+arbitraryScriptAddress = scriptAddress <$> arbitraryHash160
 
 -- | Arbitrary pay-to-witness public key hash
 arbitraryWitnessPubKeyAddress :: Gen Address
-arbitraryWitnessPubKeyAddress = WitnessPubKeyAddress <$> arbitraryHash160
+arbitraryWitnessPubKeyAddress = witnessPubKeyAddress <$> arbitraryHash160
 
 -- | Arbitrary pay-to-witness script hash
 arbitraryWitnessScriptAddress :: Gen Address
-arbitraryWitnessScriptAddress = WitnessPubKeyAddress <$> arbitraryHash160
+arbitraryWitnessScriptAddress = witnessPubKeyAddress <$> arbitraryHash160
 
 arbitraryWitnessAddress :: Gen Address
 arbitraryWitnessAddress = do
@@ -62,4 +76,20 @@ arbitraryWitnessAddress = do
   len <- choose (2, 40)
   ws <- vectorOf len arbitrary
   let bs = B.pack ws
-  return $ WitnessAddress ver bs
+  case witnessAddress ver bs of
+    Just a -> return a
+    Nothing -> error "Error generating arbitrary WitnessAddress"
+
+arbitraryScript32Address :: Gen Address
+arbitraryScript32Address = script32Address <$> arbitraryHash256
+
+arbitraryCashAddress :: Gen Address
+arbitraryCashAddress = do
+  ver <- choose (0, 15)
+  len <- choose (0, 7)
+  let lbs = [20, 24, 28, 32, 40, 48, 56, 64] !! len
+  ws <- vectorOf lbs arbitrary
+  let bs = B.pack ws
+  case cashAddress ver bs of
+    Just a -> return a
+    Nothing -> error "Error generating arbitrary CashAddress"
