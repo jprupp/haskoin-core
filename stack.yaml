@@ -1,4 +1,6 @@
 resolver: nightly-2026-08-11
+extra-deps:
+  - secp256k1-haskell-1.5.0@sha256:009a0d57651a0f4eeeafd2b480a45fbc049015252fe92388ae4bb2115f765430
 nix:
   packages:
     - secp256k1

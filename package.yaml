@@ -40,7 +40,7 @@ dependencies:
   - split >= 0.2.3.3
   - safe >= 0.3.18
   - scientific >= 0.3.6.2
-  - secp256k1-haskell >= 1.2.0
+  - secp256k1-haskell >= 1.5.0
   - string-conversions >= 0.4.0.1
   - text >= 1.2.3.0
   - time >= 1.9.3
