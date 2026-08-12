@@ -8,7 +8,7 @@ maintainer: jprupp@protonmail.ch
 license: MIT
 license-file: LICENSE
 homepage: http://github.com/jprupp/haskoin-core#readme
-git: git://github.com/jprupp/haskoin-core.git
+github: jprupp/haskoin-core.git
 bug-reports: http://github.com/jprupp/haskoin-core/issues
 extra-source-files:
   - data/*.json

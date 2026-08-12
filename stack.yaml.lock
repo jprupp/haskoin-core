@@ -10,7 +10,7 @@ packages:
       sha256: 3c3cbc95e94347d2d37c3a74e3703fd0b65161bfe353e37caa3cf8ddf2018463
       size: 881
   original:
-    hackage: secp256k1-haskell-1.5.0@sha256:009a0d57651a0f4eeeafd2b480a45fbc049015252fe92388ae4bb2115f765430
+    hackage: secp256k1-haskell-1.5.0@sha256:009a0d57651a0f4eeeafd2b480a45fbc049015252fe92388ae4bb2115f765430,2077
 snapshots:
 - completed:
     sha256: f0a8c26c47051319c3acc86a8c1020c7ca995a2d454261696777ced26f74b744
