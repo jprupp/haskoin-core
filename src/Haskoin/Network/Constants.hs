@@ -141,15 +141,13 @@ btc =
           )
         ],
       seeds =
-        [ "seed.bitcoin.sipa.be", -- Pieter Wuille
-          "dnsseed.bluematt.me", -- Matt Corallo
-          "dnsseed.bitcoin.dashjr.org", -- Luke Dashjr
-          "seed.bitcoinstats.com", -- Chris Decker
+        [ "dnsseed.bluematt.me", -- Matt Corallo
           "seed.bitcoin.jonasschnelli.ch", -- Jonas Schnelli
-          "seed.btc.petertodd.org", -- Peter Todd
+          "seed.btc.petertodd.net", -- Peter Todd
           "seed.bitcoin.sprovoost.nl", -- Sjors Provoost
           "dnsseed.emzy.de", -- Stephan Oeste
-          "seed.bitcoin.wiz.biz" -- Jason Maurice
+          "seed.bitcoin.wiz.biz", -- Jason Maurice
+          "seed.mainnet.achownodes.xyz" -- Ava Chow
         ],
       bip44Coin = 0,
       sigHashForkId = Nothing,
@@ -207,10 +205,10 @@ btcTest =
           )
         ],
       seeds =
-        [ "testnet-seed.bitcoin.jonasschnelli.ch",
-          "seed.tbtc.petertodd.org",
-          "seed.testnet.bitcoin.sprovoost.nl",
-          "testnet-seed.bluematt.me"
+        [ "testnet-seed.bitcoin.jonasschnelli.ch", -- Jonas Schnelli
+          "seed.tbtc.petertodd.net", -- Peter Todd
+          "testnet-seed.bluematt.me", -- Matt Corallo
+          "seed.testnet.achownodes.xyz" -- Ava Chow
         ],
       bip44Coin = 1,
       sigHashForkId = Nothing,
@@ -264,8 +262,8 @@ btcTest4 =
       targetSpacing = 10 * 60,
       checkpoints = [],
       seeds =
-        [ "seed.testnet4.bitcoin.sprovoost.nl",
-          "seed.testnet4.wiz.biz"
+        [ "seed.testnet4.bitcoin.sprovoost.nl", -- Sjors Provoost
+          "seed.testnet4.wiz.biz" -- Jason Maurice
         ],
       bip44Coin = 1,
       sigHashForkId = Nothing,
@@ -421,19 +419,19 @@ bch =
           )
         ],
       seeds =
-        [ "seed.bitcoinabc.org",
-          "seed-bch.bitcoinforks.org",
-          "btccash-seeder.bitcoinunlimited.info",
-          "seed.bchd.cash",
-          "seed.bch.loping.net",
-          "dnsseed.electroncash.de"
+        [ "seed.flowee.cash", -- Flowee
+          "btccash-seeder.bitcoinunlimited.info", -- Bitcoin Unlimited
+          "seed.bchd.cash", -- BCHD
+          "seed.bch.loping.net", -- Loping.net
+          "bchseed.c3-soft.com", -- C3 Soft
+          "bch.bitjson.com" -- Jason Dreyzehner
         ],
       bip44Coin = 145,
       sigHashForkId = Just 0,
       edaHeight = Just 478559,
-      daaHeight = Just 404031,
+      daaHeight = Just 504032,
       asertActivationTime = Just 1605441600,
-      asertHalfLife = 60 * 60 * 10,
+      asertHalfLife = 2 * 24 * 60 * 60,
       segWit = False,
       cashAddrPrefix = Just "bitcoincash",
       bech32Prefix = Nothing,
@@ -441,7 +439,7 @@ bch =
       halvingInterval = 210000
     }
 
--- | Testnet for Bitcoin Cash network.
+-- | Testnet4 for Bitcoin Cash network.
 bchTest4 :: Network
 bchTest4 =
   Network
@@ -460,7 +458,7 @@ bchTest4 =
           1597811185
           0x1d00ffff
           114152193,
-      -- Hash 000000000933ea01ad0ee984209779baaec3ced90fa3f408719526f8d77f4943
+      -- Hash 000000001dd410c49a788668ce26751718cc797474d3152a5fc073dd44fd9f7b
       maxBlockSize = 2000000,
       maxSatoshi = 2100000000000000,
       userAgent = "/haskoin-bch-test4:" <> versionString <> "/",
@@ -495,15 +493,15 @@ bchTest4 =
           )
         ],
       seeds =
-        [ "testnet4-seed-bch.bitcoinforks.org",
-          "testnet4-seed-bch.toom.im",
-          "seed.tbch4.loping.net",
-          "testnet4-seed.flowee.cash"
+        [ "testnet4-seed-bch.toom.im", -- Jonathan Toomim
+          "seed.tbch4.loping.net", -- Loping.net
+          "testnet4-seed.flowee.cash", -- Flowee
+          "testnet4.bitjson.com" -- Jason Dreyzehner
         ],
       bip44Coin = 1,
       sigHashForkId = Just 0,
       edaHeight = Just 7,
-      daaHeight = Just 3000,
+      daaHeight = Just 3001,
       asertActivationTime = Just 1605441600,
       asertHalfLife = 60 * 60,
       segWit = False,
@@ -566,15 +564,14 @@ bchTest =
           )
         ],
       seeds =
-        [ "testnet-seed.bitcoinabc.org",
-          "testnet-seed-bch.bitcoinforks.org",
-          "testnet-seed.bchd.cash",
-          "seed.tbch.loping.net"
+        [ "testnet-seed.bchd.cash", -- BCHD
+          "seed.tbch.loping.net", -- Loping.net
+          "testnet-seed.bitcoinunlimited.info" -- Bitcoin Unlimited
         ],
       bip44Coin = 1,
       sigHashForkId = Just 0,
       edaHeight = Just 1155876,
-      daaHeight = Just 1188697,
+      daaHeight = Just 1188698,
       asertActivationTime = Just 1605441600,
       asertHalfLife = 60 * 60,
       segWit = False,

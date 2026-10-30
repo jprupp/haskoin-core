@@ -68,9 +68,11 @@ data Network = Network
     seeds :: ![String],
     -- | fork id for replay protection
     sigHashForkId :: !(Maybe Word32),
-    -- | EDA start block height
+    -- | height of the first block that uses the EDA
+    -- (one above @uahfHeight@ in Bitcoin Cash Node)
     edaHeight :: !(Maybe Word32),
-    -- | DAA start block height
+    -- | height of the first block that uses the DAA
+    -- (one above @daaHeight@ in Bitcoin Cash Node)
     daaHeight :: !(Maybe Word32),
     -- | asert3-2d algorithm activation time
     -- TODO: Replace with block height after fork
