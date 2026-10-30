@@ -46,6 +46,8 @@ data Network = Network
     minDiffBlocks :: !Bool,
     -- | do not retarget difficulty (regtest)
     powNoRetarget :: !Bool,
+    -- | enforce BIP94 block storm and time warp rules (testnet4)
+    bip94 :: !Bool,
     -- | proof-of-work target higest possible value
     powLimit :: !Integer,
     -- | block at which BIP34 activates

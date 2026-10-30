@@ -18,6 +18,7 @@ module Haskoin.Network.Constants
   ( -- * Constants
     btc,
     btcTest,
+    btcTest4,
     btcRegTest,
     bch,
     bchTest,
@@ -87,6 +88,7 @@ btc =
       defaultPort = 8333,
       minDiffBlocks = False,
       powNoRetarget = False,
+      bip94 = False,
       powLimit =
         0x00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff,
       bip34Block =
@@ -188,6 +190,7 @@ btcTest =
       defaultPort = 18333,
       minDiffBlocks = True,
       powNoRetarget = False,
+      bip94 = False,
       powLimit =
         0x00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff,
       bip34Block =
@@ -208,6 +211,61 @@ btcTest =
           "seed.tbtc.petertodd.org",
           "seed.testnet.bitcoin.sprovoost.nl",
           "testnet-seed.bluematt.me"
+        ],
+      bip44Coin = 1,
+      sigHashForkId = Nothing,
+      edaHeight = Nothing,
+      daaHeight = Nothing,
+      asertActivationTime = Nothing,
+      asertHalfLife = 0,
+      segWit = True,
+      cashAddrPrefix = Nothing,
+      bech32Prefix = Just "tb",
+      replaceByFee = True,
+      halvingInterval = 210000
+    }
+
+-- | Testnet4 for Bitcoin SegWit network (BIP94).
+btcTest4 :: Network
+btcTest4 =
+  Network
+    { name = "btctest4",
+      addrPrefix = 111,
+      scriptPrefix = 196,
+      secretPrefix = 239,
+      xPubPrefix = 0x043587cf,
+      xPrvPrefix = 0x04358394,
+      magic = 0x1c163f28,
+      genesisHeader =
+        BlockHeader
+          0x01
+          "0000000000000000000000000000000000000000000000000000000000000000"
+          "4e7b2b9128fe0291db0693af2ae418b767e657cd407e80cb1434221eaea7a07a"
+          1714777860
+          0x1d00ffff
+          393743547,
+      -- Hash 00000000da84f2bafbbc53dee25a72ae507ff4914b867c565be350b0da8bf043
+      maxBlockSize = 1000000,
+      maxSatoshi = 2100000000000000,
+      userAgent = "/haskoin-btc-test4:" <> versionString <> "/",
+      defaultPort = 48333,
+      minDiffBlocks = True,
+      powNoRetarget = False,
+      bip94 = True,
+      powLimit =
+        0x00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff,
+      bip34Block =
+        ( 1,
+          "0000000012982b6d5f621229286b880e909984df669c2afabb102ce311b13f28"
+        ),
+      bip65Height = 1,
+      bip66Height = 1,
+      targetTimespan = 14 * 24 * 60 * 60,
+      targetSpacing = 10 * 60,
+      checkpoints = [],
+      seeds =
+        [ "seed.testnet4.bitcoin.sprovoost.nl",
+          "seed.testnet4.wiz.biz"
         ],
       bip44Coin = 1,
       sigHashForkId = Nothing,
@@ -248,6 +306,7 @@ btcRegTest =
       defaultPort = 18444,
       minDiffBlocks = True,
       powNoRetarget = True,
+      bip94 = False,
       powLimit =
         0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff,
       bip34Block =
@@ -299,6 +358,7 @@ bch =
       defaultPort = 8333,
       minDiffBlocks = False,
       powNoRetarget = False,
+      bip94 = False,
       powLimit =
         0x00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff,
       bip34Block =
@@ -407,6 +467,7 @@ bchTest4 =
       defaultPort = 28333,
       minDiffBlocks = True,
       powNoRetarget = False,
+      bip94 = False,
       powLimit =
         0x00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff,
       bip34Block =
@@ -478,6 +539,7 @@ bchTest =
       defaultPort = 18333,
       minDiffBlocks = True,
       powNoRetarget = False,
+      bip94 = False,
       powLimit =
         0x00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff,
       bip34Block =
@@ -548,6 +610,7 @@ bchRegTest =
       defaultPort = 18444,
       minDiffBlocks = True,
       powNoRetarget = True,
+      bip94 = False,
       powLimit =
         0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff,
       bip34Block =
@@ -579,4 +642,4 @@ bchRegTest =
 
 -- | List of all networks supported by this library.
 allNets :: [Network]
-allNets = [btc, bch, btcTest, bchTest4, bchTest, btcRegTest, bchRegTest]
+allNets = [btc, bch, btcTest, btcTest4, bchTest4, bchTest, btcRegTest, bchRegTest]
