@@ -123,6 +123,9 @@ spec = prepareContext $ \ctx -> do
     it "has the BIP94 genesis block" $
       headerHash btcTest4.genesisHeader
         `shouldBe` "00000000da84f2bafbbc53dee25a72ae507ff4914b867c565be350b0da8bf043"
+    it "has the Bitcoin Cash testnet4 genesis block" $
+      headerHash bchTest4.genesisHeader
+        `shouldBe` "000000001dd410c49a788668ce26751718cc797474d3152a5fc073dd44fd9f7b"
     it "rejects the first block of a retarget period when it is too early" $ do
       -- Blocks 1 to 8 are ten minutes apart; block 9 jumps two hours ahead.
       let t = bip94Net.genesisHeader.timestamp
