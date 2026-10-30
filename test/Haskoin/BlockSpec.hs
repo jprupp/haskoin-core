@@ -73,6 +73,28 @@ chain net bh i = do
   where
     bhs = appendBlocks net 6 bh i
 
+-- | Regtest with the BIP94 rules and a retarget every ten blocks.
+bip94Net :: Network
+bip94Net =
+  (btcRegTest :: Network)
+    { bip94 = True,
+      powNoRetarget = False,
+      targetTimespan = 10 * 600
+    }
+
+-- | The same network without the BIP94 rules.
+noBip94Net :: Network
+noBip94Net = (bip94Net :: Network) {bip94 = False}
+
+-- | Mine a header on top of the parent with the given timestamp and bits.
+mineOn :: Network -> BlockHeader -> Timestamp -> Word32 -> BlockHeader
+mineOn net parent time bits =
+  mineBlock net 0 (parent :: BlockHeader) {prev = headerHash parent, timestamp = time, bits = bits}
+
+-- | Mine a chain of headers with the given timestamps and bits.
+mineChain :: Network -> BlockHeader -> [(Timestamp, Word32)] -> [BlockHeader]
+mineChain net parent = drop 1 . scanl (\p (time, bits) -> mineOn net p time bits) parent
+
 spec :: Spec
 spec = prepareContext $ \ctx -> do
   testIdentity $ identityTests ctx
@@ -97,6 +119,66 @@ spec = prepareContext $ \ctx -> do
       let net = bchRegTest
           bb = withChain net $ splitChain net >> getBestBlockHeader
        in bb.height `shouldBe` 4035
+  describe "testnet4" $ do
+    it "has the BIP94 genesis block" $
+      headerHash btcTest4.genesisHeader
+        `shouldBe` "00000000da84f2bafbbc53dee25a72ae507ff4914b867c565be350b0da8bf043"
+    it "rejects the first block of a retarget period when it is too early" $ do
+      -- Blocks 1 to 8 are ten minutes apart; block 9 jumps two hours ahead.
+      let t = bip94Net.genesisHeader.timestamp
+          hs =
+            mineChain bip94Net bip94Net.genesisHeader $
+              [(t + 600 * i, 0x207fffff) | i <- [1 .. 8]] ++ [(t + 12000, 0x207fffff)]
+          par = last hs
+          b10 = mineOn bip94Net par (t + 11400) 0x207fffff
+          connect net chain' h = withChain net $ do
+            connectBlocks net myTime chain' >>= either error (const (return ()))
+            fmap (.height) <$> connectBlock net myTime h
+      -- Block 10 starts a retarget period, so it may be at most 600 seconds
+      -- earlier than block 9.
+      connect bip94Net hs (mineOn bip94Net par (t + 11399) 0x207fffff)
+        `shouldBe` Left "Block timestamp too early for retarget: 1296700001"
+      connect bip94Net hs b10 `shouldBe` Right 10
+      -- Block 11 does not start a period.
+      connect bip94Net (hs ++ [b10]) (mineOn bip94Net b10 (t + 10799) 0x207fffff)
+        `shouldBe` Right 11
+      connect noBip94Net hs (mineOn noBip94Net par (t + 11399) 0x207fffff)
+        `shouldBe` Right 10
+    it "bases the retarget on the first block of the period" $ do
+      -- Blocks 10 to 19 form a retarget period that takes four times the
+      -- target timespan. Its last block uses the min-difficulty exception.
+      let t = bip94Net.genesisHeader.timestamp
+          hs =
+            mineChain bip94Net bip94Net.genesisHeader $
+              [(t + 600 * i, 0x207fffff) | i <- [1 .. 9]]
+                ++ [(t + 6000 + 600 * i, 0x1f7fffff) | i <- [0 .. 8]]
+                ++ [(t + 30000, 0x207fffff)]
+          next net = withChain net $ do
+            connectBlocks net myTime hs >>= either error (const (return ()))
+            par <- getBestBlockHeader
+            let bh = (par.header :: BlockHeader) {prev = headerHash par.header, timestamp = t + 30600}
+            nextWorkRequired net par bh
+      -- Four times the difficulty of block 10.
+      next bip94Net `shouldBe` 0x2001ffff
+      -- Without BIP94, block 19 drags the next period down to min difficulty.
+      next noBip94Net `shouldBe` 0x207fffff
+  describe "emergency difficulty adjustment" $
+    it "retargets at the end of a period" $ do
+      -- Blocks 10 to 19 form a retarget period that takes four times the
+      -- target timespan.
+      let net = (noBip94Net :: Network) {edaHeight = Just 1}
+          t = net.genesisHeader.timestamp
+          hs =
+            mineChain net net.genesisHeader $
+              [(t + 600 * i, 0x207fffff) | i <- [1 .. 9]]
+                ++ [(t + 6000 + 600 * i, 0x1f7fffff) | i <- [0 .. 8]]
+                ++ [(t + 30000, 0x1f7fffff)]
+          next = withChain net $ do
+            connectBlocks net myTime hs >>= either error (const (return ()))
+            par <- getBestBlockHeader
+            let bh = (par.header :: BlockHeader) {prev = headerHash par.header, timestamp = t + 30600}
+            nextWorkRequired net par bh
+      next `shouldBe` 0x2001ffff
   describe "block hash" $ do
     prop "encodes and decodes block hash" $
       forAll arbitraryBlockHash $ \h ->

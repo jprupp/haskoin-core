@@ -52,6 +52,7 @@ module Haskoin.Block.Headers
     afterLastCP,
     bip34,
     validVersion,
+    validTimeWarp,
     lastNoMinDiff,
     nextWorkRequired,
     nextEdaWorkRequired,
@@ -404,6 +405,9 @@ validBlock net t bb par pars bh sk = do
   unless (nt >= mt) $
     Left $
       "Block timestamp too early: " ++ show nt
+  unless (validTimeWarp net ng par.header.timestamp nt) $
+    Left $
+      "Block timestamp too early for retarget: " ++ show nt
   unless (afterLastCP net (bb.height) ng) $
     Left $
       "Rewriting pre-checkpoint chain: " ++ show ng
@@ -522,6 +526,21 @@ validVersion net height version
   | version < 4 = height < net.bip65Height
   | otherwise = True
 
+-- | BIP94 time warp rule: the first block of a retarget period may not be more
+-- than 600 seconds earlier than its parent.
+validTimeWarp ::
+  Network ->
+  -- | new child height
+  BlockHeight ->
+  -- | parent timestamp
+  Timestamp ->
+  -- | new child timestamp
+  Timestamp ->
+  Bool
+validTimeWarp net height parent child
+  | net.bip94 && height `mod` diffInterval net == 0 = child + 600 >= parent
+  | otherwise = True
+
 -- | Find last block with normal, as opposed to minimum difficulty (for test
 -- networks).
 lastNoMinDiff :: (BlockHeaders m) => Network -> BlockNode -> m BlockNode
@@ -573,8 +592,8 @@ nextWorkRequired net par bh = do
 nextEdaWorkRequired ::
   (BlockHeaders m) => Network -> BlockNode -> BlockHeader -> m Word32
 nextEdaWorkRequired net par bh
-  | par.height + 1 `mod` diffInterval net == 0 =
-      nextWorkRequired net par bh
+  | (par.height + 1) `mod` diffInterval net == 0 =
+      nextPowWorkRequired net par bh
   | mindiff = return (encodeCompact net.powLimit)
   | par.header.bits == encodeCompact net.powLimit =
       return (encodeCompact net.powLimit)
@@ -806,7 +825,7 @@ getSuitableBlock par = do
 nextPowWorkRequired ::
   (BlockHeaders m) => Network -> BlockNode -> BlockHeader -> m Word32
 nextPowWorkRequired net par bh
-  | par.height + 1 `mod` diffInterval net /= 0 =
+  | (par.height + 1) `mod` diffInterval net /= 0 =
       if net.minDiffBlocks
         then
           if ht > pt + delta
@@ -816,10 +835,14 @@ nextPowWorkRequired net par bh
               return d.header.bits
         else return par.header.bits
   | otherwise = do
-      let rh = par.height - diffInterval net - 1
-      a <- fromMaybe e1 <$> getAncestor rh par
-      let t = a.header.timestamp
-      return $ calcNextWork net par.header t
+      -- First block of the retarget period that ends with the parent.
+      f <- fromMaybe e1 <$> getAncestor (par.height - (diffInterval net - 1)) par
+      -- BIP94 bases the retarget on the first block of the period, which
+      -- cannot use the min-difficulty exception, instead of the last one.
+      let h
+            | net.bip94 = (par.header :: BlockHeader) {bits = f.header.bits}
+            | otherwise = par.header
+      return $ calcNextWork net h f.header.timestamp
   where
     e1 = error "Could not get ancestor for block header"
     pt = par.header.timestamp
