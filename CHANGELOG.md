@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 ### Changed
 
 - Update DNS seeds to match Bitcoin Core and Bitcoin Cash Node. Drop the Bitcoin ABC seeds, which now serve eCash.
+- This package now requires base16 2.0 and secp256k1-haskell 0.7.
 
 ### Fixed
 

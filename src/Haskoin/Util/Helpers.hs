@@ -135,18 +135,18 @@ encodeHexLazy = extractBase16 . LB16.encodeBase16
 
 decodeHex :: Text -> Maybe ByteString
 decodeHex t =
-  if isBase16 u8
-    then Just . decodeBase16 $ assertBase16 u8
-    else Nothing
+  case parseBase16 u8 of
+    Right b16 -> Just $ decodeBase16 b16
+    Left _ -> Nothing
   where
     u8 = T.encodeUtf8 t
 
 -- | Decode string of human-readable hex characters.
 decodeHexLazy :: LT.Text -> Maybe LB.ByteString
 decodeHexLazy t =
-  if LB16.isBase16 u8
-    then Just . LB16.decodeBase16 $ assertBase16 u8
-    else Nothing
+  case LB16.parseBase16 u8 of
+    Right b16 -> Just $ LB16.decodeBase16 b16
+    Left _ -> Nothing
   where
     u8 = LT.encodeUtf8 t
 
@@ -402,12 +402,8 @@ getList f = do
 --
 
 prepareContext :: (Ctx -> SpecWith a) -> SpecWith a
-prepareContext go = do
-  ctx <- runIO $ do
-    ctx <- createContext
-    randomizeContext ctx
-    return ctx
-  afterAll_ (destroyContext ctx) (go ctx)
+prepareContext go = go =<< runIO createContext
+  
 
 customCerealID :: (Eq a) => S.Get a -> S.Putter a -> a -> Bool
 customCerealID g p a = (S.runGet g . S.runPut . p) a == Right a

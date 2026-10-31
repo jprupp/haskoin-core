@@ -5,15 +5,22 @@
 
 packages:
 - completed:
-    hackage: secp256k1-haskell-1.5.0@sha256:009a0d57651a0f4eeeafd2b480a45fbc049015252fe92388ae4bb2115f765430,2077
+    hackage: base16-2.0@sha256:3cfa8002b7fd079be0552a116f27073e895b62a56d7a1cb7dd4f7a5ea3c8f6ae,3089
     pantry-tree:
-      sha256: 3c3cbc95e94347d2d37c3a74e3703fd0b65161bfe353e37caa3cf8ddf2018463
+      sha256: f9f7257c23f33cd2b9a837ec8b495d5880a6f2b5745b33f10b0aa450d22b5cbf
+      size: 1826
+  original:
+    hackage: base16-2.0
+- completed:
+    hackage: secp256k1-haskell-1.7.0@sha256:b235f096b362c8d18d0b1894d17aa4a35b1e8d851892605d0536ebdefe393593,2077
+    pantry-tree:
+      sha256: 25df8b13bd37f1690b09ecc24122d35eb98f7c64571a3fc30e2cd8d70f0c2ae8
       size: 881
   original:
-    hackage: secp256k1-haskell-1.5.0@sha256:009a0d57651a0f4eeeafd2b480a45fbc049015252fe92388ae4bb2115f765430,2077
+    hackage: secp256k1-haskell-1.7.0
 snapshots:
 - completed:
-    sha256: 6a751c3fdab86bdc1605c9983f0bceebb072f7ffecef2eaa3be3f8ff19807a47
-    size: 774375
-    url: https://raw.githubusercontent.com/commercialhaskell/stackage-snapshots/master/nightly/2026/8/31.yaml
-  original: nightly-2026-08-31
+    sha256: 5a365a790387c6fee9c1158c97f3701fdb34e523ba85730c8f0e45e1c4c30a7b
+    size: 780550
+    url: https://raw.githubusercontent.com/commercialhaskell/stackage-snapshots/master/nightly/2026/10/28.yaml
+  original: nightly-2026-10-28
