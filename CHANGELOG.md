@@ -5,7 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/)
 and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## [1.4.0] - 2026-10-31
+
+### Added
+
+- Bitcoin testnet4 network (`btctest4`) with the BIP94 block storm and time warp rules.
 
 ### Changed
 
@@ -14,19 +18,10 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 
 ### Fixed
 
+- Compute the difficulty retarget in `nextPowWorkRequired` and `nextEdaWorkRequired`, which never reached their retarget branches.
 - Fix the Bitcoin Cash DAA activation height, which had a typo (404031 instead of 504032).
 - Start the DAA one block later on Bitcoin Cash testnet and testnet4, to match Bitcoin Cash Node.
 - Fix the Bitcoin Cash ASERT half-life, which must be two days.
-
-## [1.4.0] - 2026-10-30
-
-### Added
-
-- Bitcoin testnet4 network (`btctest4`) with the BIP94 block storm and time warp rules.
-
-### Fixed
-
-- Compute the difficulty retarget in `nextPowWorkRequired` and `nextEdaWorkRequired`, which never reached their retarget branches.
 
 ## [1.3.0] - 2026-08-12
 
