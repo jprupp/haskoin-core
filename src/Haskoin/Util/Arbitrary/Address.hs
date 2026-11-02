@@ -68,7 +68,7 @@ arbitraryWitnessPubKeyAddress = witnessPubKeyAddress <$> arbitraryHash160
 
 -- | Arbitrary pay-to-witness script hash
 arbitraryWitnessScriptAddress :: Gen Address
-arbitraryWitnessScriptAddress = witnessPubKeyAddress <$> arbitraryHash160
+arbitraryWitnessScriptAddress = witnessScriptAddress <$> arbitraryHash256
 
 arbitraryWitnessAddress :: Gen Address
 arbitraryWitnessAddress = do

@@ -274,6 +274,9 @@ encodeOutput ctx s = Script $ case s of
   -- Pay to Script Hash Address
   (PayScriptHash h) ->
     [OP_HASH160, opPushData $ runPutS $ serialize h, OP_EQUAL]
+  -- Pay to 256-bit Script Hash Address
+  (PayScript32Hash h) ->
+    [OP_HASH256, opPushData $ runPutS $ serialize h, OP_EQUAL]
   -- Pay to Witness PubKey Hash Address
   (PayWitnessPKHash h) ->
     [OP_0, opPushData $ runPutS $ serialize h]

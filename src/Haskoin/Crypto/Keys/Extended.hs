@@ -427,16 +427,21 @@ xPubFP ctx =
 xPubAddr :: Ctx -> XPubKey -> Address
 xPubAddr ctx xkey = pubKeyAddr ctx (wrapPubKey True xkey.key)
 
--- | Compute a SegWit P2WPKH address for an extended public key.
+-- | Compute a SegWit P2WPKH address for an extended public key. Extended
+-- public keys are always compressed, so the address always exists.
 xPubWitnessAddr :: Ctx -> XPubKey -> Address
-xPubWitnessAddr ctx xkey =
-  pubKeyWitnessAddr ctx (wrapPubKey True xkey.key)
+xPubWitnessAddr ctx xkey = p2wpkhAddr (xPubKeyHash ctx xkey)
 
 -- | Compute a backwards-compatible SegWit P2SH-P2WPKH address for an extended
--- public key.
+-- public key. Extended public keys are always compressed, so the address
+-- always exists.
 xPubCompatWitnessAddr :: Ctx -> XPubKey -> Address
 xPubCompatWitnessAddr ctx xkey =
-  pubKeyCompatWitnessAddr ctx (wrapPubKey True xkey.key)
+  payToScriptAddress ctx (PayWitnessPKHash (xPubKeyHash ctx xkey))
+
+-- | HASH160 of the compressed public key of an extended public key.
+xPubKeyHash :: Ctx -> XPubKey -> Hash160
+xPubKeyHash ctx xkey = addressHash (marshal ctx (wrapPubKey True xkey.key))
 
 -- | Exports an extended private key to the BIP32 key export format ('Base58').
 xPrvExport :: Network -> XPrvKey -> Base58

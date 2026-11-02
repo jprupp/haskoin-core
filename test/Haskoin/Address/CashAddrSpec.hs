@@ -4,6 +4,8 @@
 module Haskoin.Address.CashAddrSpec (spec) where
 
 import Control.Monad
+import Data.ByteString (ByteString)
+import Data.ByteString qualified as B
 import Data.ByteString.Char8 qualified as Char8
 import Data.Maybe
 import Data.String.Conversions
@@ -127,6 +129,119 @@ spec = do
   describe "cashaddr larger test vectors" $
     forM_ (zip [0 ..] vectors) $ \(i, vec) ->
       it ("cashaddr test vector " <> show (i :: Int)) $ testCashAddr vec
+  describe "cashAddrDecode" $ do
+    it "decodes a lowercase address with its prefix" $
+      cashAddrDecode bch "bitcoincash:qpm2qsznhks23z7629mms6s4cwef74vcwvy22gdx6a"
+        `shouldBe` Just (0, hash20)
+    it "decodes an address without prefix" $
+      cashAddrDecode bch "qpm2qsznhks23z7629mms6s4cwef74vcwvy22gdx6a"
+        `shouldBe` Just (0, hash20)
+    it "decodes an address in all uppercase" $
+      cashAddrDecode bch "BITCOINCASH:QPM2QSZNHKS23Z7629MMS6S4CWEF74VCWVY22GDX6A"
+        `shouldBe` Just (0, hash20)
+    it "decodes a token-aware address with its type" $
+      cashAddrDecode bch "bitcoincash:zpm2qsznhks23z7629mms6s4cwef74vcwvrqekrq9w"
+        `shouldBe` Just (2, hash20)
+    it "rejects a mixed case prefix" $
+      cashAddrDecode bch "BitcoinCash:qpm2qsznhks23z7629mms6s4cwef74vcwvy22gdx6a"
+        `shouldBe` Nothing
+    it "rejects mixed case data" $
+      cashAddrDecode bch "bitcoincash:qpm2qsznhks23z7629mms6s4cwef74vcwvy22gdX6A"
+        `shouldBe` Nothing
+    it "rejects the prefix of another network" $
+      cashAddrDecode bch "bchtest:qpm2qsznhks23z7629mms6s4cwef74vcwvqcw003ap"
+        `shouldBe` Nothing
+    it "rejects an address of another network given without prefix" $
+      cashAddrDecode bch "qpm2qsznhks23z7629mms6s4cwef74vcwvqcw003ap"
+        `shouldBe` Nothing
+    it "rejects a non-ASCII look-alike character" $
+      -- U+212A in place of K
+      cashAddrDecode bch "BITCOINCASH:QPM2QSZNH\x212AS23Z7629MMS6S4CWEF74VCWVY22GDX6A"
+        `shouldBe` Nothing
+    it "rejects padding bits that are not zero" $
+      cashAddrDecode bch "bitcoincash:qpm2qsznhks23z7629mms6s4cwef74vcw0c0g40rx7"
+        `shouldBe` Nothing
+    it "rejects an extra zero group" $
+      cashAddrDecode bch "bitcoincash:qpm2qsznhks23z7629mms6s4cwef74vcwvq5xhgekz9"
+        `shouldBe` Nothing
+    it "rejects a bad checksum" $
+      cashAddrDecode bch "bitcoincash:qpm2qsznhks23z7629mms6s4cwef74vcwvy22gdx6q"
+        `shouldBe` Nothing
+    it "has no result on a network without CashAddr" $
+      cashAddrDecode btc "bitcoincash:qpm2qsznhks23z7629mms6s4cwef74vcwvy22gdx6a"
+        `shouldBe` Nothing
+  describe "cashAddrEncode" $ do
+    it "encodes a P2PKH hash" $
+      cashAddrEncode bch 0 hash20
+        `shouldBe` Just "bitcoincash:qpm2qsznhks23z7629mms6s4cwef74vcwvy22gdx6a"
+    it "encodes a token-aware P2SH32 hash" $
+      cashAddrEncode bch 3 hash32
+        `shouldBe` Just "bitcoincash:rvvxx9puznz3v6qyh5vjqv6kmgfkexzk0rx56faphrrr99syjqexy30vcqxv4"
+    it "uses the prefix of the network" $ do
+      cashAddrEncode bchTest 0 hash20
+        `shouldBe` Just "bchtest:qpm2qsznhks23z7629mms6s4cwef74vcwvqcw003ap"
+      cashAddrEncode bchRegTest 0 hash20
+        `shouldBe` Just "bchreg:qpm2qsznhks23z7629mms6s4cwef74vcwv6ycwvz78"
+    it "rejects a type above 15" $
+      cashAddrEncode bch 16 hash20 `shouldBe` Nothing
+    it "rejects a hash with a length the standard does not allow" $
+      cashAddrEncode bch 0 (B.replicate 21 1) `shouldBe` Nothing
+    it "has no result on a network without CashAddr" $
+      cashAddrEncode btc 0 hash20 `shouldBe` Nothing
+  describe "cash32 low level" $ do
+    it "cash32encode writes the prefix, the data and the checksum" $ do
+      cash32encode "prefix" "" `shouldBe` "prefix:x64nx6hz"
+      cash32encode "bitcoincash" (B.cons 0 hash20)
+        `shouldBe` "bitcoincash:qpm2qsznhks23z7629mms6s4cwef74vcwvy22gdx6a"
+    it "cash32decode needs a prefix" $ do
+      cash32decode "x64nx6hz" `shouldBe` Nothing
+      cash32decode ":x64nx6hz" `shouldBe` Nothing
+    it "cash32decode rejects mixed case" $
+      cash32decode "Prefix:x64nx6hz" `shouldBe` Nothing
+    it "cash32decode rejects a non-ASCII prefix" $
+      cash32decode "pr\x00e9fix:x64nx6hz" `shouldBe` Nothing
+    it "cash32decode rejects data shorter than a checksum" $
+      cash32decode "prefix:x64nx6h" `shouldBe` Nothing
+    it "cash32encodeType and cash32decodeType carry the type and the length" $ do
+      cash32encodeType "pref" 1 hashF5
+        `shouldBe` Just "pref:pr6m7j9njldwwzlg9v7v53unlr4jkmx6ey65nvtks5"
+      cash32decodeType "pref:pr6m7j9njldwwzlg9v7v53unlr4jkmx6ey65nvtks5"
+        `shouldBe` Just ("pref", 1, hashF5)
+    it "cash32encodeType rejects a length the standard does not allow" $
+      cash32encodeType "pref" 1 (B.replicate 21 1) `shouldBe` Nothing
+    it "cash32decodeType rejects mixed case" $
+      cash32decodeType "pref:pr6m7j9njldwwzlg9v7v53unlr4jkmx6ey65nvtkS5" `shouldBe` Nothing
+  describe "version byte" $ do
+    it "decodeVersionByte splits the type and the hash size" $ do
+      -- type in the high four bits, size code in the low three bits
+      decodeVersionByte 0 `shouldBe` Just (0, 20)
+      decodeVersionByte 11 `shouldBe` Just (1, 32)
+      decodeVersionByte 16 `shouldBe` Just (2, 20)
+      decodeVersionByte 127 `shouldBe` Just (15, 64)
+    it "decodeVersionByte rejects a set high bit" $
+      decodeVersionByte 128 `shouldBe` Nothing
+    it "encodeVersionByte packs the type and the hash size" $ do
+      encodeVersionByte 0 20 `shouldBe` Just 0
+      encodeVersionByte 1 32 `shouldBe` Just 11
+      encodeVersionByte 15 64 `shouldBe` Just 127
+    it "encodeVersionByte rejects a type above 15" $
+      encodeVersionByte 16 20 `shouldBe` Nothing
+    it "encodeVersionByte rejects a hash size the standard does not allow" $
+      encodeVersionByte 0 21 `shouldBe` Nothing
+
+{- Fixtures -}
+
+-- | HASH160 behind the Bitcoin Cash translation vectors above.
+hash20 :: ByteString
+hash20 = fromJust $ decodeHex "76a04053bda0a88bda5177b86a15c3b29f559873"
+
+-- | SHA256 behind the BIP-173 P2WSH vector.
+hash32 :: ByteString
+hash32 = fromJust $ decodeHex "1863143c14c5166804bd19203356da136c985678cd4d27a1b8c6329604903262"
+
+-- | Hash from the CashAddr specification vectors.
+hashF5 :: ByteString
+hashF5 = fromJust $ decodeHex "F5BF48B397DAE70BE82B3CCA4793F8EB2B6CDAC9"
 
 {- Various utilities -}
 

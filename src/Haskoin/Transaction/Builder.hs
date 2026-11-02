@@ -554,7 +554,9 @@ verifyStdInput net ctx tx i so0 val
         Nothing,
         SpendPKHash (TxSignature sig sh) pub
         ) ->
-          let keytest = pubKeyWitnessAddr ctx pub == p2wpkhAddr h
+          -- Compare the key hash only. An uncompressed key is non-standard
+          -- here but still valid by consensus, so verification accepts it.
+          let keytest = pubKeyAddr ctx pub == p2pkhAddr h
               sighash = theTxSigHash so sh Nothing
               pkpoint = pub.point
               verify = verifyHashSig ctx sighash sig pkpoint
