@@ -17,33 +17,64 @@
 -- Portability : POSIX
 --
 -- Partially signed Bitcoin transactions, the format of
--- [BIP 174](https://github.com/bitcoin/bips/blob/master/bip-0174.mediawiki).
+-- [BIP 174](https://github.com/bitcoin/bips/blob/master/bip-0174.mediawiki),
+-- in its version 0 and in version 2, the version of
+-- [BIP 370](https://github.com/bitcoin/bips/blob/master/bip-0370.mediawiki).
 --
 -- A PSBT is five magic bytes, then maps of keys and values: one global map,
--- which holds the unsigned transaction, then one map per input and one per
--- output of that transaction. A key is a type and some data. The spec gives
--- the keys and values of the fields it defines, and leaves the type 0xFC to
--- proprietary fields, under an identifier of the software that writes them.
+-- then one map per input and one per output of the transaction. A key is a
+-- type and some data. The spec gives the keys and values of the fields it
+-- defines, and leaves the type 0xFC to proprietary fields, under an
+-- identifier of the software that writes them.
+--
+-- In version 0, the global map holds the unsigned transaction. In version
+-- 2, the maps hold the transaction field by field: its version and a
+-- fallback lock time in the global map, the output each input spends and
+-- its sequence in the map of the input, the amount and script of each
+-- output in its map, so that inputs and outputs can be added. The lock
+-- time is the one the inputs require, or the fallback. Here a PSBT of
+-- either version has its unsigned transaction, 'unsignedTx': the one of
+-- the global map, or the one the fields describe.
 --
 -- The maps are kept as they are read, byte for byte, so that every field
 -- passes through, known or not. A map is written with its keys in order, as
 -- Bitcoin Core writes it. A PSBT that breaks the spec is refused when it is
 -- read: a key out of shape, a key twice in a map, a value that does not
--- decode, bytes after the last map.
+-- decode, a field of the other version, a field version 2 requires
+-- missing, bytes after the last map.
 --
 -- The fields the spec defines are read and written with the functions
 -- below. The roles of the spec are here too: a creator ('psbtOf'), a
--- combiner ('combinePsbt'), a signer ('signPsbt'), a finalizer
--- ('finalizePsbt') and a transaction extractor ('psbtTransaction'). An
--- updater is the functions that insert fields.
+-- constructor ('addInput', 'addOutput'), a combiner ('combinePsbt'), a
+-- signer ('signPsbt'), a finalizer ('finalizePsbt') and a transaction
+-- extractor ('psbtTransaction'). An updater is the functions that insert
+-- fields, and 'setInputSequence'.
 module Haskoin.Transaction.Psbt
   ( -- * A PSBT
     Psbt (..),
+    PsbtVersion (..),
     Key (..),
     PsbtMap,
     psbtOf,
+    psbtOfMaps,
+    withVersion,
+    psbtId,
     combinePsbt,
     psbtTransaction,
+
+    -- * The inputs and outputs of version 2
+    addInput,
+    addOutput,
+    setInputSequence,
+    Modifiable (..),
+    txModifiable,
+    insertTxModifiable,
+    deleteTxModifiable,
+    fallbackLockTime,
+    requiredTimeLockTime,
+    insertRequiredTimeLockTime,
+    requiredHeightLockTime,
+    insertRequiredHeightLockTime,
 
     -- * Bytes and text
     psbtMagic,
@@ -101,6 +132,7 @@ module Haskoin.Transaction.Psbt
     keySigner,
     xPrvSigner,
     signPsbt,
+    afterSignature,
 
     -- * Finalizing
     finalizePsbt,
@@ -112,7 +144,7 @@ import Control.DeepSeq (NFData)
 import Control.Monad (ap, forM, forM_, guard, replicateM, unless, when, zipWithM)
 import Crypto.Secp256k1 (Ctx, SecKey, derivePubKey)
 import Data.Bifunctor (first)
-import Data.Bits (shiftL, (.|.))
+import Data.Bits (shiftL, testBit, (.&.), (.|.))
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as B
 import Data.Base64.Types (extractBase64)
@@ -121,7 +153,7 @@ import Data.Char (toUpper)
 import Data.List (stripPrefix)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes, fromMaybe, listToMaybe, mapMaybe)
+import Data.Maybe (catMaybes, fromMaybe, isJust, listToMaybe, mapMaybe)
 import Data.Serialize qualified as S
 import Data.Word (Word32, Word64, Word8)
 import GHC.Generics (Generic)
@@ -155,11 +187,27 @@ data Key = Key
 -- as Bitcoin Core writes it.
 type PsbtMap = Map Key ByteString
 
--- | A PSBT: the unsigned transaction, the other fields of the global map,
--- and the maps of the inputs and of the outputs, one each, in the order of
--- the transaction
+-- | The version of a PSBT: 0, the version of BIP 174, whose global map
+-- holds the unsigned transaction, or 2, the version of BIP 370, whose maps
+-- hold the transaction field by field, so that inputs and outputs can be
+-- added. There is no version 1.
+data PsbtVersion = Version0 | Version2
+  deriving (Eq, Ord, Show, Read, Generic)
+  deriving anyclass (NFData)
+
+versionNumber :: PsbtVersion -> Word32
+versionNumber Version0 = 0
+versionNumber Version2 = 2
+
+-- | A PSBT: its version, the unsigned transaction, the global map, and the
+-- maps of the inputs and of the outputs, one each, in the order of the
+-- transaction. In version 0, the global map is kept without the unsigned
+-- transaction. In version 2, the maps keep the fields that describe the
+-- transaction, and the unsigned transaction is the one they describe, with
+-- the lock time they determine.
 data Psbt = Psbt
-  { unsignedTx :: !Tx,
+  { version :: !PsbtVersion,
+    unsignedTx :: !Tx,
     globals :: !PsbtMap,
     inputs :: ![PsbtMap],
     outputs :: ![PsbtMap]
@@ -168,24 +216,100 @@ data Psbt = Psbt
   deriving anyclass (NFData)
 
 -- | The PSBT of a transaction, with nothing else, as the creator of the
--- spec makes it: the transaction without its input scripts and witness,
--- and an empty map per input and per output
+-- spec makes it, in version 0: the transaction without its input scripts
+-- and witness, and an empty map per input and per output. 'withVersion'
+-- makes it one of version 2.
 psbtOf :: Tx -> Psbt
 psbtOf tx =
   Psbt
-    { unsignedTx = Tx tx.version [TxIn input.outpoint B.empty input.sequence | input <- tx.inputs] tx.outputs [] tx.locktime,
+    { version = Version0,
+      unsignedTx = Tx tx.version [TxIn input.outpoint B.empty input.sequence | input <- tx.inputs] tx.outputs [] tx.locktime,
       globals = Map.empty,
       inputs = Map.empty <$ tx.inputs,
       outputs = Map.empty <$ tx.outputs
     }
 
+-- | The PSBT whose maps these are, as they are in its bytes: the global
+-- map names the version, and holds the unsigned transaction in version 0.
+-- The maps are checked against the spec of the version, and in version 2
+-- the transaction is read from their fields.
+psbtOfMaps :: PsbtMap -> [PsbtMap] -> [PsbtMap] -> Either String Psbt
+psbtOfMaps globals inputs outputs = do
+  (version, inputCount, outputCount) <- countsOf globals
+  unless (length inputs == inputCount) $
+    Left ("The PSBT has " <> show (length inputs) <> " inputs, and its global map counts " <> show inputCount)
+  unless (length outputs == outputCount) $
+    Left ("The PSBT has " <> show (length outputs) <> " outputs, and its global map counts " <> show outputCount)
+  forM_ (zip [0 :: Int ..] inputs) $ \(i, m) -> checkMap ("input " <> show i) version inputFields m
+  forM_ (zip [0 :: Int ..] outputs) $ \(i, m) -> checkMap ("output " <> show i) version outputFields m
+  tx <- case version of
+    Version0 -> unsignedTxOf globals
+    Version2 -> transactionOf globals inputs outputs
+  return $ Psbt version tx (Map.delete unsignedTxKey globals) inputs outputs
+
+-- | The PSBT in the version given, as BIP 370 converts one. To version 2:
+-- the transaction goes in the fields of the maps, its lock time as the
+-- fallback. To version 0: the fields of version 2 leave the maps, and the
+-- transaction keeps the lock time they determined.
+withVersion :: PsbtVersion -> Psbt -> Psbt
+withVersion v psbt
+  | v == psbt.version = psbt
+  | v == Version2 =
+      Psbt
+        Version2
+        tx
+        (withTxFields tx (insertPlainField versionType (word32le 2) psbt.globals))
+        (zipWith withInputFields tx.inputs psbt.inputs)
+        (zipWith withOutputFields tx.outputs psbt.outputs)
+  | otherwise =
+      Psbt
+        Version0
+        tx
+        (without globalV2Types (deletePlainField versionType psbt.globals))
+        (without inputV2Types <$> psbt.inputs)
+        (without outputV2Types <$> psbt.outputs)
+  where
+    tx = psbt.unsignedTx
+    without :: [Word8] -> PsbtMap -> PsbtMap
+    without types = Map.filterWithKey (\key _ -> key.keyType `notElem` types)
+
+-- | What identifies a PSBT: the id of its unsigned transaction. In version
+-- 2 the sequence of every input is taken as 0 for it, as BIP 370 says,
+-- since an updater may change the sequences.
+psbtId :: Psbt -> TxHash
+psbtId psbt = txHash $ case psbt.version of
+  Version0 -> tx
+  Version2 -> Tx tx.version [TxIn input.outpoint input.script 0 | input <- tx.inputs] tx.outputs tx.witness tx.locktime
+  where
+    tx = psbt.unsignedTx
+
 -- | The PSBT with the fields of both, as the combiner of the spec makes
--- it. Both must be of the same transaction. A field both have, with
--- different values, keeps the value of the first.
+-- it. Both must be of the same version and of the same transaction. A
+-- field both have, with different values, keeps the value of the first.
+-- The flags of version 2 are combined as Bitcoin Core combines them:
+-- inputs and outputs stay modifiable only when both say so, and a
+-- SIGHASH_SINGLE signature of either is kept.
 combinePsbt :: Psbt -> Psbt -> Either String Psbt
 combinePsbt a b = do
-  unless (a.unsignedTx == b.unsignedTx) $ Left "The PSBTs are not of the same transaction"
-  return $ Psbt a.unsignedTx (Map.union a.globals b.globals) (zipWith Map.union a.inputs b.inputs) (zipWith Map.union a.outputs b.outputs)
+  unless (a.version == b.version) $ Left "The PSBTs are not of the same version"
+  unless (psbtId a == psbtId b) $ Left "The PSBTs are not of the same transaction"
+  let globals = combinedFlags (Map.union a.globals b.globals)
+      inputs = zipWith Map.union a.inputs b.inputs
+      outputs = zipWith Map.union a.outputs b.outputs
+  case a.version of
+    Version0 -> return $ Psbt Version0 a.unsignedTx globals inputs outputs
+    Version2 -> (\tx -> Psbt Version2 tx globals inputs outputs) <$> transactionOf globals inputs outputs
+  where
+    combinedFlags globals = case (flagsOf a, flagsOf b) of
+      (Nothing, Nothing) -> globals
+      (x, y) ->
+        let fx = fromMaybe noFlags x
+            fy = fromMaybe noFlags y
+         in insertTxModifiable
+              (Modifiable (fx.inputsModifiable && fy.inputsModifiable) (fx.outputsModifiable && fy.outputsModifiable) (fx.hasSigHashSingle || fy.hasSigHashSingle) (fx.undefinedBits .&. fy.undefinedBits))
+              globals
+    flagsOf :: Psbt -> Maybe Modifiable
+    flagsOf psbt = either (const Nothing) id (txModifiable psbt.globals)
 
 -- | The transaction of a PSBT with the final script and witness of every
 -- input that has them, as the transaction extractor of the spec builds
@@ -200,11 +324,105 @@ psbtTransaction psbt = do
       witness = if all null stacks then [] else stacks
   return $ Tx psbt.unsignedTx.version (fst <$> finals) psbt.unsignedTx.outputs witness psbt.unsignedTx.locktime
 
+{- The inputs and outputs of version 2 -}
+
+-- | The PSBT with an input added at the end, as the constructor of BIP 370
+-- adds one: the output it spends and its sequence from the input given,
+-- and the fields of the map given, such as the lock time it requires. A
+-- PSBT of version 0 takes none, nor one whose inputs are not modifiable.
+-- A lock time the input requires must fit the other inputs, and must not
+-- change the lock time of the transaction once an input is signed. Added
+-- at the end, the input leaves every SIGHASH_SINGLE signature paired with
+-- its output.
+addInput :: TxIn -> PsbtMap -> Psbt -> Either String Psbt
+addInput input m psbt = do
+  flags <- modifiableOf psbt
+  unless flags.inputsModifiable $ Left "The inputs of the PSBT may not be modified"
+  when (any ((== input.outpoint) . (.outpoint)) psbt.unsignedTx.inputs) $
+    Left "An input of the PSBT spends that output already"
+  let inputs = psbt.inputs <> [withInputFields input m]
+      globals = withCounts (length inputs) (length psbt.outputs) psbt.globals
+  tx <- transactionOf globals inputs psbt.outputs
+  when (any hasSignatures psbt.inputs && tx.locktime /= psbt.unsignedTx.locktime) $
+    Left "An input is signed already: the lock time may not change"
+  return $ Psbt Version2 tx globals inputs psbt.outputs
+
+-- | The PSBT with an output added at the end, as the constructor of BIP
+-- 370 adds one: its amount and script from the output given, and the
+-- fields of the map given. A PSBT of version 0 takes none, nor one whose
+-- outputs are not modifiable.
+addOutput :: TxOut -> PsbtMap -> Psbt -> Either String Psbt
+addOutput output m psbt = do
+  flags <- modifiableOf psbt
+  unless flags.outputsModifiable $ Left "The outputs of the PSBT may not be modified"
+  let outputs = psbt.outputs <> [withOutputFields output m]
+      globals = withCounts (length psbt.inputs) (length outputs) psbt.globals
+  tx <- transactionOf globals psbt.inputs outputs
+  return $ Psbt Version2 tx globals psbt.inputs outputs
+
+-- | The flags of a PSBT of version 2, none set when it has no field of
+-- them. A PSBT of version 0 takes no input or output.
+modifiableOf :: Psbt -> Either String Modifiable
+modifiableOf psbt = do
+  unless (psbt.version == Version2) $ Left "A PSBT of version 0 takes no input or output: its transaction is fixed"
+  fromMaybe noFlags <$> txModifiable psbt.globals
+
+-- | Whether an input has a signature: one that is not final, or its final
+-- script or witness
+hasSignatures :: PsbtMap -> Bool
+hasSignatures m = hasPartialSignatures m || isFinal m
+
+-- | The PSBT with the sequence of the input at the index set, as an
+-- updater of BIP 370 may set one. The sequences of a PSBT of version 0
+-- are in its unsigned transaction, which is fixed.
+setInputSequence :: Int -> Word32 -> Psbt -> Either String Psbt
+setInputSequence i sequence' psbt = do
+  unless (psbt.version == Version2) $ Left "The sequences of a PSBT of version 0 are in its unsigned transaction, which is fixed"
+  unless (i >= 0 && i < length psbt.inputs) $ Left ("The PSBT has no input " <> show i)
+  let inputs = [if j == i then insertPlainField sequenceType (word32le sequence') m else m | (j, m) <- zip [0 ..] psbt.inputs]
+  tx <- transactionOf psbt.globals inputs psbt.outputs
+  return $ Psbt Version2 tx psbt.globals inputs psbt.outputs
+
+-- | The global map with the fields of version 2 that describe the
+-- transaction: its version, its lock time as the fallback, and the number
+-- of its inputs and outputs
+withTxFields :: Tx -> PsbtMap -> PsbtMap
+withTxFields tx =
+  insertPlainField txVersionType (word32le tx.version)
+    . insertPlainField fallbackLockTimeType (word32le tx.locktime)
+    . withCounts (length tx.inputs) (length tx.outputs)
+
+withCounts :: Int -> Int -> PsbtMap -> PsbtMap
+withCounts inputCount outputCount =
+  insertPlainField inputCountType (compactSize (fromIntegral inputCount))
+    . insertPlainField outputCountType (compactSize (fromIntegral outputCount))
+
+-- | The map of an input with the fields of version 2 that describe it: the
+-- id of the transaction it spends from, the index of the output, and its
+-- sequence
+withInputFields :: TxIn -> PsbtMap -> PsbtMap
+withInputFields input =
+  insertPlainField prevTxidType (S.encode input.outpoint.hash)
+    . insertPlainField outputIndexType (word32le input.outpoint.index)
+    . insertPlainField sequenceType (word32le input.sequence)
+
+-- | The map of an output with the fields of version 2 that describe it:
+-- its amount and its script
+withOutputFields :: TxOut -> PsbtMap -> PsbtMap
+withOutputFields output =
+  insertPlainField amountType (word64le output.value)
+    . insertPlainField outScriptType output.script
+
 {- The types of the spec -}
 
-unsignedTxType, xpubType, versionType :: Word8
+unsignedTxType, xpubType, txVersionType, fallbackLockTimeType, inputCountType, outputCountType, txModifiableType, versionType :: Word8
 unsignedTxType = 0x00
 xpubType = 0x01
+txVersionType = 0x02
+fallbackLockTimeType = 0x03
+inputCountType = 0x04
+outputCountType = 0x05
+txModifiableType = 0x06
 versionType = 0xfb
 
 nonWitnessUtxoType, witnessUtxoType, partialSigType, sigHashTypeType, inRedeemScriptType, inWitnessScriptType, inDerivationType, finalScriptSigType, finalScriptWitnessType :: Word8
@@ -218,10 +436,30 @@ inDerivationType = 0x06
 finalScriptSigType = 0x07
 finalScriptWitnessType = 0x08
 
-outRedeemScriptType, outWitnessScriptType, outDerivationType :: Word8
+prevTxidType, outputIndexType, sequenceType, requiredTimeType, requiredHeightType :: Word8
+prevTxidType = 0x0e
+outputIndexType = 0x0f
+sequenceType = 0x10
+requiredTimeType = 0x11
+requiredHeightType = 0x12
+
+outRedeemScriptType, outWitnessScriptType, outDerivationType, amountType, outScriptType :: Word8
 outRedeemScriptType = 0x00
 outWitnessScriptType = 0x01
 outDerivationType = 0x02
+amountType = 0x03
+outScriptType = 0x04
+
+-- | The types of the fields of version 2, which version 0 excludes, by
+-- map
+globalV2Types, inputV2Types, outputV2Types :: [Word8]
+globalV2Types = [txVersionType, fallbackLockTimeType, inputCountType, outputCountType, txModifiableType]
+inputV2Types = [prevTxidType, outputIndexType, sequenceType, requiredTimeType, requiredHeightType]
+outputV2Types = [amountType, outScriptType]
+
+-- | The lock times from this value are times, below it heights
+lockTimeThreshold :: Word32
+lockTimeThreshold = 500000000
 
 proprietaryType :: Word8
 proprietaryType = 0xfc
@@ -240,13 +478,15 @@ psbtMagic = B.pack [0x70, 0x73, 0x62, 0x74, 0xff]
 isPsbt :: ByteString -> Bool
 isPsbt = B.isPrefixOf psbtMagic
 
--- | The bytes of a PSBT: the magic, the global map with the unsigned
--- transaction first, then the maps of the inputs and of the outputs
+-- | The bytes of a PSBT: the magic, the global map, with the unsigned
+-- transaction in version 0, then the maps of the inputs and of the outputs
 encodePsbt :: Psbt -> ByteString
 encodePsbt psbt =
   B.concat $ psbtMagic : encodeMap globals : (encodeMap <$> psbt.inputs) <> (encodeMap <$> psbt.outputs)
   where
-    globals = Map.insert unsignedTxKey (S.encode psbt.unsignedTx) psbt.globals
+    globals = case psbt.version of
+      Version0 -> Map.insert unsignedTxKey (S.encode psbt.unsignedTx) psbt.globals
+      Version2 -> psbt.globals
 
 -- | A map: each key and value after its length, the keys in order, then a
 -- zero byte
@@ -266,6 +506,10 @@ compactSize = S.encode . VarInt
 -- | A 32-bit integer, little-endian
 word32le :: Word32 -> ByteString
 word32le = S.runPut . S.putWord32le
+
+-- | A 64-bit integer, little-endian
+word64le :: Word64 -> ByteString
+word64le = S.runPut . S.putWord64le
 
 -- | The PSBT the bytes hold, or why they hold none: not a PSBT, or one that
 -- breaks the spec
@@ -378,25 +622,43 @@ psbtParser = do
   magic <- bytesOf 5 "the magic bytes"
   unless (magic == psbtMagic) $ refuse "Not a PSBT: the bytes do not start with the magic bytes of BIP 174"
   globals <- mapOf "the global map"
-  -- The fields are checked before the transaction is looked for: a PSBT of
-  -- another version holds none, and its version is what to say
-  let others = Map.delete unsignedTxKey globals
-  either refuse return (checkMap "the global map" globalFields others)
-  tx <- either refuse return (unsignedTxOf globals)
-  inputs <- forM [0 .. length tx.inputs - 1] $ \i -> do
-    let what = "input " <> show i
-    m <- mapOf what
-    either refuse return (checkMap what inputFields m)
-    return m
-  outputs <- forM [0 .. length tx.outputs - 1] $ \i -> do
-    let what = "output " <> show i
-    m <- mapOf what
-    either refuse return (checkMap what outputFields m)
-    return m
-  return Psbt {unsignedTx = tx, globals = others, inputs = inputs, outputs = outputs}
+  (_, inputCount, outputCount) <- either refuse return (countsOf globals)
+  inputs <- forM [0 .. inputCount - 1] $ \i -> mapOf ("input " <> show i)
+  outputs <- forM [0 .. outputCount - 1] $ \i -> mapOf ("output " <> show i)
+  either refuse return (psbtOfMaps globals inputs outputs)
 
--- | The unsigned transaction of the global map, which must be there, in
--- the serialization without witness, with no input script
+-- | The version a global map names, and the number of inputs and of
+-- outputs: those of the unsigned transaction in version 0, those the map
+-- counts in version 2. The map is checked against the spec of the version
+-- first.
+countsOf :: PsbtMap -> Either String (PsbtVersion, Int, Int)
+countsOf globals = do
+  version <- versionOf globals
+  checkMap "the global map" version globalFields globals
+  case version of
+    Version0 -> do
+      tx <- unsignedTxOf globals
+      return (Version0, length tx.inputs, length tx.outputs)
+    Version2 -> do
+      _ <- requiredField "The global map" "transaction version" txVersionType decodeWord32le globals
+      inputCount <- requiredField "The global map" "input count" inputCountType decodeCount globals
+      outputCount <- requiredField "The global map" "output count" outputCountType decodeCount globals
+      return (Version2, inputCount, outputCount)
+
+-- | The version the global map names with PSBT_GLOBAL_VERSION: 0 when it
+-- names none
+versionOf :: PsbtMap -> Either String PsbtVersion
+versionOf globals = case plainField versionType globals of
+  Nothing -> Right Version0
+  Just bytes -> do
+    n <- first ("The global map: the value of the key 0xfb " <>) (decodeWord32le bytes)
+    case n of
+      0 -> Right Version0
+      2 -> Right Version2
+      _ -> Left ("The PSBT is of version " <> show n <> ": only versions 0 and 2 are supported")
+
+-- | The unsigned transaction of the global map of version 0, which must be
+-- there, in the serialization without witness, with no input script
 unsignedTxOf :: PsbtMap -> Either String Tx
 unsignedTxOf globals = do
   bytes <- maybe (Left "The global map has no unsigned transaction") Right (Map.lookup unsignedTxKey globals)
@@ -406,6 +668,60 @@ unsignedTxOf globals = do
   unless (all (B.null . (.script)) tx.inputs) $
     Left "The unsigned transaction has an input with a script"
   return tx
+
+-- | The transaction the fields of version 2 describe: its version from
+-- the global map, the lock time the inputs require or the fallback, an
+-- input per input map from the id of the transaction it spends from, the
+-- index of the output and the sequence, final when the map has none, and
+-- an output per output map from its amount and script
+transactionOf :: PsbtMap -> [PsbtMap] -> [PsbtMap] -> Either String Tx
+transactionOf globals inputs outputs = do
+  version <- requiredField "The global map" "transaction version" txVersionType decodeWord32le globals
+  locktime <- lockTimeOf globals inputs
+  txInputs <- forM (zip [0 :: Int ..] inputs) $ \(i, m) -> do
+    let place = "Input " <> show i
+    hash <- requiredField place "previous transaction id" prevTxidType decodeTxHash m
+    index <- requiredField place "output index" outputIndexType decodeWord32le m
+    sequence' <- fromMaybe 0xffffffff <$> optionalField "The sequence" sequenceType decodeWord32le m
+    return (TxIn (OutPoint hash index) B.empty sequence')
+  txOutputs <- forM (zip [0 :: Int ..] outputs) $ \(i, m) -> do
+    let place = "Output " <> show i
+    value <- requiredField place "amount" amountType decodeWord64le m
+    script <- requiredField place "script" outScriptType Right m
+    return (TxOut value script)
+  return (Tx version txInputs txOutputs [] locktime)
+
+-- | The lock time of a PSBT of version 2, as BIP 370 determines it. An
+-- input may require a lock time as a height, as a time, or either, with
+-- both. When no input requires one, it is the fallback lock time of the
+-- global map, 0 without one. Otherwise it is the greatest of the kind every
+-- input that requires one takes, a height when every one takes a height.
+-- When some inputs take a height only and others a time only, no lock time
+-- fits them.
+lockTimeOf :: PsbtMap -> [PsbtMap] -> Either String Word32
+lockTimeOf globals inputs = do
+  fallback <- fromMaybe 0 <$> fallbackLockTime globals
+  required <- forM inputs $ \m -> (,) <$> requiredTimeLockTime m <*> requiredHeightLockTime m
+  let asking = [r | r@(time, height) <- required, isJust time || isJust height]
+      heights = [height | (_, Just height) <- asking]
+      times = [time | (Just time, _) <- asking]
+  case () of
+    _
+      | null asking -> Right fallback
+      | length heights == length asking -> Right (maximum heights)
+      | length times == length asking -> Right (maximum times)
+      | otherwise -> Left "No lock time fits every input: some require a height, others a time"
+
+-- | A field a map must have, decoded. Its absence, or a value out of shape,
+-- names the map and the field.
+requiredField :: String -> String -> Word8 -> (ByteString -> Either String a) -> PsbtMap -> Either String a
+requiredField what name t decode m = do
+  bytes <- maybe (Left (what <> " has no " <> name)) Right (plainField t m)
+  first ((what <> ": the " <> name <> " ") <>) (decode bytes)
+
+-- | A field a map may have, decoded, named in a refusal
+optionalField :: String -> Word8 -> (ByteString -> Either String a) -> PsbtMap -> Either String (Maybe a)
+optionalField name t decode = traverse (first ((name <> " ") <>) . decode) . plainField t
 
 -- | A value decoded from all the bytes given, or a refusal naming it
 decodeFully :: (S.Serialize a) => String -> ByteString -> Either String a
@@ -431,21 +747,39 @@ showKey key =
 -- public key
 data KeyShape = NoData | PublicKeyData | XpubData
 
--- | The fields the spec defines for a map, by type: the shape of their
--- keys, and a check of their values given the data of the key
-type Fields = Map Word8 (KeyShape, ByteString -> ByteString -> Either String ())
+-- | A field the spec defines: the shape of its key, the versions of the
+-- PSBT that may hold it, and a check of its value given the data of the
+-- key
+data Field = Field
+  { shape :: KeyShape,
+    versions :: [PsbtVersion],
+    checkValue :: ByteString -> ByteString -> Either String ()
+  }
+
+-- | The fields the spec defines for a map, by type
+type Fields = Map Word8 Field
+
+-- | A field of both versions whose key carries no data
+plain :: (ByteString -> Either String ()) -> Field
+plain = Field NoData [Version0, Version2] . const
+
+-- | A field of version 2 only whose key carries no data
+plain2 :: (ByteString -> Either String ()) -> Field
+plain2 = Field NoData [Version2] . const
 
 -- | Check every key of a map against the spec: the keys of the fields it
--- defines must have their shape and their values must decode, and a
--- proprietary key must have its identifier and subtype. Other keys are
--- not the spec's to check.
-checkMap :: String -> Fields -> PsbtMap -> Either String ()
-checkMap what fields m = forM_ (Map.toList m) $ \(key, value) ->
+-- defines must be of the version, must have their shape and their values
+-- must decode, and a proprietary key must have its identifier and subtype.
+-- Other keys are not the spec's to check.
+checkMap :: String -> PsbtVersion -> Fields -> PsbtMap -> Either String ()
+checkMap what version fields m = forM_ (Map.toList m) $ \(key, value) ->
   first ((capital what <> ": ") <>) $
     case Map.lookup key.keyType fields of
-      Just (shape, checkValue) -> do
-        checkShape shape key
-        first (("the value of the key " <> showKey key <> " ") <>) $ checkValue key.keyData value
+      Just field -> do
+        unless (version `elem` field.versions) $
+          Left ("the key " <> showKey key <> " is not of PSBT version " <> show (versionNumber version))
+        checkShape field.shape key
+        first (("the value of the key " <> showKey key <> " ") <>) $ field.checkValue key.keyData value
       Nothing
         | key.keyType == proprietaryType -> () <$ proprietaryOf key
         | otherwise -> return ()
@@ -466,11 +800,19 @@ isPublicKeyBytes bytes = case B.unpack (B.take 1 bytes) of
   [0x04] -> B.length bytes == 65
   _ -> False
 
+-- The unsigned transaction is checked apart, by 'unsignedTxOf', and the
+-- version by 'versionOf'
 globalFields :: Fields
 globalFields =
   Map.fromList
-    [ (xpubType, (XpubData, xpubValue)),
-      (versionType, (NoData, const versionValue))
+    [ (unsignedTxType, Field NoData [Version0] (const anyValue)),
+      (xpubType, Field XpubData [Version0, Version2] xpubValue),
+      (txVersionType, plain2 word32Value),
+      (fallbackLockTimeType, plain2 word32Value),
+      (inputCountType, plain2 countValue),
+      (outputCountType, plain2 countValue),
+      (txModifiableType, plain2 flagsValue),
+      (versionType, plain word32Value)
     ]
   where
     -- The path of an extended key has one index per level of its depth,
@@ -479,36 +821,53 @@ globalFields =
       derivation <- decodeDerivation value
       unless (length (pathToList derivation.path) == fromIntegral (B.index keyData 4)) $
         Left "has a path that is not as deep as the key"
-    versionValue value = do
-      version <- decodeWord32le value
-      unless (version == 0) $ Left ("is PSBT version " <> show version <> ": only version 0 is supported")
+    countValue value = () <$ decodeCount value
+    flagsValue value = unless (B.length value == 1) $ Left "is not a byte of flags"
 
 inputFields :: Fields
 inputFields =
   Map.fromList
-    [ (nonWitnessUtxoType, (NoData, const txValue)),
-      (witnessUtxoType, (NoData, const txOutValue)),
-      (partialSigType, (PublicKeyData, const anyValue)),
-      (sigHashTypeType, (NoData, const sigHashValue)),
-      (inRedeemScriptType, (NoData, const scriptValue)),
-      (inWitnessScriptType, (NoData, const scriptValue)),
-      (inDerivationType, (PublicKeyData, const derivationValue)),
-      (finalScriptSigType, (NoData, const anyValue)),
-      (finalScriptWitnessType, (NoData, const witnessValue))
+    [ (nonWitnessUtxoType, plain txValue),
+      (witnessUtxoType, plain txOutValue),
+      (partialSigType, Field PublicKeyData [Version0, Version2] (const anyValue)),
+      (sigHashTypeType, plain word32Value),
+      (inRedeemScriptType, plain scriptValue),
+      (inWitnessScriptType, plain scriptValue),
+      (inDerivationType, Field PublicKeyData [Version0, Version2] (const derivationValue)),
+      (finalScriptSigType, plain anyValue),
+      (finalScriptWitnessType, plain witnessValue),
+      (prevTxidType, plain2 txHashValue),
+      (outputIndexType, plain2 word32Value),
+      (sequenceType, plain2 word32Value),
+      (requiredTimeType, plain2 timeLockValue),
+      (requiredHeightType, plain2 heightLockValue)
     ]
   where
     txValue value = () <$ (decodeTx value :: Either String Tx)
     txOutValue value = () <$ (decodeTxOut value :: Either String TxOut)
-    sigHashValue value = () <$ decodeWord32le value
     witnessValue value = () <$ decodeWitness value
+    txHashValue value = () <$ decodeTxHash value
+    timeLockValue value = do
+      time <- decodeWord32le value
+      unless (time >= lockTimeThreshold) $ Left ("is a time lock below " <> show lockTimeThreshold)
+    heightLockValue value = do
+      height <- decodeWord32le value
+      unless (height > 0 && height < lockTimeThreshold) $ Left ("is not a height between 1 and " <> show (lockTimeThreshold - 1))
 
 outputFields :: Fields
 outputFields =
   Map.fromList
-    [ (outRedeemScriptType, (NoData, const scriptValue)),
-      (outWitnessScriptType, (NoData, const scriptValue)),
-      (outDerivationType, (PublicKeyData, const derivationValue))
+    [ (outRedeemScriptType, plain scriptValue),
+      (outWitnessScriptType, plain scriptValue),
+      (outDerivationType, Field PublicKeyData [Version0, Version2] (const derivationValue)),
+      (amountType, plain2 amountValue),
+      (outScriptType, plain2 anyValue)
     ]
+  where
+    amountValue value = () <$ decodeWord64le value
+
+word32Value :: ByteString -> Either String ()
+word32Value value = () <$ decodeWord32le value
 
 anyValue :: ByteString -> Either String ()
 anyValue _ = Right ()
@@ -532,6 +891,21 @@ decodeWord32le :: ByteString -> Either String Word32
 decodeWord32le bytes
   | B.length bytes == 4 = Right $ B.foldr (\b acc -> acc `shiftL` 8 .|. fromIntegral b) 0 bytes
   | otherwise = Left "is not a 32-bit integer"
+
+decodeWord64le :: ByteString -> Either String Word64
+decodeWord64le bytes
+  | B.length bytes == 8 = Right $ B.foldr (\b acc -> acc `shiftL` 8 .|. fromIntegral b) 0 bytes
+  | otherwise = Left "is not a 64-bit integer"
+
+decodeTxHash :: ByteString -> Either String TxHash
+decodeTxHash = decodeFully "is not a transaction id: it"
+
+-- | A count, as a compact size integer in its shortest form
+decodeCount :: ByteString -> Either String Int
+decodeCount bytes = do
+  n <- first (const "is not a count") (parseAll (compactSizeOf "a count") "a count" bytes)
+  when (n > fromIntegral (maxBound :: Int)) $ Left "is a count beyond any PSBT"
+  return (fromIntegral n)
 
 -- | A witness stack: the number of items, then each item after its length
 decodeWitness :: ByteString -> Either String WitnessStack
@@ -725,6 +1099,66 @@ outputWitnessScript = scriptField outWitnessScriptType "The witness script"
 insertOutputWitnessScript :: Script -> PsbtMap -> PsbtMap
 insertOutputWitnessScript = insertScriptField outWitnessScriptType
 
+{- The fields of version 2 -}
+
+-- | The flags of PSBT_GLOBAL_TX_MODIFIABLE: whether inputs may be added,
+-- whether outputs may be added, and whether an input is signed with
+-- SIGHASH_SINGLE, which pairs it with the output at its index. The other
+-- bits of the byte are not defined; they are kept as they are.
+data Modifiable = Modifiable
+  { inputsModifiable :: !Bool,
+    outputsModifiable :: !Bool,
+    hasSigHashSingle :: !Bool,
+    undefinedBits :: !Word8
+  }
+  deriving (Eq, Show, Read, Generic)
+  deriving anyclass (NFData)
+
+-- | No flag set
+noFlags :: Modifiable
+noFlags = Modifiable False False False 0
+
+-- | The flags of the global map, if it has the field: PSBT_GLOBAL_TX_MODIFIABLE
+txModifiable :: PsbtMap -> Either String (Maybe Modifiable)
+txModifiable = optionalField "The modifiable flags" txModifiableType decodeFlags
+  where
+    decodeFlags value = case B.unpack value of
+      [byte] -> Right $ Modifiable (testBit byte 0) (testBit byte 1) (testBit byte 2) (byte .&. 0xf8)
+      _ -> Left "are not one byte"
+
+insertTxModifiable :: Modifiable -> PsbtMap -> PsbtMap
+insertTxModifiable flags = insertPlainField txModifiableType (B.singleton byte)
+  where
+    byte = bit 0 flags.inputsModifiable .|. bit 1 flags.outputsModifiable .|. bit 2 flags.hasSigHashSingle .|. (flags.undefinedBits .&. 0xf8)
+    bit :: Int -> Bool -> Word8
+    bit n set = if set then 1 `shiftL` n else 0
+
+-- | The global map without the flags, which a constructor may remove once
+-- nothing is to be added
+deleteTxModifiable :: PsbtMap -> PsbtMap
+deleteTxModifiable = deletePlainField txModifiableType
+
+-- | The lock time of the transaction when no input requires one:
+-- PSBT_GLOBAL_FALLBACK_LOCKTIME
+fallbackLockTime :: PsbtMap -> Either String (Maybe Word32)
+fallbackLockTime = optionalField "The fallback lock time" fallbackLockTimeType decodeWord32le
+
+-- | The least time, as a Unix timestamp, the input requires as the lock
+-- time of the transaction: PSBT_IN_REQUIRED_TIME_LOCKTIME
+requiredTimeLockTime :: PsbtMap -> Either String (Maybe Word32)
+requiredTimeLockTime = optionalField "The required time lock time" requiredTimeType decodeWord32le
+
+insertRequiredTimeLockTime :: Word32 -> PsbtMap -> PsbtMap
+insertRequiredTimeLockTime = insertPlainField requiredTimeType . word32le
+
+-- | The least block height the input requires as the lock time of the
+-- transaction: PSBT_IN_REQUIRED_HEIGHT_LOCKTIME
+requiredHeightLockTime :: PsbtMap -> Either String (Maybe Word32)
+requiredHeightLockTime = optionalField "The required height lock time" requiredHeightType decodeWord32le
+
+insertRequiredHeightLockTime :: Word32 -> PsbtMap -> PsbtMap
+insertRequiredHeightLockTime = insertPlainField requiredHeightType . word32le
+
 {- Proprietary fields -}
 
 -- | A proprietary field, of type 0xFC: the identifier of the software it
@@ -806,7 +1240,7 @@ xPrvSigner ctx xprv originM public derivation = do
 -- left as it is.
 signPsbt :: Network -> Ctx -> Signer -> Psbt -> Either String Psbt
 signPsbt net ctx signer psbt = do
-  inputs <- forM (zip3 [0 ..] psbt.unsignedTx.inputs psbt.inputs) $ \(i, input, m) -> do
+  signed <- forM (zip3 [0 ..] psbt.unsignedTx.inputs psbt.inputs) $ \(i, input, m) -> do
     coinM <- spentOutput input m
     case coinM of
       Just coin | not (isFinal m) -> do
@@ -815,9 +1249,31 @@ signPsbt net ctx signer psbt = do
         records <- inputDerivations ctx m
         let signature :: PublicKey -> SecKey -> ByteString
             signature public secret = encodeTxSig net ctx (makeSignature net ctx psbt.unsignedTx i sigInput (PrivateKey secret public.compress))
-        return $ foldr (\(public, secret) -> insertPartialSignature ctx public (signature public secret)) m [(public, secret) | (public, d) <- records, Just secret <- [signer public d]]
-      _ -> return m
-  return $ Psbt psbt.unsignedTx psbt.globals inputs psbt.outputs
+            keys = [(public, secret) | (public, d) <- records, Just secret <- [signer public d]]
+        return (foldr (\(public, secret) -> insertPartialSignature ctx public (signature public secret)) m keys, [sighash | not (null keys)])
+      _ -> return (m, [])
+  return $ foldr afterSignature (Psbt psbt.version psbt.unsignedTx psbt.globals (fst <$> signed) psbt.outputs) (concatMap snd signed)
+
+-- | The PSBT after a signature with the sighash was added, as the signer
+-- of BIP 370 leaves the flags of version 2: inputs may no longer be added
+-- unless the sighash has ANYONECANPAY, outputs no longer unless it is
+-- NONE, and the PSBT has a SIGHASH_SINGLE signature when it is SINGLE. A
+-- PSBT of version 0 has no flags.
+afterSignature :: SigHash -> Psbt -> Psbt
+afterSignature sighash psbt = case psbt.version of
+  Version0 -> psbt
+  Version2
+    | isJust beforeM || after /= noFlags -> Psbt Version2 psbt.unsignedTx (insertTxModifiable after psbt.globals) psbt.inputs psbt.outputs
+    | otherwise -> psbt
+  where
+    beforeM = either (const Nothing) id (txModifiable psbt.globals)
+    before = fromMaybe noFlags beforeM
+    after =
+      before
+        { inputsModifiable = before.inputsModifiable && anyoneCanPay sighash,
+          outputsModifiable = before.outputsModifiable && isSigHashNone sighash,
+          hasSigHashSingle = before.hasSigHashSingle || isSigHashSingle sighash
+        }
 
 -- | Whether an input has its final script or witness
 isFinal :: PsbtMap -> Bool
@@ -875,7 +1331,7 @@ signingInput ctx input coin sighash m = do
 finalizePsbt :: Ctx -> Psbt -> Either String Psbt
 finalizePsbt ctx psbt = do
   inputs <- zipWithM finalized psbt.unsignedTx.inputs psbt.inputs
-  return $ Psbt psbt.unsignedTx psbt.globals inputs psbt.outputs
+  return $ Psbt psbt.version psbt.unsignedTx psbt.globals inputs psbt.outputs
   where
     finalized input m = do
       coinM <- spentOutput input m

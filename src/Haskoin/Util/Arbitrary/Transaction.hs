@@ -296,18 +296,42 @@ arbitraryPartialTxs net ctx = do
 wrapKey :: (SigInput, PrivateKey) -> (SigInput, [PrivateKey])
 wrapKey (s, k) = (s, [k])
 
--- | Arbitrary PSBT of a transaction of the network, with fields of every
--- kind: previous transactions, witness outputs, sighash types, scripts,
--- final scripts, derivation records, proprietary fields, and keys the spec
--- does not define.
+-- | Arbitrary PSBT of a transaction of the network, of version 0 or 2,
+-- with fields of every kind: previous transactions, witness outputs,
+-- sighash types, scripts, final scripts, derivation records, proprietary
+-- fields, and keys the spec does not define. One of version 2 may have
+-- its flags, and lock times its inputs require.
 arbitraryPsbt :: Network -> Ctx -> Gen Psbt
 arbitraryPsbt net ctx = do
   base <- psbtOf <$> arbitraryTx net ctx
   globals <- unknownFields
   inputs <- mapM (const inputFields) base.inputs
   outputs <- mapM (const outputFields) base.outputs
-  return $ Psbt base.unsignedTx globals inputs outputs
+  let version0 = Psbt Version0 base.unsignedTx globals inputs outputs
+  oneof [return version0, version2 version0]
   where
+    -- The same PSBT in version 2, with flags at times, and lock times the
+    -- inputs require: all heights, all times, or both in every input, so
+    -- that one fits them all. The PSBT is rebuilt from its maps for the
+    -- lock time they determine.
+    version2 version0 = do
+      let converted = withVersion Version2 version0
+      -- The bits the spec does not define are those from the fourth on: a multiple of 8
+      flagsM <- oneof [return Nothing, Just <$> (Modifiable <$> arbitrary <*> arbitrary <*> arbitrary <*> ((8 *) <$> choose (0, 31)))]
+      kind <- choose (0 :: Int, 2)
+      inputs <- forM converted.inputs $ \m -> do
+        asks <- arbitrary
+        height <- choose (1, 499999999)
+        time <- choose (500000000, maxBound)
+        return $
+          if not asks
+            then m
+            else case kind of
+              0 -> insertRequiredHeightLockTime height m
+              1 -> insertRequiredTimeLockTime time m
+              _ -> insertRequiredHeightLockTime height (insertRequiredTimeLockTime time m)
+      let globals = maybe id insertTxModifiable flagsM converted.globals
+      either (error . ("arbitraryPsbt: " <>)) return (psbtOfMaps globals inputs converted.outputs)
     -- Types from 0x20 on are none the spec defines for any map
     unknownFields = Map.fromList <$> resize 3 (listOf (oneof [unknownField, proprietaryField]))
     unknownField = (,) <$> (Key <$> choose (0x20, 0x7f) <*> arbitraryBS) <*> arbitraryBS
