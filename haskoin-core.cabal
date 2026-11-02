@@ -24,6 +24,8 @@ extra-source-files:
     data/key_io_invalid.json
     data/key_io_valid.json
     data/psbt_bip174.json
+    data/psbt_bip370.json
+    data/psbt_core32.json
     data/rfc6979cash.json
     data/rfc6979core.json
     data/rfc6979DERcash.json

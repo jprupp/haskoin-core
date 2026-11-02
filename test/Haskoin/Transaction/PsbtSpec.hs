@@ -3,9 +3,10 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 
--- | The PSBT format of BIP 174: the vectors of the BIP, the bytes of a
--- PSBT and the refusals of what breaks the spec, the fields of the spec,
--- and the roles: combining, signing, finalizing and extracting.
+-- | The PSBT format of BIP 174, and its version 2 of BIP 370: the vectors
+-- of both BIPs, the bytes of a PSBT and the refusals of what breaks the
+-- spec, the fields of the spec, the roles: combining, signing, finalizing
+-- and extracting, and the inputs and outputs a PSBT of version 2 takes.
 module Haskoin.Transaction.PsbtSpec (spec) where
 
 import Control.Monad (foldM, forM_)
@@ -20,7 +21,7 @@ import Data.Maybe (fromJust, fromMaybe)
 import Data.Serialize qualified as S
 import Data.Text (Text)
 import Data.Text.Encoding (encodeUtf8)
-import Data.Word (Word64)
+import Data.Word (Word32, Word64)
 import Haskoin.Address
 import Haskoin.Crypto
 import Haskoin.Network.Constants
@@ -100,19 +101,117 @@ outputAt i psbt = psbt.outputs !! i
 
 -- | A PSBT with the maps of its inputs replaced
 withInputs :: [PsbtMap] -> Psbt -> Psbt
-withInputs inputs psbt = Psbt psbt.unsignedTx psbt.globals inputs psbt.outputs
+withInputs inputs psbt = Psbt psbt.version psbt.unsignedTx psbt.globals inputs psbt.outputs
+
+-- | The PSBT with the flags given in its global map
+withFlags :: Modifiable -> Psbt -> Psbt
+withFlags flags psbt = Psbt psbt.version psbt.unsignedTx (insertTxModifiable flags psbt.globals) psbt.inputs psbt.outputs
 
 spec :: Spec
 spec = do
   vectors <- runIO (readTestFile "psbt_bip174.json" :: IO Vectors)
+  vectors370 <- runIO (readTestFile "psbt_bip370.json" :: IO Vectors370)
   prepareContext $ \ctx -> do
     vectorsSpec vectors
+    vectors370Spec vectors370
     rolesSpec ctx vectors
+    version2Spec
     bytesSpec vectors
     fieldsSpec ctx vectors
     signingSpec ctx
     complexSpec ctx
+    core32Spec ctx
     propertiesSpec ctx
+
+{- The vectors of BIP 370 -}
+
+-- The vectors of BIP 370 live in data/psbt_bip370.json: the invalid
+-- PSBTs, the valid ones, and the PSBTs of its lock time cases, each with
+-- the lock time the BIP computes, none when it cannot be computed
+data LockTimeVector = LockTimeVector
+  { ltCase :: String,
+    ltHex :: Text,
+    ltLockTime :: Maybe Word32
+  }
+
+instance Json.FromJSON LockTimeVector where
+  parseJSON = Json.withObject "vector" $ \o -> LockTimeVector <$> o .: "case" <*> o .: "hex" <*> o .:? "locktime"
+
+data Vectors370 = Vectors370
+  { refused :: [Vector],
+    accepted :: [Vector],
+    lockTimes :: [LockTimeVector]
+  }
+
+instance Json.FromJSON Vectors370 where
+  parseJSON = Json.withObject "vectors" $ \o -> Vectors370 <$> o .: "invalid" <*> o .: "valid" <*> o .: "locktime"
+
+-- | Why each invalid PSBT of BIP 370 is refused, in the order of the BIP:
+-- a field of the other version, a field version 2 requires missing, a
+-- lock time out of its range
+refusals370 :: [String]
+refusals370 =
+  [ "The global map: the key 0x00 is not of PSBT version 2",
+    "The global map: the key 0x02 is not of PSBT version 0",
+    "The global map: the key 0x03 is not of PSBT version 0",
+    "The global map: the key 0x04 is not of PSBT version 0",
+    "The global map: the key 0x05 is not of PSBT version 0",
+    "The global map: the key 0x06 is not of PSBT version 0",
+    "Input 0: the key 0x0e is not of PSBT version 0",
+    "Input 0: the key 0x0f is not of PSBT version 0",
+    "Input 0: the key 0x10 is not of PSBT version 0",
+    "Input 0: the key 0x11 is not of PSBT version 0",
+    "Input 0: the key 0x12 is not of PSBT version 0",
+    "Output 0: the key 0x03 is not of PSBT version 0",
+    "Output 0: the key 0x04 is not of PSBT version 0",
+    "The global map: the key 0x00 is not of PSBT version 2",
+    "The global map has no input count",
+    "The global map has no output count",
+    "The global map has no transaction version",
+    "Input 0 has no previous transaction id",
+    "Input 0 has no output index",
+    "Output 0 has no amount",
+    "Output 0 has no script",
+    "Input 0: the value of the key 0x11 is a time lock below 500000000",
+    "Input 0: the value of the key 0x12 is not a height between 1 and 499999999",
+    "Input 0: the value of the key 0x12 is not a height between 1 and 499999999"
+  ]
+
+vectors370Spec :: Vectors370 -> Spec
+vectors370Spec vectors = do
+  describe "The invalid PSBTs of BIP 370 are refused, each for its reason" $
+    forM_ (zip vectors.refused refusals370) $ \(v, reason) ->
+      it v.vecCase $ decodePsbt (bytesOf v) `shouldBe` Left reason
+
+  describe "The valid PSBTs of BIP 370 are read as version 2, and written back byte for byte" $
+    forM_ vectors.accepted $ \v ->
+      it v.vecCase $ do
+        psbt <- psbtOfVector v
+        psbt.version `shouldBe` Version2
+        encodePsbt psbt `shouldBe` bytesOf v
+
+  describe "The transaction of a PSBT of version 2 is the one its fields describe" $
+    -- The first valid PSBT of the BIP: one input, two outputs, nothing
+    -- else. Its input has no sequence field, so its sequence is final,
+    -- and no input requires a lock time, nor is a fallback given: lock
+    -- time 0.
+    it "for the first valid PSBT of the BIP, with a sequence and a lock time that no field gives" $ do
+      psbt <- psbtOfVector (vectors.accepted !! 0)
+      psbt.unsignedTx
+        `shouldBe` Tx
+          2
+          [TxIn (OutPoint "c85f81844094f9f0eec1e41f8d63e0a99e9f73dc725d7319871c9c4121d90a0b" 0) "" 0xffffffff]
+          [ TxOut 800000000 (hexBytes "0014c430f64c4756da310dbd1a085572ef299926272c"),
+            TxOut 199998859 (hexBytes "00144dd193ac964a56ac1b9e1cca8454fe2f474f8513")
+          ]
+          []
+          0
+
+  describe "The lock time of a PSBT of version 2 is the one BIP 370 determines" $
+    forM_ vectors.lockTimes $ \v ->
+      it v.ltCase $
+        ((.unsignedTx.locktime) <$> decodePsbt (hexBytes v.ltHex))
+          `shouldBe` maybe (Left "No lock time fits every input: some require a height, others a time") Right v.ltLockTime
 
 {- The vectors -}
 
@@ -192,6 +291,118 @@ rolesSpec ctx vectors =
       psbt <- psbtOfVector (firstSigner vectors)
       finalizePsbt ctx psbt `shouldBe` Right psbt
 
+{- The roles of version 2 -}
+
+-- | The input and output of the PSBTs below: the coin and the first output
+-- of the first valid PSBT of BIP 370, and another output of the same
+-- transaction as the coin
+coinInput, otherInput :: TxIn
+coinInput = TxIn (OutPoint "c85f81844094f9f0eec1e41f8d63e0a99e9f73dc725d7319871c9c4121d90a0b" 0) "" 0xfffffffd
+otherInput = TxIn (OutPoint "c85f81844094f9f0eec1e41f8d63e0a99e9f73dc725d7319871c9c4121d90a0b" 1) "" 0xfffffffd
+
+paidOutput :: TxOut
+paidOutput = TxOut 800000000 (hexBytes "0014c430f64c4756da310dbd1a085572ef299926272c")
+
+version2Spec :: Spec
+version2Spec =
+  describe "A PSBT of version 2" $ do
+    -- A creator of BIP 370 starts with no input and no output. The
+    -- created one, with its flags set so that inputs and outputs can be
+    -- added, and with the input and the output added.
+    let created = withVersion Version2 (psbtOf (Tx 2 [] [] [] 0))
+        modifiable = withFlags (Modifiable True True False 0) created
+        built = forceRight (addOutput paidOutput Map.empty =<< addInput coinInput Map.empty modifiable)
+        -- The same without its flags, as a constructor leaves it once
+        -- nothing is to be added
+        unflagged = Psbt Version2 built.unsignedTx (deleteTxModifiable built.globals) built.inputs built.outputs
+        requiring field value = addInput otherInput (field value Map.empty)
+
+    -- The fields of the global map: the transaction version 2, the
+    -- fallback lock time 0, the two counts of 0, and the PSBT version 2
+    it "is created with no input and no output, and the fields that describe its transaction" $
+      encodeHex (encodePsbt created) `shouldBe` "70736274ff0102040200000001030400000000010401000105010001fb040200000000"
+
+    it "takes no input or output unless its flags allow it" $ do
+      addInput coinInput Map.empty created `shouldBe` Left "The inputs of the PSBT may not be modified"
+      addOutput paidOutput Map.empty created `shouldBe` Left "The outputs of the PSBT may not be modified"
+
+    -- The input is described by the id of the transaction it spends from,
+    -- in the byte order of a transaction, the index of the output and its
+    -- sequence; the output by its amount and its script
+    it "takes an input and an output at the end, counted, described in their maps, and in its transaction" $ do
+      built.unsignedTx `shouldBe` Tx 2 [coinInput] [paidOutput] [] 0
+      Map.lookup (Key 0x04 "") built.globals `shouldBe` Just "\x01"
+      Map.lookup (Key 0x05 "") built.globals `shouldBe` Just "\x01"
+      inputAt 0 built
+        `shouldBe` Map.fromList
+          [ (Key 0x0e "", hexBytes "0b0ad921419c1c8719735d72dc739f9ea9e0638d1fe4c1eef0f9944084815fc8"),
+            (Key 0x0f "", hexBytes "00000000"),
+            (Key 0x10 "", hexBytes "fdffffff")
+          ]
+      outputAt 0 built `shouldBe` Map.fromList [(Key 0x03 "", hexBytes "0008af2f00000000"), (Key 0x04 "", hexBytes "0014c430f64c4756da310dbd1a085572ef299926272c")]
+
+    it "refuses an input that spends an output it spends already" $
+      addInput coinInput Map.empty built `shouldBe` Left "An input of the PSBT spends that output already"
+
+    it "is not of version 0, which takes no input or output" $
+      addInput coinInput Map.empty (psbtOf emptyTx) `shouldBe` Left "A PSBT of version 0 takes no input or output: its transaction is fixed"
+
+    it "takes the lock time its inputs require: the greatest height when every one that requires a lock time takes a height" $ do
+      withHeight <- expectRight (addInput coinInput (insertRequiredHeightLockTime 10000 Map.empty) modifiable)
+      withHeight.unsignedTx.locktime `shouldBe` 10000
+      ((.unsignedTx.locktime) <$> requiring insertRequiredHeightLockTime 9000 withHeight) `shouldBe` Right 10000
+      requiring insertRequiredTimeLockTime 1657048460 withHeight `shouldBe` Left "No lock time fits every input: some require a height, others a time"
+
+    -- The input of the PSBT has its final script
+    it "refuses an input that changes the lock time once an input is signed, and takes one that keeps it" $ do
+      let signed = withInputs [insertFinalScriptSig "\x00" (inputAt 0 built)] built
+      requiring insertRequiredHeightLockTime 10000 signed `shouldBe` Left "An input is signed already: the lock time may not change"
+      ((.unsignedTx.locktime) <$> addInput otherInput Map.empty signed) `shouldBe` Right 0
+
+    it "takes a sequence for an input, in its transaction and in its map, as an updater sets one" $ do
+      updated <- expectRight (setInputSequence 0 1 built)
+      map (.sequence) updated.unsignedTx.inputs `shouldBe` [1]
+      Map.lookup (Key 0x10 "") (inputAt 0 updated) `shouldBe` Just (hexBytes "01000000")
+      setInputSequence 1 1 built `shouldBe` Left "The PSBT has no input 1"
+      setInputSequence 0 1 (psbtOf emptyTx) `shouldBe` Left "The sequences of a PSBT of version 0 are in its unsigned transaction, which is fixed"
+
+    -- The id of its transaction with the sequence of its input at 0: the
+    -- same whatever the sequence. A PSBT of version 0 is identified by
+    -- its transaction as it is, with the sequence 0xfffffffd here.
+    it "is identified by its transaction with every sequence at 0" $ do
+      psbtId built `shouldBe` "79dd9a151a6cfc0dc3b7779a697817a80544e2c9dc0cfb399ecc7fa3b4da8f2c"
+      (psbtId <$> setInputSequence 0 1 built) `shouldBe` Right "79dd9a151a6cfc0dc3b7779a697817a80544e2c9dc0cfb399ecc7fa3b4da8f2c"
+      psbtId (withVersion Version0 built) `shouldBe` "7ca9f2c2ff60a7a3f7efdaa703bfb23b9415639e07b71e194bafb4d592e2c405"
+
+    it "combines with the same PSBT whose sequence an updater changed, and keeps the sequence of the first" $ do
+      updated <- expectRight (setInputSequence 0 1 built)
+      (map (.sequence) . (.unsignedTx.inputs) <$> combinePsbt built updated) `shouldBe` Right [0xfffffffd]
+      (map (.sequence) . (.unsignedTx.inputs) <$> combinePsbt updated built) `shouldBe` Right [1]
+
+    it "does not combine with a PSBT of version 0" $
+      combinePsbt built (withVersion Version0 built) `shouldBe` Left "The PSBTs are not of the same version"
+
+    -- The first lets inputs be added and has a SIGHASH_SINGLE signature;
+    -- the second lets inputs and outputs be added, with the undefined
+    -- bit 3 set
+    it "combines its flags as Bitcoin Core does: modifiable only when both say so, with a SIGHASH_SINGLE signature of either" $ do
+      (txModifiable . (.globals) <$> combinePsbt (withFlags (Modifiable True False True 0) built) (withFlags (Modifiable True True False 8) built))
+        `shouldBe` Right (Right (Just (Modifiable True False True 0)))
+      (txModifiable . (.globals) <$> combinePsbt unflagged (withFlags (Modifiable True False True 0) built))
+        `shouldBe` Right (Right (Just (Modifiable False False True 0)))
+
+    it "once signed, takes no more inputs unless the sighash has ANYONECANPAY, no more outputs unless it is NONE, and tells a SIGHASH_SINGLE signature" $ do
+      let open = withFlags (Modifiable True True False 0) built
+          flagsAfter sighash psbt = txModifiable (afterSignature sighash psbt).globals
+      flagsAfter sigHashAll open `shouldBe` Right (Just (Modifiable False False False 0))
+      flagsAfter (setAnyoneCanPay sigHashNone) open `shouldBe` Right (Just (Modifiable True True False 0))
+      flagsAfter sigHashSingle open `shouldBe` Right (Just (Modifiable False False True 0))
+      flagsAfter sigHashAll unflagged `shouldBe` Right Nothing
+      flagsAfter sigHashSingle unflagged `shouldBe` Right (Just (Modifiable False False True 0))
+
+    it "converted to version 0 is the PSBT of its transaction" $
+      withVersion Version0 built `shouldBe` psbtOf (Tx 2 [coinInput] [paidOutput] [] 0)
+
 {- Bytes -}
 
 -- | A transaction with nothing in it: version 0, no input, no output, lock
@@ -214,12 +425,12 @@ bytesSpec vectors =
     -- The key is 7 bytes: the type 0xfc, the identifier "test" after its
     -- length 4, and the subtype 0. The value is the 3 bytes of "btc".
     it "write a key as its length, its type and its data, and its value after its length" $
-      encodePsbt (Psbt emptyTx (insertProprietary "test" 0 "btc" Map.empty) [] [])
+      encodePsbt (Psbt Version0 emptyTx (insertProprietary "test" 0 "btc" Map.empty) [] [])
         `shouldBe` hexBytes ("70736274ff" <> emptyTxEntry <> "07fc047465737400" <> "03627463" <> "00")
 
     it "write the keys of a map in order, the type first, whatever the order they were added" $ do
       let globals = Map.fromList [(Key 0x20 "", hexBytes "bb"), (Key 0x10 (hexBytes "01"), hexBytes "aa")]
-      encodePsbt (Psbt emptyTx globals [] [])
+      encodePsbt (Psbt Version0 emptyTx globals [] [])
         `shouldBe` hexBytes ("70736274ff" <> emptyTxEntry <> "02100101aa" <> "012001bb" <> "00")
 
     it "write the unsigned transaction without the input scripts and the witness of a signed one" $ do
@@ -233,7 +444,7 @@ bytesSpec vectors =
 
     it "accept the unsigned transaction after another key of the global map" $
       decodePsbt (hexBytes ("70736274ff" <> "012001bb" <> emptyTxEntry <> "00"))
-        `shouldBe` Right (Psbt emptyTx (Map.fromList [(Key 0x20 "", hexBytes "bb")]) [] [])
+        `shouldBe` Right (Psbt Version0 emptyTx (Map.fromList [(Key 0x20 "", hexBytes "bb")]) [] [])
 
     it "refuse what is not a PSBT" $
       decodePsbt "{\"tx\": \"0200\"}" `shouldBe` Left "Not a PSBT: the bytes do not start with the magic bytes of BIP 174"
@@ -245,9 +456,10 @@ bytesSpec vectors =
     it "refuse bytes after the last map" $
       decodePsbt (bytesOf (creator vectors) <> "\0") `shouldBe` Left "Bytes follow the last map"
 
-    it "refuse a PSBT of another version" $
-      decodePsbt (hexBytes ("70736274ff" <> emptyTxEntry <> "01fb0402000000" <> "00"))
-        `shouldBe` Left "The global map: the value of the key 0xfb is PSBT version 2: only version 0 is supported"
+    -- Version 1 was never defined
+    it "refuse a PSBT of a version other than 0 and 2" $
+      decodePsbt (hexBytes ("70736274ff" <> emptyTxEntry <> "01fb0401000000" <> "00"))
+        `shouldBe` Left "The PSBT is of version 1: only versions 0 and 2 are supported"
 
     -- The length of the first key, 1, written over three bytes
     it "refuse a length that is not in its shortest form" $
@@ -451,7 +663,7 @@ fieldsSpec ctx vectors =
 -- two outputs, as a PSBT with the coin on its input: the whole previous
 -- transaction, and the output alone for a SegWit coin
 spendingPsbt :: Ctx -> ScriptOutput -> (Psbt, [(ScriptOutput, Word64, OutPoint)])
-spendingPsbt ctx coinScript = (Psbt tx Map.empty [input] [Map.empty, Map.empty], [(coinScript, 200000000, outpoint)])
+spendingPsbt ctx coinScript = (Psbt Version0 tx Map.empty [input] [Map.empty, Map.empty], [(coinScript, 200000000, outpoint)])
   where
     parent = Tx 1 [TxIn (OutPoint "e567952fb6cc33857f392efa3a46c995a28f69cca4bb1b37e0204dab1ec7a389" 1) "" 0xffffffff] [TxOut 200000000 (marshal ctx coinScript)] [] 0
     outpoint = OutPoint (txHash parent) 0
@@ -497,6 +709,17 @@ signingSpec ctx =
         let (psbt, coins) = spendingPsbt ctx (PayPKHash (addressHash (marshal ctx public)))
             withRecord = withInputs (recordOf ctx public <$> psbt.inputs) psbt
          in signsAndVerifies btc ctx [secret] (withRecord, coins) === Right True
+
+    -- The finalized input keeps its coin, its final script, and the
+    -- fields of version 2: the transaction it spends from, the output
+    -- index and the sequence
+    prop "a P2PKH coin of a PSBT of version 2, signed and finalized, verifies, and the PSBT stays of version 2 with the fields of its input" $
+      forAll (arbitraryKeyPair ctx) $ \(secret, public) ->
+        let (psbt, coins) = spendingPsbt ctx (PayPKHash (addressHash (marshal ctx public)))
+            version2 = withVersion Version2 (withInputs (recordOf ctx public <$> psbt.inputs) psbt)
+            final = finalizePsbt ctx =<< signPsbt btc ctx (keysSigner ctx [secret]) version2
+         in (signsAndVerifies btc ctx [secret] (version2, coins), (.version) <$> final, Map.keys . inputAt 0 <$> final)
+              === (Right True, Right Version2, Right [Key 0x00 "", Key 0x07 "", Key 0x0e "", Key 0x0f "", Key 0x10 ""])
 
     prop "a P2SH multisig coin, signed with enough of its keys and finalized, verifies" $
       forAll ((,) <$> arbitraryMSParam <*> arbitraryKeyPair ctx) $ \((m, n), _) ->
@@ -606,6 +829,60 @@ complexSpec ctx =
 
     it "gives the transaction Core extracted" $
       psbtTransaction complex.completePsbt `shouldBe` Right complex.finalTx
+
+{- The files of Bitcoin Core 32.1 -}
+
+-- The files live in data/psbt_core32.json: the PSBT of a payment as
+-- walletcreatefundedpsbt gives it in version 0 and in version 2, the
+-- version 2 one signed by walletprocesspsbt without finalizing, then
+-- finalized, and the transaction finalizepsbt extracts
+data Core32 = Core32
+  { preparedV0 :: Psbt,
+    preparedV2 :: Psbt,
+    signedV2 :: Psbt,
+    finalizedV2 :: Psbt,
+    extractedTx :: Tx
+  }
+
+instance Json.FromJSON Core32 where
+  parseJSON = Json.withObject "core32" $ \o ->
+    Core32
+      <$> psbtAt o "prepared_v0"
+      <*> psbtAt o "prepared_v2"
+      <*> psbtAt o "signed_v2"
+      <*> psbtAt o "finalized_v2"
+      <*> (either fail return . S.decode . hexBytes =<< o .: "final_tx")
+    where
+      psbtAt o name = either fail return . decodePsbtBase64 . encodeUtf8 =<< o .: name
+
+core32Spec :: Ctx -> Spec
+core32Spec ctx =
+  describe "The files of Bitcoin Core 32.1, which writes version 2 unless asked for version 0" $ do
+    core <- runIO (readTestFile "psbt_core32.json" :: IO Core32)
+    it "are the same payment in both versions: the version 2 file is the version 0 file converted, and back" $ do
+      core.preparedV2.version `shouldBe` Version2
+      core.preparedV2.unsignedTx `shouldBe` core.preparedV0.unsignedTx
+      withVersion Version2 core.preparedV0 `shouldBe` core.preparedV2
+      withVersion Version0 core.preparedV2 `shouldBe` core.preparedV0
+
+    it "finalize into the PSBT Core finalized" $
+      finalizePsbt ctx core.signedV2 `shouldBe` Right core.finalizedV2
+
+    it "give the transaction Core extracted" $
+      psbtTransaction core.finalizedV2 `shouldBe` Right core.extractedTx
+
+    -- The records name the key of the coin by the fingerprint bc560f95 of
+    -- a seed and the path m/44'/0'/0'/0/0: the account key at m/44'/0'/0'
+    -- of that seed signs. The coin is 50 BTC at the P2PKH script of that
+    -- key.
+    it "are signed with the account key the records name, into a transaction that verifies" $ do
+      let account = fromJust (xPrvImport btc "xprv9yHxeaLAZvxXb9VtJNesqk8avfN8misGAW9DUW9eacZJNqsfZxqKLmK5jfmvFideQqGesviJeagzSQYCuQySjgvt7TdfowKja5aJqbgyuNh")
+          signer = xPrvSigner ctx account (Just (Derivation (fingerprintOf "bc560f95") "m/44'/0'/0'"))
+      coin <- expectRight (unmarshal ctx (hexBytes "76a914c80d55223e2f1061363add2a7b0363c285bf298d88ac"))
+      final <- expectRight (finalizePsbt ctx =<< signPsbt btc ctx signer core.preparedV2)
+      tx <- expectRight (psbtTransaction final)
+      final.version `shouldBe` Version2
+      verifyStdTx btc ctx tx [(coin, 5000000000, OutPoint "fede72ccadbf9f16f826e3078578b0660526a37b48d4f894ab26f4cf5a95e89c" 0)] `shouldBe` True
 
 {- Properties -}
 
