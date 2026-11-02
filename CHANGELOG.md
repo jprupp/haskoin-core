@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/)
 and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Replace the PSBT module with `Haskoin.Transaction.Psbt`, which keeps every field of a PSBT, known or not, writes maps with their keys in order as Bitcoin Core does, refuses what breaks BIP 174 (duplicate keys, keys out of shape, bytes after the last map, other versions), and reads and writes the global xpub and proprietary fields. It still creates, combines, signs, finalizes and extracts. The `Haskoin.Transaction.Partial` module and its types are gone.
+
 ## [1.4.0] - 2026-10-31
 
 ### Added
