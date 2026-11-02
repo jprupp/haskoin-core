@@ -19,6 +19,7 @@ import Haskoin.Util
 import Test.HUnit
 import Test.Hspec
 
+spec :: Spec
 spec = do
   describe "bech32 checksum" $ do
     it "should be valid" $
@@ -28,12 +29,25 @@ spec = do
     it "should be case-insensitive" $
       all ((== Just "test12hrzfj") . flip (bech32Encode Bech32) []) hrpCaseVariants
   describe "bech32 address" $ do
-    it "should be valid" $
-      forM_ validChecksums (uncurry testValidChecksum)
-    it "should be invalid" $
-      forM_ invalidChecksums testInvalidChecksum
-    it "should be case-insensitive" $
-      all ((== Just "test12hrzfj") . flip (bech32Encode Bech32) []) hrpCaseVariants
+    it "passes the BIP-173 and BIP-350 valid address vectors" $
+      forM_ validAddresses testValidAddress
+    it "rejects the BIP-173 and BIP-350 invalid address vectors" $
+      forM_ invalidAddresses testInvalidAddress
+    it "rejects an address with a non-ASCII look-alike character" $
+      -- U+017F in place of s
+      segwitDecode "tb" "tb1qrp33g0q5c5tx\x017Fp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3q0sl5k7"
+        `shouldBe` Nothing
+    it "rejects an address whose padding bits are not zero" $
+      segwitDecode "bc" "bc1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf308468nf"
+        `shouldBe` Nothing
+    it "rejects an address with an extra zero group" $
+      segwitDecode "bc" "bc1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3qqnuhcm0"
+        `shouldBe` Nothing
+    it "rejects an address for another human-readable part" $
+      segwitDecode "tb" "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4" `shouldBe` Nothing
+    it "decodes the version and program of a P2WPKH address" $
+      segwitDecode "bc" "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
+        `shouldBe` Just (0, ByteString.unpack (fromJust (decodeHex "751e76e8199196d454941c45d1b3a323f1433bd6")))
   describe "bech32 encoding/decoding" $ do
     it "should not encode long data string" $
       assert . isNothing $
@@ -64,6 +78,29 @@ spec = do
           bech32Decode "10a06t8"
     it "human-readable part should be case-insensitive" $
       bech32Encode Bech32 "HRP" [] `shouldBe` bech32Encode Bech32 "hrp" []
+    it "rejects a human-readable part with a non-ASCII character" $
+      bech32Encode Bech32 "b\x00e9" [] `shouldBe` Nothing
+    it "rejects a string with a non-ASCII character" $
+      isNothing (bech32Decode "a12uel5l\x00e9") `shouldBe` True
+    it "rejects a string longer than 90 characters" $
+      isNothing (bech32Decode ("a1" <> Text.replicate 89 "q")) `shouldBe` True
+  describe "base conversion" $ do
+    it "toBase32 splits bytes into five-bit groups and pads with zero bits" $
+      -- 11111111 becomes 11111 and 11100
+      map fromWord5 (toBase32 [0xff]) `shouldBe` [31, 28 :: Int]
+    it "toBase32 needs no padding for five bytes" $
+      map fromWord5 (toBase32 [1, 2, 3, 4, 5]) `shouldBe` [0, 4, 1, 0, 6, 1, 0, 5 :: Int]
+    it "toBase256 reverses toBase32" $
+      toBase256 (map word5 [31, 28 :: Int]) `shouldBe` Just [0xff]
+    it "toBase256 rejects padding bits that are not zero" $
+      toBase256 (map word5 [31, 31 :: Int]) `shouldBe` Nothing
+    it "toBase256 rejects padding wide enough to hold a whole group" $
+      toBase256 (map word5 [31, 28, 0 :: Int]) `shouldBe` Nothing
+    it "word5 keeps the low five bits" $
+      fromWord5 (word5 (33 :: Int)) `shouldBe` (1 :: Int)
+    it "bech32Const tells the two encodings apart" $ do
+      bech32Const Bech32 `shouldBe` 1
+      bech32Const Bech32m `shouldBe` 0x2bc830a3
 
 testValidChecksum :: Bech32Encoding -> Bech32 -> Assertion
 testValidChecksum enc checksum = case bech32Decode checksum of

@@ -248,22 +248,27 @@ dropSumLabels c f tag =
     }
 
 -- | Convert from one power-of-two base to another, as long as it fits in a
--- 'Word'.
-convertBits :: Bool -> Int -> Int -> [Word] -> ([Word], Bool)
-convertBits pad frombits tobits i = (reverse yout, rem')
+-- 'Word'. With padding, leftover bits fill one more output digit and the
+-- conversion always succeeds. Without padding, the conversion fails when the
+-- leftover bits could hold a whole input digit, or when they are not all
+-- zero. That is the rule Bitcoin Core applies. It rejects strings that are
+-- not the canonical encoding of their payload.
+convertBits :: Bool -> Int -> Int -> [Word] -> Maybe [Word]
+convertBits pad frombits tobits i
+  | pad = Just . reverse $ if xbits == 0 then xout else leftover : xout
+  | xbits >= frombits = Nothing
+  | leftover /= 0 = Nothing
+  | otherwise = Just (reverse xout)
   where
     (xacc, xbits, xout) = foldl' outer (0, 0, []) i
-    (yout, rem')
-      | pad && xbits /= 0 =
-          let xout' = (xacc `shiftL` (tobits - xbits)) .&. maxv : xout
-           in (xout', False)
-      | pad = (xout, False)
-      | xbits /= 0 = (xout, True)
-      | otherwise = (xout, False)
+    -- The leftover bits, moved to the top of one output digit.
+    leftover = (xacc `shiftL` (tobits - xbits)) .&. maxv
     maxv = 1 `shiftL` tobits - 1
-    max_acc = 1 `shiftL` (frombits + tobits - 1) - 1
+    -- Only this many bits of the accumulator are ever read. Masking to them
+    -- keeps the accumulator from overflowing on long inputs.
+    maxAcc = 1 `shiftL` (frombits + tobits - 1) - 1
     outer (acc, bits, out) it =
-      let acc' = ((acc `shiftL` frombits) .|. it) .&. max_acc
+      let acc' = ((acc `shiftL` frombits) .|. it) .&. maxAcc
           bits' = bits + frombits
           (out', bits'') = inner acc' out bits'
        in (acc', bits'', out')

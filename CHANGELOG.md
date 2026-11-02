@@ -10,14 +10,30 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 ### Added
 
 - PSBT version 2 (BIP 370) in `Haskoin.Transaction.Psbt`: a PSBT of version 2 is read and written as its maps, with the unsigned transaction its fields describe and the lock time they determine. The roles take both versions, and version 2 has its constructor (`addInput`, `addOutput`), its updater (`setInputSequence`), the flags of `PSBT_GLOBAL_TX_MODIFIABLE`, which the signer and the combiner keep as the spec and Bitcoin Core do, and conversion between the versions (`withVersion`). The test vectors of BIP 370 and files of Bitcoin Core 32.1 check it.
+- `addrToBase58`, `addrToBech32` and `addrToCash` encode an address in one chosen format. `addrToBase58` gives the legacy form of a Bitcoin Cash address.
+- Token-aware CashAddr addresses (types 2 and 3) can be paid. `addressToOutput`, `addressHash160` and `addressHash256` treat them like their plain P2PKH, P2SH and P2SH32 counterparts.
 
 ### Changed
 
 - Replace the PSBT module with `Haskoin.Transaction.Psbt`, which keeps every field of a PSBT, known or not, writes maps with their keys in order as Bitcoin Core does, refuses what breaks BIP 174 (duplicate keys, keys out of shape, bytes after the last map, other versions), and reads and writes the global xpub and proprietary fields. It still creates, combines, signs, finalizes and extracts. The `Haskoin.Transaction.Partial` module and its types are gone.
+- `pubKeyWitnessAddr` and `pubKeyCompatWitnessAddr` now return `Maybe Address` and refuse uncompressed keys. BIP 143 makes witness spends with uncompressed keys non-standard, so coins sent to such an address could not be spent through the normal network.
+- The `WitnessAddress` and `CashAddress` constructors are now patterns that can only match. Build these addresses with `witnessAddress` and `cashAddress`, which validate the version and payload and return the dedicated constructor when one exists. Every address now has a single representation, so equal addresses compare equal.
+- `outputAddress` and `scriptToAddress` no longer report the P2PKH address of the key for a pay-to-public-key output. Such coins cannot be spent with the P2PKH input script, so the address was misleading.
+- `convertBits` in `Haskoin.Util.Helpers` returns `Maybe [Word]` and fails on padding bits that are not zero, or that are wide enough to hold a whole input digit, when padding is not allowed.
+- JSON encoding of an address that has no text form on the given network now fails with an error instead of writing `null`.
 
 ### Fixed
 
 - A PSBT of another version is refused by its version. The unsigned transaction was looked for first, and a PSBT of version 2 holds none.
+- `addressBytes` returned a length-prefixed value for a generic CashAddr instead of the raw hash.
+- Base58, Bech32 and CashAddr decoders accepted non-ASCII look-alike characters. Base58 truncated code points to one byte and Bech32 used Unicode case folding. All three now accept ASCII only, as the specifications require.
+- `cashAddrDecode` accepted mixed-case strings, which the CashAddr specification rejects.
+- CashAddr decoding accepted non-canonical strings whose padding bits were not zero, or that carried an extra group of padding, so several strings could stand for the same address.
+- `textToAddr` decoded Base58 input of any length, with a cost growing with the square of the length. Strings longer than any valid address are now rejected first.
+- Binary deserialization of an address now validates the witness version, the CashAddr type and the payload length, and checks the length prefix before converting it to an `Int`. Previously an invalid value could be read and later crash `addressToScript`.
+- The Bech32 and bit conversion accumulators are masked so that they cannot overflow on long inputs.
+- `encodeOutput` had no case for `PayScript32Hash` and crashed on it, so a P2SH32 address could not be turned into a script.
+- The P2WSH test generator produced P2WPKH addresses.
 
 ## [1.4.0] - 2026-10-31
 
