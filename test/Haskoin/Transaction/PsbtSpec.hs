@@ -249,6 +249,13 @@ bytesSpec vectors =
       decodePsbt (hexBytes ("70736274ff" <> emptyTxEntry <> "01fb0402000000" <> "00"))
         `shouldBe` Left "The global map: the value of the key 0xfb is PSBT version 2: only version 0 is supported"
 
+    -- Bitcoin Core 32.1 wrote this file with walletcreatefundedpsbt, which
+    -- gives a PSBT of version 2 (BIP 370) unless asked for version 0. Such
+    -- a PSBT holds no unsigned transaction: the version is what is refused.
+    it "refuse a PSBT of version 2 by its version, as Bitcoin Core writes one" $
+      decodePsbtBase64 "cHNidP8BAgQCAAAAAQMEAAAAAAEEAQEBBQECAfsEAgAAAAABAIcCAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/////wMBZgD/////AgDyBSoBAAAAGXapFMgNVSI+LxBhNjrdKnsDY8KFvymNiKwAAAAAAAAAACZqJKohqe3i9hw/cdHe/T+pmd+jaVN1XGkGiXmZYrSL69g2l06M+QAAAAAiBgMvZDcCIlbIVOAJDn1si2XpZgbvf0BTmeDwGHyTCXrA+Ri8Vg+VLAAAgAAAAIAAAACAAAAAAAAAAAABDiCc6JVaz/Qmq5T41Eh7oyYFZrB4hQfjJvgWn7+tzHLe/gEPBAAAAAABEAT9////AAEDCADh9QUAAAAAAQQZdqkUq8iGXrtttiWVYDFjl12bqjZGMsqIrAAiAgN28ucGRY3XVnO6Gbjv2ELv3dm8CuQeMTOd/8+Re2226xi8Vg+VLAAAgAAAAIAAAACAAQAAAAAAAAABAwg2CBAkAQAAAAEEGXapFEVapQwmYxQXceusIJbjeDOREifWiKwA"
+        `shouldBe` Left "The global map: the value of the key 0xfb is PSBT version 2: only version 0 is supported"
+
     -- The length of the first key, 1, written over three bytes
     it "refuse a length that is not in its shortest form" $
       decodePsbt (hexBytes ("70736274ff" <> "fd0100" <> "000a00000000000000000000" <> "00"))

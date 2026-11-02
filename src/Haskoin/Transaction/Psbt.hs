@@ -378,9 +378,11 @@ psbtParser = do
   magic <- bytesOf 5 "the magic bytes"
   unless (magic == psbtMagic) $ refuse "Not a PSBT: the bytes do not start with the magic bytes of BIP 174"
   globals <- mapOf "the global map"
-  tx <- either refuse return (unsignedTxOf globals)
+  -- The fields are checked before the transaction is looked for: a PSBT of
+  -- another version holds none, and its version is what to say
   let others = Map.delete unsignedTxKey globals
   either refuse return (checkMap "the global map" globalFields others)
+  tx <- either refuse return (unsignedTxOf globals)
   inputs <- forM [0 .. length tx.inputs - 1] $ \i -> do
     let what = "input " <> show i
     m <- mapOf what

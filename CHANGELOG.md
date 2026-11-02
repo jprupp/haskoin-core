@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 
 - Replace the PSBT module with `Haskoin.Transaction.Psbt`, which keeps every field of a PSBT, known or not, writes maps with their keys in order as Bitcoin Core does, refuses what breaks BIP 174 (duplicate keys, keys out of shape, bytes after the last map, other versions), and reads and writes the global xpub and proprietary fields. It still creates, combines, signs, finalizes and extracts. The `Haskoin.Transaction.Partial` module and its types are gone.
 
+### Fixed
+
+- A PSBT of another version is refused by its version. The unsigned transaction was looked for first, and a PSBT of version 2 holds none.
+
 ## [1.4.0] - 2026-10-31
 
 ### Added
