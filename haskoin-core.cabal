@@ -23,6 +23,7 @@ extra-source-files:
     data/forkid_sighash.json
     data/key_io_invalid.json
     data/key_io_valid.json
+    data/psbt_bip174.json
     data/rfc6979cash.json
     data/rfc6979core.json
     data/rfc6979DERcash.json
@@ -83,7 +84,7 @@ library
       Haskoin.Transaction.Builder.Sign
       Haskoin.Transaction.Common
       Haskoin.Transaction.Genesis
-      Haskoin.Transaction.Partial
+      Haskoin.Transaction.Psbt
       Haskoin.Transaction.Segwit
       Haskoin.Transaction.Taproot
       Haskoin.Util
@@ -109,6 +110,7 @@ library
     , array >=0.5.4.0
     , base >=4.9 && <5
     , base16 >=2.0
+    , base64 >=1.0
     , binary >=0.8.8
     , bytes >=0.17
     , bytestring >=0.10.10.0
@@ -152,7 +154,7 @@ test-suite spec
       Haskoin.Crypto.SignatureSpec
       Haskoin.NetworkSpec
       Haskoin.ScriptSpec
-      Haskoin.Transaction.PartialSpec
+      Haskoin.Transaction.PsbtSpec
       Haskoin.Transaction.TaprootSpec
       Haskoin.TransactionSpec
       Haskoin.UtilSpec

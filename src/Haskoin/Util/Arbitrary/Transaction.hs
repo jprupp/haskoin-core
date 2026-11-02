@@ -16,7 +16,8 @@ import Data.ByteString qualified as BS
 import Data.Either (fromRight)
 import Data.List (nub, nubBy, permutations)
 import Data.Maybe (fromMaybe)
-import Data.Word (Word64)
+import Data.Map.Strict qualified as Map
+import Data.Word (Word32, Word64)
 import Haskoin.Address
 import Haskoin.Crypto (Ctx)
 import Haskoin.Crypto.Keys.Common
@@ -294,3 +295,47 @@ arbitraryPartialTxs net ctx = do
 
 wrapKey :: (SigInput, PrivateKey) -> (SigInput, [PrivateKey])
 wrapKey (s, k) = (s, [k])
+
+-- | Arbitrary PSBT of a transaction of the network, with fields of every
+-- kind: previous transactions, witness outputs, sighash types, scripts,
+-- final scripts, derivation records, proprietary fields, and keys the spec
+-- does not define.
+arbitraryPsbt :: Network -> Ctx -> Gen Psbt
+arbitraryPsbt net ctx = do
+  base <- psbtOf <$> arbitraryTx net ctx
+  globals <- unknownFields
+  inputs <- mapM (const inputFields) base.inputs
+  outputs <- mapM (const outputFields) base.outputs
+  return $ Psbt base.unsignedTx globals inputs outputs
+  where
+    -- Types from 0x20 on are none the spec defines for any map
+    unknownFields = Map.fromList <$> resize 3 (listOf (oneof [unknownField, proprietaryField]))
+    unknownField = (,) <$> (Key <$> choose (0x20, 0x7f) <*> arbitraryBS) <*> arbitraryBS
+    proprietaryField = (,) <$> (proprietaryKey <$> (Proprietary <$> arbitraryBS <*> arbitrary <*> arbitraryBS)) <*> arbitraryBS
+    inputFields = do
+      m <- unknownFields
+      fields <-
+        sequence
+          [ maybeField (insertNonWitnessUtxo <$> arbitraryTx net ctx),
+            maybeField (insertWitnessUtxo <$> arbitraryTxOut net ctx),
+            maybeField (insertSigHashType . fromIntegral <$> (arbitrary :: Gen Word32)),
+            maybeField (insertInputRedeemScript <$> arbitraryScript),
+            maybeField (insertInputWitnessScript <$> arbitraryScript),
+            maybeField (insertFinalScriptSig <$> arbitraryBS),
+            maybeField (insertFinalScriptWitness <$> resize 3 (listOf arbitraryBS)),
+            derivations (insertInputDerivation ctx)
+          ]
+      return (foldr ($) m fields)
+    outputFields = do
+      m <- unknownFields
+      fields <-
+        sequence
+          [ maybeField (insertOutputRedeemScript <$> arbitraryScript),
+            maybeField (insertOutputWitnessScript <$> arbitraryScript),
+            derivations (insertOutputDerivation ctx)
+          ]
+      return (foldr ($) m fields)
+    maybeField gen = oneof [return id, gen]
+    derivations insert = do
+      records <- resize 2 (listOf ((,) <$> (snd <$> arbitraryKeyPair ctx) <*> (Derivation <$> arbitraryFingerprint <*> arbitraryDerivPath)))
+      return $ foldr (\(key, derivation) inserted -> insert key derivation . inserted) id records

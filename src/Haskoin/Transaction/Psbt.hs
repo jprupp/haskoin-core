@@ -1,0 +1,938 @@
+{-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE ImportQualifiedPost #-}
+{-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TupleSections #-}
+{-# LANGUAGE NoFieldSelectors #-}
+
+-- |
+-- Module      : Haskoin.Transaction.Psbt
+-- Copyright   : No rights reserved
+-- License     : MIT
+-- Maintainer  : jprupp@protonmail.ch
+-- Stability   : experimental
+-- Portability : POSIX
+--
+-- Partially signed Bitcoin transactions, the format of
+-- [BIP 174](https://github.com/bitcoin/bips/blob/master/bip-0174.mediawiki).
+--
+-- A PSBT is five magic bytes, then maps of keys and values: one global map,
+-- which holds the unsigned transaction, then one map per input and one per
+-- output of that transaction. A key is a type and some data. The spec gives
+-- the keys and values of the fields it defines, and leaves the type 0xFC to
+-- proprietary fields, under an identifier of the software that writes them.
+--
+-- The maps are kept as they are read, byte for byte, so that every field
+-- passes through, known or not. A map is written with its keys in order, as
+-- Bitcoin Core writes it. A PSBT that breaks the spec is refused when it is
+-- read: a key out of shape, a key twice in a map, a value that does not
+-- decode, bytes after the last map.
+--
+-- The fields the spec defines are read and written with the functions
+-- below. The roles of the spec are here too: a creator ('psbtOf'), a
+-- combiner ('combinePsbt'), a signer ('signPsbt'), a finalizer
+-- ('finalizePsbt') and a transaction extractor ('psbtTransaction'). An
+-- updater is the functions that insert fields.
+module Haskoin.Transaction.Psbt
+  ( -- * A PSBT
+    Psbt (..),
+    Key (..),
+    PsbtMap,
+    psbtOf,
+    combinePsbt,
+    psbtTransaction,
+
+    -- * Bytes and text
+    psbtMagic,
+    isPsbt,
+    encodePsbt,
+    decodePsbt,
+    encodePsbtBase64,
+    decodePsbtBase64,
+
+    -- * The global fields
+    Derivation (..),
+    xpubRecords,
+    insertXpubRecord,
+
+    -- * The fields of an input
+    nonWitnessUtxo,
+    insertNonWitnessUtxo,
+    witnessUtxo,
+    insertWitnessUtxo,
+    partialSignatures,
+    hasPartialSignatures,
+    insertPartialSignature,
+    deletePartialSignatures,
+    sigHashType,
+    insertSigHashType,
+    deleteSigHashType,
+    inputRedeemScript,
+    insertInputRedeemScript,
+    inputWitnessScript,
+    insertInputWitnessScript,
+    inputDerivations,
+    insertInputDerivation,
+    finalScriptSig,
+    insertFinalScriptSig,
+    finalScriptWitness,
+    insertFinalScriptWitness,
+
+    -- * The fields of an output
+    outputRedeemScript,
+    insertOutputRedeemScript,
+    outputWitnessScript,
+    insertOutputWitnessScript,
+    outputDerivations,
+    insertOutputDerivation,
+
+    -- * Proprietary fields
+    Proprietary (..),
+    proprietaryKey,
+    proprietaryOf,
+    lookupProprietary,
+    insertProprietary,
+
+    -- * Signing
+    Signer,
+    keySigner,
+    xPrvSigner,
+    signPsbt,
+
+    -- * Finalizing
+    finalizePsbt,
+  )
+where
+
+import Control.Applicative ((<|>))
+import Control.DeepSeq (NFData)
+import Control.Monad (ap, forM, forM_, guard, replicateM, unless, when, zipWithM)
+import Crypto.Secp256k1 (Ctx, SecKey, derivePubKey)
+import Data.Bifunctor (first)
+import Data.Bits (shiftL, (.|.))
+import Data.ByteString (ByteString)
+import Data.ByteString qualified as B
+import Data.Base64.Types (extractBase64)
+import Data.ByteString.Base64 (decodeBase64Untyped, encodeBase64')
+import Data.Char (toUpper)
+import Data.List (stripPrefix)
+import Data.Map.Strict (Map)
+import Data.Map.Strict qualified as Map
+import Data.Maybe (catMaybes, fromMaybe, listToMaybe, mapMaybe)
+import Data.Serialize qualified as S
+import Data.Word (Word32, Word64, Word8)
+import GHC.Generics (Generic)
+import Haskoin.Crypto.Hash (addressHash)
+import Haskoin.Crypto.Keys.Common
+import Haskoin.Crypto.Keys.Extended
+import Haskoin.Network.Common (VarInt (..))
+import Haskoin.Network.Data
+import Haskoin.Script.Common
+import Haskoin.Script.SigHash
+import Haskoin.Script.Standard
+import Haskoin.Transaction.Builder.Sign (SigInput (..), makeSignature)
+import Haskoin.Transaction.Common
+import Haskoin.Transaction.Segwit (isSegwit)
+import Haskoin.Util
+import Numeric (showHex)
+
+{- A PSBT -}
+
+-- | A key of a map: its type, and the data after the type byte. Most
+-- fields have none; a derivation or a signature has the public key it is
+-- of.
+data Key = Key
+  { keyType :: !Word8,
+    keyData :: !ByteString
+  }
+  deriving (Eq, Ord, Show, Read, Generic)
+  deriving anyclass (NFData)
+
+-- | A map of a PSBT. It is written with its keys in order, the type first,
+-- as Bitcoin Core writes it.
+type PsbtMap = Map Key ByteString
+
+-- | A PSBT: the unsigned transaction, the other fields of the global map,
+-- and the maps of the inputs and of the outputs, one each, in the order of
+-- the transaction
+data Psbt = Psbt
+  { unsignedTx :: !Tx,
+    globals :: !PsbtMap,
+    inputs :: ![PsbtMap],
+    outputs :: ![PsbtMap]
+  }
+  deriving (Eq, Show, Read, Generic)
+  deriving anyclass (NFData)
+
+-- | The PSBT of a transaction, with nothing else, as the creator of the
+-- spec makes it: the transaction without its input scripts and witness,
+-- and an empty map per input and per output
+psbtOf :: Tx -> Psbt
+psbtOf tx =
+  Psbt
+    { unsignedTx = Tx tx.version [TxIn input.outpoint B.empty input.sequence | input <- tx.inputs] tx.outputs [] tx.locktime,
+      globals = Map.empty,
+      inputs = Map.empty <$ tx.inputs,
+      outputs = Map.empty <$ tx.outputs
+    }
+
+-- | The PSBT with the fields of both, as the combiner of the spec makes
+-- it. Both must be of the same transaction. A field both have, with
+-- different values, keeps the value of the first.
+combinePsbt :: Psbt -> Psbt -> Either String Psbt
+combinePsbt a b = do
+  unless (a.unsignedTx == b.unsignedTx) $ Left "The PSBTs are not of the same transaction"
+  return $ Psbt a.unsignedTx (Map.union a.globals b.globals) (zipWith Map.union a.inputs b.inputs) (zipWith Map.union a.outputs b.outputs)
+
+-- | The transaction of a PSBT with the final script and witness of every
+-- input that has them, as the transaction extractor of the spec builds
+-- it. An input without them stays unsigned.
+psbtTransaction :: Psbt -> Either String Tx
+psbtTransaction psbt = do
+  finals <- forM (zip psbt.unsignedTx.inputs psbt.inputs) $ \(input, m) -> do
+    stack <- fromMaybe [] <$> finalScriptWitness m
+    let scriptSig = fromMaybe B.empty (finalScriptSig m)
+    return (TxIn input.outpoint scriptSig input.sequence, stack)
+  let stacks = snd <$> finals
+      witness = if all null stacks then [] else stacks
+  return $ Tx psbt.unsignedTx.version (fst <$> finals) psbt.unsignedTx.outputs witness psbt.unsignedTx.locktime
+
+{- The types of the spec -}
+
+unsignedTxType, xpubType, versionType :: Word8
+unsignedTxType = 0x00
+xpubType = 0x01
+versionType = 0xfb
+
+nonWitnessUtxoType, witnessUtxoType, partialSigType, sigHashTypeType, inRedeemScriptType, inWitnessScriptType, inDerivationType, finalScriptSigType, finalScriptWitnessType :: Word8
+nonWitnessUtxoType = 0x00
+witnessUtxoType = 0x01
+partialSigType = 0x02
+sigHashTypeType = 0x03
+inRedeemScriptType = 0x04
+inWitnessScriptType = 0x05
+inDerivationType = 0x06
+finalScriptSigType = 0x07
+finalScriptWitnessType = 0x08
+
+outRedeemScriptType, outWitnessScriptType, outDerivationType :: Word8
+outRedeemScriptType = 0x00
+outWitnessScriptType = 0x01
+outDerivationType = 0x02
+
+proprietaryType :: Word8
+proprietaryType = 0xfc
+
+-- | The key of the unsigned transaction in the global map
+unsignedTxKey :: Key
+unsignedTxKey = Key unsignedTxType B.empty
+
+{- Bytes -}
+
+-- | The five bytes every PSBT starts with: "psbt" and 0xff
+psbtMagic :: ByteString
+psbtMagic = B.pack [0x70, 0x73, 0x62, 0x74, 0xff]
+
+-- | Whether the bytes are those of a PSBT, by their first five
+isPsbt :: ByteString -> Bool
+isPsbt = B.isPrefixOf psbtMagic
+
+-- | The bytes of a PSBT: the magic, the global map with the unsigned
+-- transaction first, then the maps of the inputs and of the outputs
+encodePsbt :: Psbt -> ByteString
+encodePsbt psbt =
+  B.concat $ psbtMagic : encodeMap globals : (encodeMap <$> psbt.inputs) <> (encodeMap <$> psbt.outputs)
+  where
+    globals = Map.insert unsignedTxKey (S.encode psbt.unsignedTx) psbt.globals
+
+-- | A map: each key and value after its length, the keys in order, then a
+-- zero byte
+encodeMap :: PsbtMap -> ByteString
+encodeMap m =
+  B.concat [sized (B.cons key.keyType key.keyData) <> sized value | (key, value) <- Map.toAscList m]
+    <> B.singleton 0
+
+-- | Bytes after their length, as a compact size integer
+sized :: ByteString -> ByteString
+sized bytes = compactSize (fromIntegral (B.length bytes)) <> bytes
+
+-- | A compact size integer, in its shortest form
+compactSize :: Word64 -> ByteString
+compactSize = S.encode . VarInt
+
+-- | A 32-bit integer, little-endian
+word32le :: Word32 -> ByteString
+word32le = S.runPut . S.putWord32le
+
+-- | The PSBT the bytes hold, or why they hold none: not a PSBT, or one that
+-- breaks the spec
+decodePsbt :: ByteString -> Either String Psbt
+decodePsbt = parseAll psbtParser "the last map"
+
+-- | The text of a PSBT, in base64, as the spec gives it for text
+encodePsbtBase64 :: Psbt -> ByteString
+encodePsbtBase64 = extractBase64 . encodeBase64' . encodePsbt
+
+-- | The PSBT of a base64 text, around which spaces and line breaks are
+-- left aside
+decodePsbtBase64 :: ByteString -> Either String Psbt
+decodePsbtBase64 text = do
+  bytes <- first (const "Not the base64 text of a PSBT") $ decodeBase64Untyped (B.filter (`notElem` spaces) text)
+  decodePsbt bytes
+  where
+    spaces = [0x20, 0x09, 0x0a, 0x0d]
+
+{- Reading bytes -}
+
+-- | A reader of bytes, which stops at the first byte out of place with a
+-- sentence saying so
+newtype BytesParser a = BytesParser (ByteString -> Either String (a, ByteString))
+
+instance Functor BytesParser where
+  fmap f (BytesParser p) = BytesParser $ \bytes -> do
+    (a, rest) <- p bytes
+    return (f a, rest)
+
+instance Applicative BytesParser where
+  pure a = BytesParser $ \bytes -> Right (a, bytes)
+  (<*>) = ap
+
+instance Monad BytesParser where
+  BytesParser p >>= f = BytesParser $ \bytes -> do
+    (a, rest) <- p bytes
+    let BytesParser q = f a
+    q rest
+
+refuse :: String -> BytesParser a
+refuse reason = BytesParser $ \_ -> Left reason
+
+-- | Read all the bytes with the parser: nothing may follow what it reads
+parseAll :: BytesParser a -> String -> ByteString -> Either String a
+parseAll (BytesParser p) what bytes = do
+  (a, rest) <- p bytes
+  unless (B.null rest) $ Left ("Bytes follow " <> what)
+  return a
+
+-- | The next bytes, which must be there. What they are part of names
+-- them in the refusal.
+bytesOf :: Int -> String -> BytesParser ByteString
+bytesOf n what = BytesParser $ \bytes ->
+  if B.length bytes < n
+    then Left ("The PSBT ends inside " <> what)
+    else Right (B.splitAt n bytes)
+
+-- | All the bytes left
+restOf :: BytesParser ByteString
+restOf = BytesParser $ \bytes -> Right (bytes, B.empty)
+
+-- | A compact size integer: one byte below 0xfd, or 0xfd, 0xfe or 0xff and
+-- two, four or eight bytes, little-endian, in the shortest form, as
+-- Bitcoin Core reads it
+compactSizeOf :: String -> BytesParser Word64
+compactSizeOf what = do
+  first' <- B.head <$> bytesOf 1 what
+  case first' of
+    0xfd -> longer 2 0xfd
+    0xfe -> longer 4 0x10000
+    0xff -> longer 8 0x100000000
+    _ -> return (fromIntegral first')
+  where
+    longer :: Int -> Word64 -> BytesParser Word64
+    longer n least = do
+      value <- B.foldr (\b acc -> acc `shiftL` 8 .|. fromIntegral b) 0 <$> bytesOf n what
+      when (value < least) $ refuse ("A length in " <> what <> " is not in its shortest form")
+      return value
+
+-- | A length, which must fit in memory
+lengthOf :: String -> BytesParser Int
+lengthOf what = do
+  n <- compactSizeOf what
+  when (n > fromIntegral (maxBound :: Int)) $ refuse ("A length in " <> what <> " is beyond any PSBT")
+  return (fromIntegral n)
+
+-- | Bytes after their length
+sizedBytes :: String -> BytesParser ByteString
+sizedBytes what = lengthOf what >>= (`bytesOf` what)
+
+-- | A map: keys and values up to a zero byte, each key once
+mapOf :: String -> BytesParser PsbtMap
+mapOf what = go Map.empty
+  where
+    go m = do
+      keyLength <- lengthOf what
+      if keyLength == 0
+        then return m
+        else do
+          keyBytes <- bytesOf keyLength what
+          value <- sizedBytes what
+          let key = Key (B.head keyBytes) (B.tail keyBytes)
+          when (Map.member key m) $
+            refuse (capital what <> " has the key " <> showKey key <> " twice")
+          go (Map.insert key value m)
+
+psbtParser :: BytesParser Psbt
+psbtParser = do
+  magic <- bytesOf 5 "the magic bytes"
+  unless (magic == psbtMagic) $ refuse "Not a PSBT: the bytes do not start with the magic bytes of BIP 174"
+  globals <- mapOf "the global map"
+  tx <- either refuse return (unsignedTxOf globals)
+  let others = Map.delete unsignedTxKey globals
+  either refuse return (checkMap "the global map" globalFields others)
+  inputs <- forM [0 .. length tx.inputs - 1] $ \i -> do
+    let what = "input " <> show i
+    m <- mapOf what
+    either refuse return (checkMap what inputFields m)
+    return m
+  outputs <- forM [0 .. length tx.outputs - 1] $ \i -> do
+    let what = "output " <> show i
+    m <- mapOf what
+    either refuse return (checkMap what outputFields m)
+    return m
+  return Psbt {unsignedTx = tx, globals = others, inputs = inputs, outputs = outputs}
+
+-- | The unsigned transaction of the global map, which must be there, in
+-- the serialization without witness, with no input script
+unsignedTxOf :: PsbtMap -> Either String Tx
+unsignedTxOf globals = do
+  bytes <- maybe (Left "The global map has no unsigned transaction") Right (Map.lookup unsignedTxKey globals)
+  tx <- decodeFully "The unsigned transaction" bytes
+  unless (null tx.witness && S.encode tx == bytes) $
+    Left "The unsigned transaction is not in the serialization without witness"
+  unless (all (B.null . (.script)) tx.inputs) $
+    Left "The unsigned transaction has an input with a script"
+  return tx
+
+-- | A value decoded from all the bytes given, or a refusal naming it
+decodeFully :: (S.Serialize a) => String -> ByteString -> Either String a
+decodeFully what bytes = case S.runGetState S.get bytes 0 of
+  Right (a, rest) | B.null rest -> Right a
+  _ -> Left (what <> " does not decode")
+
+-- | A sentence that starts with the words given
+capital :: String -> String
+capital (c : rest) = toUpper c : rest
+capital [] = []
+
+-- | A key as a refusal names it: its type in hexadecimal, and its data
+showKey :: Key -> String
+showKey key =
+  "0x" <> hexByte key.keyType <> (if B.null key.keyData then "" else " with the data " <> concatMap hexByte (B.unpack key.keyData))
+  where
+    hexByte b = (if b < 16 then "0" else "") <> showHex b ""
+
+{- The shapes of the spec -}
+
+-- | The data of a key of the spec: none, a public key, or an extended
+-- public key
+data KeyShape = NoData | PublicKeyData | XpubData
+
+-- | The fields the spec defines for a map, by type: the shape of their
+-- keys, and a check of their values given the data of the key
+type Fields = Map Word8 (KeyShape, ByteString -> ByteString -> Either String ())
+
+-- | Check every key of a map against the spec: the keys of the fields it
+-- defines must have their shape and their values must decode, and a
+-- proprietary key must have its identifier and subtype. Other keys are
+-- not the spec's to check.
+checkMap :: String -> Fields -> PsbtMap -> Either String ()
+checkMap what fields m = forM_ (Map.toList m) $ \(key, value) ->
+  first ((capital what <> ": ") <>) $
+    case Map.lookup key.keyType fields of
+      Just (shape, checkValue) -> do
+        checkShape shape key
+        first (("the value of the key " <> showKey key <> " ") <>) $ checkValue key.keyData value
+      Nothing
+        | key.keyType == proprietaryType -> () <$ proprietaryOf key
+        | otherwise -> return ()
+
+checkShape :: KeyShape -> Key -> Either String ()
+checkShape shape key = case shape of
+  NoData -> unless (B.null key.keyData) $ Left ("the key " <> showKey key <> " carries data")
+  PublicKeyData -> unless (isPublicKeyBytes key.keyData) $ Left ("the key " <> showKey key <> " is not a public key")
+  XpubData -> unless (B.length key.keyData == 78) $ Left ("the key " <> showKey key <> " is not an extended public key")
+
+-- | Whether the bytes have the length and the first byte of a public key,
+-- compressed or not. Whether they are a point of the curve is checked
+-- where the key is used.
+isPublicKeyBytes :: ByteString -> Bool
+isPublicKeyBytes bytes = case B.unpack (B.take 1 bytes) of
+  [0x02] -> B.length bytes == 33
+  [0x03] -> B.length bytes == 33
+  [0x04] -> B.length bytes == 65
+  _ -> False
+
+globalFields :: Fields
+globalFields =
+  Map.fromList
+    [ (xpubType, (XpubData, xpubValue)),
+      (versionType, (NoData, const versionValue))
+    ]
+  where
+    -- The path of an extended key has one index per level of its depth,
+    -- the fifth byte of the key
+    xpubValue keyData value = do
+      derivation <- decodeDerivation value
+      unless (length (pathToList derivation.path) == fromIntegral (B.index keyData 4)) $
+        Left "has a path that is not as deep as the key"
+    versionValue value = do
+      version <- decodeWord32le value
+      unless (version == 0) $ Left ("is PSBT version " <> show version <> ": only version 0 is supported")
+
+inputFields :: Fields
+inputFields =
+  Map.fromList
+    [ (nonWitnessUtxoType, (NoData, const txValue)),
+      (witnessUtxoType, (NoData, const txOutValue)),
+      (partialSigType, (PublicKeyData, const anyValue)),
+      (sigHashTypeType, (NoData, const sigHashValue)),
+      (inRedeemScriptType, (NoData, const scriptValue)),
+      (inWitnessScriptType, (NoData, const scriptValue)),
+      (inDerivationType, (PublicKeyData, const derivationValue)),
+      (finalScriptSigType, (NoData, const anyValue)),
+      (finalScriptWitnessType, (NoData, const witnessValue))
+    ]
+  where
+    txValue value = () <$ (decodeTx value :: Either String Tx)
+    txOutValue value = () <$ (decodeTxOut value :: Either String TxOut)
+    sigHashValue value = () <$ decodeWord32le value
+    witnessValue value = () <$ decodeWitness value
+
+outputFields :: Fields
+outputFields =
+  Map.fromList
+    [ (outRedeemScriptType, (NoData, const scriptValue)),
+      (outWitnessScriptType, (NoData, const scriptValue)),
+      (outDerivationType, (PublicKeyData, const derivationValue))
+    ]
+
+anyValue :: ByteString -> Either String ()
+anyValue _ = Right ()
+
+derivationValue :: ByteString -> Either String ()
+derivationValue value = () <$ decodeDerivation value
+
+scriptValue :: ByteString -> Either String ()
+scriptValue value = () <$ decodeScript value
+
+decodeTx :: ByteString -> Either String Tx
+decodeTx = decodeFully "is not a transaction: it"
+
+decodeTxOut :: ByteString -> Either String TxOut
+decodeTxOut = decodeFully "is not an output: it"
+
+decodeScript :: ByteString -> Either String Script
+decodeScript = decodeFully "is not a script: it"
+
+decodeWord32le :: ByteString -> Either String Word32
+decodeWord32le bytes
+  | B.length bytes == 4 = Right $ B.foldr (\b acc -> acc `shiftL` 8 .|. fromIntegral b) 0 bytes
+  | otherwise = Left "is not a 32-bit integer"
+
+-- | A witness stack: the number of items, then each item after its length
+decodeWitness :: ByteString -> Either String WitnessStack
+decodeWitness = parseAll stack "the final witness"
+  where
+    stack = do
+      count <- lengthOf "the final witness"
+      replicateM count (sizedBytes "the final witness")
+
+encodeWitness :: WitnessStack -> ByteString
+encodeWitness stack = compactSize (fromIntegral (length stack)) <> B.concat (sized <$> stack)
+
+{- Derivations -}
+
+-- | How a key derives: the fingerprint of the key the path starts from,
+-- the master key's as the spec wants it, and the path from it. A key
+-- whose origin is unknown is named by its own fingerprint and an empty
+-- path, or by the fingerprint of an ancestor and the path from it.
+data Derivation = Derivation
+  { fingerprint :: !Fingerprint,
+    path :: !DerivPath
+  }
+  deriving (Eq, Show, Read, Generic)
+  deriving anyclass (NFData)
+
+encodeDerivation :: Derivation -> ByteString
+encodeDerivation derivation =
+  S.encode derivation.fingerprint <> B.concat (word32le <$> pathToList derivation.path)
+
+-- | A derivation: four bytes of fingerprint, then four per index of the
+-- path, little-endian
+decodeDerivation :: ByteString -> Either String Derivation
+decodeDerivation bytes = do
+  unless (B.length bytes >= 4 && (B.length bytes - 4) `mod` 4 == 0) $
+    Left "is not a fingerprint and a path"
+  let (fingerprintBytes, pathBytes) = B.splitAt 4 bytes
+  fingerprint <- decodeFully "is not a fingerprint: it" fingerprintBytes
+  indices <- mapM decodeWord32le (chunksOf 4 pathBytes)
+  return $ Derivation fingerprint (listToPath indices)
+
+chunksOf :: Int -> ByteString -> [ByteString]
+chunksOf n bytes
+  | B.null bytes = []
+  | otherwise = let (chunk, rest) = B.splitAt n bytes in chunk : chunksOf n rest
+
+-- | The records of the type whose keys are public keys, in the order of
+-- the map, with their values decoded
+publicKeyRecords :: Word8 -> Ctx -> (ByteString -> Either String a) -> PsbtMap -> Either String [(PublicKey, a)]
+publicKeyRecords t ctx decodeValue m =
+  forM [(key, value) | (key, value) <- Map.toAscList m, key.keyType == t] $ \(key, value) -> do
+    public <- first (const ("The key " <> showKey key <> " is not a public key")) (unmarshal ctx key.keyData)
+    decoded <- first (("The value of the key " <> showKey key <> " ") <>) (decodeValue value)
+    return (public, decoded)
+
+derivationsOf :: Word8 -> Ctx -> PsbtMap -> Either String [(PublicKey, Derivation)]
+derivationsOf t ctx = publicKeyRecords t ctx decodeDerivation
+
+insertDerivation :: Word8 -> Ctx -> PublicKey -> Derivation -> PsbtMap -> PsbtMap
+insertDerivation t ctx public derivation = Map.insert (Key t (marshal ctx public)) (encodeDerivation derivation)
+
+-- | The derivations of the keys of an input: PSBT_IN_BIP32_DERIVATION
+inputDerivations :: Ctx -> PsbtMap -> Either String [(PublicKey, Derivation)]
+inputDerivations = derivationsOf inDerivationType
+
+insertInputDerivation :: Ctx -> PublicKey -> Derivation -> PsbtMap -> PsbtMap
+insertInputDerivation = insertDerivation inDerivationType
+
+-- | The derivations of the keys of an output: PSBT_OUT_BIP32_DERIVATION
+outputDerivations :: Ctx -> PsbtMap -> Either String [(PublicKey, Derivation)]
+outputDerivations = derivationsOf outDerivationType
+
+insertOutputDerivation :: Ctx -> PublicKey -> Derivation -> PsbtMap -> PsbtMap
+insertOutputDerivation = insertDerivation outDerivationType
+
+-- | The extended public keys of the global map, with their derivations:
+-- PSBT_GLOBAL_XPUB. Those of another network, by their version bytes, are
+-- left aside.
+xpubRecords :: Network -> Ctx -> PsbtMap -> Either String [(XPubKey, Derivation)]
+xpubRecords net ctx m =
+  fmap catMaybes . forM [(key, value) | (key, value) <- Map.toAscList m, key.keyType == xpubType] $ \(key, value) -> do
+    derivation <- first (("The value of the key " <> showKey key <> " ") <>) (decodeDerivation value)
+    return $ (\xpub -> (xpub, derivation)) <$> eitherToMaybe (unmarshal (net, ctx) key.keyData)
+
+insertXpubRecord :: Network -> Ctx -> XPubKey -> Derivation -> PsbtMap -> PsbtMap
+insertXpubRecord net ctx xpub derivation = Map.insert (Key xpubType (marshal (net, ctx) xpub)) (encodeDerivation derivation)
+
+{- The fields of an input and of an output -}
+
+-- | The field of a type whose key carries no data, if the map has it
+plainField :: Word8 -> PsbtMap -> Maybe ByteString
+plainField t = Map.lookup (Key t B.empty)
+
+insertPlainField :: Word8 -> ByteString -> PsbtMap -> PsbtMap
+insertPlainField t = Map.insert (Key t B.empty)
+
+deletePlainField :: Word8 -> PsbtMap -> PsbtMap
+deletePlainField t = Map.delete (Key t B.empty)
+
+-- | The whole transaction the input spends from: PSBT_IN_NON_WITNESS_UTXO
+nonWitnessUtxo :: PsbtMap -> Either String (Maybe Tx)
+nonWitnessUtxo = traverse (first ("The previous transaction " <>) . decodeTx) . plainField nonWitnessUtxoType
+
+insertNonWitnessUtxo :: Tx -> PsbtMap -> PsbtMap
+insertNonWitnessUtxo = insertPlainField nonWitnessUtxoType . S.encode
+
+-- | The output the input spends, alone: PSBT_IN_WITNESS_UTXO
+witnessUtxo :: PsbtMap -> Either String (Maybe TxOut)
+witnessUtxo = traverse (first ("The witness output " <>) . decodeTxOut) . plainField witnessUtxoType
+
+insertWitnessUtxo :: TxOut -> PsbtMap -> PsbtMap
+insertWitnessUtxo = insertPlainField witnessUtxoType . S.encode
+
+-- | The signatures of the input that are not final, by the public key each
+-- is of, in the order of the map: PSBT_IN_PARTIAL_SIG. A signature is as
+-- it goes in a script, with its sighash byte last.
+partialSignatures :: Ctx -> PsbtMap -> Either String [(PublicKey, ByteString)]
+partialSignatures ctx = publicKeyRecords partialSigType ctx Right
+
+-- | Whether the input carries a signature that is not final
+hasPartialSignatures :: PsbtMap -> Bool
+hasPartialSignatures = any ((== partialSigType) . (.keyType)) . Map.keys
+
+insertPartialSignature :: Ctx -> PublicKey -> ByteString -> PsbtMap -> PsbtMap
+insertPartialSignature ctx public = Map.insert (Key partialSigType (marshal ctx public))
+
+-- | The map without its signatures that are not final, as a finalizer
+-- leaves it
+deletePartialSignatures :: PsbtMap -> PsbtMap
+deletePartialSignatures = Map.filterWithKey (\key _ -> key.keyType /= partialSigType)
+
+-- | The sighash the input is to be signed with: PSBT_IN_SIGHASH_TYPE
+sigHashType :: PsbtMap -> Either String (Maybe SigHash)
+sigHashType = traverse (fmap fromIntegral . first ("The sighash type " <>) . decodeWord32le) . plainField sigHashTypeType
+
+insertSigHashType :: SigHash -> PsbtMap -> PsbtMap
+insertSigHashType = insertPlainField sigHashTypeType . word32le . fromIntegral
+
+-- | The map without the sighash the input was to be signed with, as a
+-- finalizer leaves it
+deleteSigHashType :: PsbtMap -> PsbtMap
+deleteSigHashType = deletePlainField sigHashTypeType
+
+-- | The script of a type whose key carries no data, if the map has it
+scriptField :: Word8 -> String -> PsbtMap -> Either String (Maybe Script)
+scriptField t what = traverse (first ((what <> " ") <>) . decodeScript) . plainField t
+
+insertScriptField :: Word8 -> Script -> PsbtMap -> PsbtMap
+insertScriptField t = insertPlainField t . S.encode
+
+-- | The redeem script of the P2SH coin an input spends:
+-- PSBT_IN_REDEEM_SCRIPT
+inputRedeemScript :: PsbtMap -> Either String (Maybe Script)
+inputRedeemScript = scriptField inRedeemScriptType "The redeem script"
+
+insertInputRedeemScript :: Script -> PsbtMap -> PsbtMap
+insertInputRedeemScript = insertScriptField inRedeemScriptType
+
+-- | The witness script of the P2WSH coin an input spends:
+-- PSBT_IN_WITNESS_SCRIPT
+inputWitnessScript :: PsbtMap -> Either String (Maybe Script)
+inputWitnessScript = scriptField inWitnessScriptType "The witness script"
+
+insertInputWitnessScript :: Script -> PsbtMap -> PsbtMap
+insertInputWitnessScript = insertScriptField inWitnessScriptType
+
+-- | The input script of a signed input: PSBT_IN_FINAL_SCRIPTSIG
+finalScriptSig :: PsbtMap -> Maybe ByteString
+finalScriptSig = plainField finalScriptSigType
+
+insertFinalScriptSig :: ByteString -> PsbtMap -> PsbtMap
+insertFinalScriptSig = insertPlainField finalScriptSigType
+
+-- | The witness of a signed input: PSBT_IN_FINAL_SCRIPTWITNESS
+finalScriptWitness :: PsbtMap -> Either String (Maybe WitnessStack)
+finalScriptWitness = traverse decodeWitness . plainField finalScriptWitnessType
+
+insertFinalScriptWitness :: WitnessStack -> PsbtMap -> PsbtMap
+insertFinalScriptWitness = insertPlainField finalScriptWitnessType . encodeWitness
+
+-- | The redeem script of a P2SH output: PSBT_OUT_REDEEM_SCRIPT
+outputRedeemScript :: PsbtMap -> Either String (Maybe Script)
+outputRedeemScript = scriptField outRedeemScriptType "The redeem script"
+
+insertOutputRedeemScript :: Script -> PsbtMap -> PsbtMap
+insertOutputRedeemScript = insertScriptField outRedeemScriptType
+
+-- | The witness script of a P2WSH output: PSBT_OUT_WITNESS_SCRIPT
+outputWitnessScript :: PsbtMap -> Either String (Maybe Script)
+outputWitnessScript = scriptField outWitnessScriptType "The witness script"
+
+insertOutputWitnessScript :: Script -> PsbtMap -> PsbtMap
+insertOutputWitnessScript = insertScriptField outWitnessScriptType
+
+{- Proprietary fields -}
+
+-- | A proprietary field, of type 0xFC: the identifier of the software it
+-- belongs to, its subtype under that identifier, and the data after the
+-- subtype, none for most
+data Proprietary = Proprietary
+  { identifier :: !ByteString,
+    subtype :: !Word64,
+    extra :: !ByteString
+  }
+  deriving (Eq, Show, Read, Generic)
+  deriving anyclass (NFData)
+
+-- | The key of a proprietary field: the type 0xFC, the identifier after
+-- its length, the subtype as a compact size integer, and the data
+proprietaryKey :: Proprietary -> Key
+proprietaryKey p =
+  Key proprietaryType (sized p.identifier <> compactSize p.subtype <> p.extra)
+
+-- | The proprietary field a key is, if it is one: nothing for a key of
+-- another type, a refusal for a proprietary key without its identifier
+-- and subtype
+proprietaryOf :: Key -> Either String (Maybe Proprietary)
+proprietaryOf key
+  | key.keyType /= proprietaryType = Right Nothing
+  | otherwise =
+      first (const ("the proprietary key " <> showKey key <> " has no identifier and subtype")) $
+        Just <$> parseAll (Proprietary <$> sizedBytes what <*> compactSizeOf what <*> restOf) what key.keyData
+  where
+    what = "a proprietary key"
+
+-- | The value of the proprietary field of the identifier and subtype,
+-- with no data after the subtype, if the map has it
+lookupProprietary :: ByteString -> Word64 -> PsbtMap -> Maybe ByteString
+lookupProprietary identifier subtype = Map.lookup (proprietaryKey (Proprietary identifier subtype B.empty))
+
+insertProprietary :: ByteString -> Word64 -> ByteString -> PsbtMap -> PsbtMap
+insertProprietary identifier subtype = Map.insert (proprietaryKey (Proprietary identifier subtype B.empty))
+
+{- Signing -}
+
+-- | Where a signer gets the private key of a public key that a derivation
+-- record names, if it has it
+type Signer = PublicKey -> Derivation -> Maybe SecKey
+
+-- | A signer that holds one private key, for the records of its public
+-- key
+keySigner :: Ctx -> SecKey -> Signer
+keySigner ctx secret public _ = do
+  guard (public.point == derivePubKey ctx secret)
+  return secret
+
+-- | A signer that derives from an extended private key. A record names a
+-- key it derives by the fingerprint of the extended key and the path from
+-- it, or, when the origin of the extended key is given, by the
+-- fingerprint of that origin and the path from it, which starts with the
+-- path of the extended key.
+xPrvSigner :: Ctx -> XPrvKey -> Maybe Derivation -> Signer
+xPrvSigner ctx xprv originM public derivation = do
+  path <- relative
+  let secret = (derivePath ctx path xprv).key
+  guard (public.point == derivePubKey ctx secret)
+  return secret
+  where
+    own = xPubFP ctx (deriveXPubKey ctx xprv)
+    relative
+      | derivation.fingerprint == own = Just derivation.path
+      | Just origin <- originM, derivation.fingerprint == origin.fingerprint =
+          listToPath <$> stripPrefix (pathToList origin.path) (pathToList derivation.path)
+      | otherwise = Nothing
+
+-- | Sign every input the signer has keys for, as the signer of the spec
+-- does: a signature goes in the input, with the public key, for every
+-- derivation record whose key the signer has. An input is signed against
+-- the coin it spends, from its witness output or its previous transaction,
+-- with the sighash it asks for, SIGHASH_ALL when it asks for none. A P2SH
+-- coin needs its redeem script in the input, and a P2WSH coin its witness
+-- script. An input without its coin, or with a final script already, is
+-- left as it is.
+signPsbt :: Network -> Ctx -> Signer -> Psbt -> Either String Psbt
+signPsbt net ctx signer psbt = do
+  inputs <- forM (zip3 [0 ..] psbt.unsignedTx.inputs psbt.inputs) $ \(i, input, m) -> do
+    coinM <- spentOutput input m
+    case coinM of
+      Just coin | not (isFinal m) -> do
+        sighash <- fromMaybe sigHashAll <$> sigHashType m
+        sigInput <- signingInput ctx input coin sighash m
+        records <- inputDerivations ctx m
+        let signature :: PublicKey -> SecKey -> ByteString
+            signature public secret = encodeTxSig net ctx (makeSignature net ctx psbt.unsignedTx i sigInput (PrivateKey secret public.compress))
+        return $ foldr (\(public, secret) -> insertPartialSignature ctx public (signature public secret)) m [(public, secret) | (public, d) <- records, Just secret <- [signer public d]]
+      _ -> return m
+  return $ Psbt psbt.unsignedTx psbt.globals inputs psbt.outputs
+
+-- | Whether an input has its final script or witness
+isFinal :: PsbtMap -> Bool
+isFinal m = any (`Map.member` m) [Key finalScriptSigType B.empty, Key finalScriptWitnessType B.empty]
+
+-- | The output an input spends, from the fields of the input: its witness
+-- output, or the output of its previous transaction, which must be the
+-- transaction the input spends from
+spentOutput :: TxIn -> PsbtMap -> Either String (Maybe TxOut)
+spentOutput input m = do
+  witnessM <- witnessUtxo m
+  parentM <- nonWitnessUtxo m
+  case (witnessM, parentM) of
+    (Just coin, _) -> return (Just coin)
+    (Nothing, Just parent) -> do
+      unless (txHash parent == input.outpoint.hash) $
+        Left "The previous transaction of the input is not the one it spends"
+      maybe (Left "The input spends an output its previous transaction does not have") (return . Just) $
+        listToMaybe (drop (fromIntegral input.outpoint.index) parent.outputs)
+    (Nothing, Nothing) -> return Nothing
+
+-- | What an input is signed against: the script of its coin, with the
+-- redeem script of a P2SH coin and the witness script of a P2WSH coin
+-- from the input, as 'makeSignature' wants them
+signingInput :: Ctx -> TxIn -> TxOut -> SigHash -> PsbtMap -> Either String SigInput
+signingInput ctx input coin sighash m = do
+  coinScript <- first ("The script of the coin " <>) (unmarshal ctx coin.script)
+  redeemM <- traverse (decodeOutput ctx) =<< inputRedeemScript m
+  witnessM <- traverse (decodeOutput ctx) =<< inputWitnessScript m
+  -- A SegWit coin, nested in P2SH or not, is signed against its witness
+  -- program; any other against its own script
+  let script = case redeemM of
+        Just redeem | not (isSegwit coinScript), isSegwit redeem -> redeem
+        _ -> coinScript
+  return
+    SigInput
+      { script = script,
+        value = coin.value,
+        outpoint = input.outpoint,
+        sighash = sighash,
+        redeem = witnessM <|> redeemM
+      }
+
+{- Finalizing -}
+
+-- | Finalize every input whose signatures suffice for the coin it spends,
+-- as the finalizer of the spec does: the final script and witness go in
+-- the input, and its partial signatures, sighash type, redeem script,
+-- witness script and derivation records go, as Bitcoin Core clears them.
+-- Its coin and the keys the spec does not define stay. The coins
+-- finalized are those of P2PK, P2PKH and multisig scripts, P2SH coins
+-- with their redeem script, P2WPKH coins, and P2WSH coins with their
+-- witness script, nested in P2SH or not. Any other input, or one without
+-- enough signatures, stays as it is.
+finalizePsbt :: Ctx -> Psbt -> Either String Psbt
+finalizePsbt ctx psbt = do
+  inputs <- zipWithM finalized psbt.unsignedTx.inputs psbt.inputs
+  return $ Psbt psbt.unsignedTx psbt.globals inputs psbt.outputs
+  where
+    finalized input m = do
+      coinM <- spentOutput input m
+      case coinM of
+        Just coin | not (isFinal m) -> do
+          coinScript <- first ("The script of the coin " <>) (unmarshal ctx coin.script)
+          finals <- finalScripts ctx m coinScript
+          return $ case finals of
+            Just (scriptSig, stack) ->
+              foldr ($) (cleared m) $
+                [insertFinalScriptSig scriptSig | not (B.null scriptSig)]
+                  <> [insertFinalScriptWitness stack | not (null stack)]
+            Nothing -> m
+        _ -> return m
+    cleared =
+      deletePartialSignatures
+        . deleteSigHashType
+        . deletePlainField inRedeemScriptType
+        . deletePlainField inWitnessScriptType
+        . Map.filterWithKey (\key _ -> key.keyType /= inDerivationType)
+
+-- | The final script and witness of an input, from its partial signatures
+-- and the script of its coin, when they suffice
+finalScripts :: Ctx -> PsbtMap -> ScriptOutput -> Either String (Maybe (ByteString, WitnessStack))
+finalScripts ctx m coinScript = do
+  signatures <- partialSignatures ctx m
+  redeemM <- inputRedeemScript m
+  witnessM <- inputWitnessScript m
+  let signatureOf public = lookup public signatures
+      signatureOfHash h = listToMaybe [(public, signature) | (public, signature) <- signatures, addressHash (marshal ctx public) == h]
+      enough keys n = let found = mapMaybe signatureOf keys in if length found >= n then Just (take n found) else Nothing
+      -- The items a script is spent with: the pushes of an input script,
+      -- or the items of a witness
+      items script = case script of
+        PayPK public -> (: []) <$> signatureOf public
+        PayPKHash h -> withKey <$> signatureOfHash h
+        PayMulSig keys n -> (B.empty :) <$> enough keys n
+        PayWitnessPKHash h -> withKey <$> signatureOfHash h
+        _ -> Nothing
+      withKey :: (PublicKey, ByteString) -> [ByteString]
+      withKey (public, signature) = [signature, marshal ctx public]
+      scriptOf = S.encode . Script . map opPushData
+      -- The witness of a SegWit coin: the items of its program, with the
+      -- witness script last for P2WSH
+      witnessOf script = case script of
+        PayWitnessScriptHash _ -> do
+          witnessScript <- witnessM
+          guard (toP2WSH witnessScript == script)
+          inner <- eitherToMaybe (decodeOutput ctx witnessScript)
+          (<> [S.encode witnessScript]) <$> items inner
+        _ -> items script
+  return $ case coinScript of
+    PayScriptHash _ -> do
+      redeem <- redeemM
+      guard (toP2SH redeem == coinScript)
+      inner <- eitherToMaybe (decodeOutput ctx redeem)
+      if isSegwit inner
+        then (scriptOf [S.encode redeem],) <$> witnessOf inner
+        else (\found -> (scriptOf (found <> [S.encode redeem]), [])) <$> items inner
+    _
+      | isSegwit coinScript -> (B.empty,) <$> witnessOf coinScript
+      | otherwise -> (\found -> (scriptOf found, [])) <$> items coinScript
