@@ -35,7 +35,7 @@ import Data.ByteString.Lazy qualified as L
 import Data.Bytes.Get
 import Data.Bytes.Put
 import Data.Bytes.Serial
-import Data.Maybe (fromMaybe, isNothing)
+import Data.Maybe (fromMaybe)
 import Data.Serialize (Serialize (..))
 import Data.Text qualified as T
 import Haskoin.Crypto.Hash
@@ -56,9 +56,7 @@ signHash ctx k = signMsg ctx k . hashToMsg
 
 -- | Verify an ECDSA signature for a 256-bit hash.
 verifyHashSig :: Ctx -> Hash256 -> Sig -> PubKey -> Bool
-verifyHashSig ctx h s p = verifySig ctx p norm (hashToMsg h)
-  where
-    norm = fromMaybe s (normalizeSig ctx s)
+verifyHashSig ctx h s p = verifySig ctx p (normalizeSig ctx s) (hashToMsg h)
 
 instance Marshal Ctx Sig where
   marshalGet ctx = do
@@ -89,9 +87,10 @@ instance MarshalJSON Ctx Sig where
         Nothing -> fail $ "Could not decode signature: " <> T.unpack t
         Just s -> return s
 
--- | Is canonical half order.
+-- | Is canonical half order: the s component is not above half the curve
+-- order, the only form 'verifySig' accepts.
 isCanonicalHalfOrder :: Ctx -> Sig -> Bool
-isCanonicalHalfOrder ctx = isNothing . normalizeSig ctx
+isCanonicalHalfOrder = isLowS
 
 -- | Decode signature strictly.
 decodeStrictSig :: Ctx -> ByteString -> Maybe Sig

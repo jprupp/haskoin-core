@@ -30,6 +30,7 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 
 ### Changed
 
+- The package requires secp256k1-haskell 2.0.0, whose `normalizeSig` is total. `verifyHashSig` normalises the signature with it, and `isCanonicalHalfOrder` is its `isLowS`.
 - `buildMerkleRoot` returns `Either String MerkleRoot`. It fails for an empty list, which used to crash, and for a mutated tree in which two sibling nodes are identical (CVE-2012-2459). `extractMatches` rejects such a tree too, as `CPartialMerkleTree::TraverseAndExtract` does in Bitcoin Core, and reports why a partial tree is malformed.
 - `buildMerkleRoot`, `buildPartialMerkle` and `calcHash` build the tree in linear time instead of quadratic. `decodeMerkleFlags` is linear too; it took a minute for 100 KB of flags, which a peer could send in a `merkleblock` message.
 - `genesisBlock` no longer takes a `Ctx` and returns the right coinbase for every network. Bitcoin testnet4 has its own genesis coinbase, so `genesisBlock btcTest4` used to return a block whose transactions did not match its header.
