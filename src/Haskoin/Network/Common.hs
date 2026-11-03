@@ -48,11 +48,14 @@ module Haskoin.Network.Common
     commandToString,
     stringToCommand,
     putVarInt,
+    getVarIntList,
+    putVarIntList,
+    maxListSize,
   )
 where
 
 import Control.DeepSeq
-import Control.Monad (forM_, liftM2, replicateM, unless)
+import Control.Monad (forM_, liftM2, replicateM, unless, when)
 import Data.Binary (Binary (..))
 import Data.Bits (shiftL)
 import Data.ByteString (ByteString)
@@ -83,9 +86,8 @@ newtype Addr = Addr
   deriving newtype (NFData)
 
 instance Serial Addr where
-  deserialize = Addr <$> (repList =<< deserialize)
+  deserialize = Addr <$> getVarIntList action
     where
-      repList (VarInt c) = replicateM (fromIntegral c) action
       action = liftM2 (,) getWord32le deserialize
 
   serialize (Addr xs) = do
@@ -138,9 +140,7 @@ newtype GetData = GetData
   deriving newtype (NFData)
 
 instance Serial GetData where
-  deserialize = GetData <$> (repList =<< deserialize)
-    where
-      repList (VarInt c) = replicateM (fromIntegral c) deserialize
+  deserialize = GetData <$> getVarIntList deserialize
 
   serialize (GetData xs) = do
     putVarInt $ length xs
@@ -165,9 +165,7 @@ newtype Inv = Inv
   deriving newtype (NFData)
 
 instance Serial Inv where
-  deserialize = Inv <$> (repList =<< deserialize)
-    where
-      repList (VarInt c) = replicateM (fromIntegral c) deserialize
+  deserialize = Inv <$> getVarIntList deserialize
 
   serialize (Inv xs) = do
     putVarInt $ length xs
@@ -350,9 +348,7 @@ newtype NotFound = NotFound
   deriving newtype (NFData)
 
 instance Serial NotFound where
-  deserialize = NotFound <$> (repList =<< deserialize)
-    where
-      repList (VarInt c) = replicateM (fromIntegral c) deserialize
+  deserialize = NotFound <$> getVarIntList deserialize
 
   serialize (NotFound xs) = do
     putVarInt $ length xs
@@ -538,6 +534,27 @@ instance Serialize VarInt where
 
 putVarInt :: (MonadPut m, Integral a) => a -> m ()
 putVarInt = serialize . VarInt . fromIntegral
+
+-- | Largest number of elements that a serialized list may announce. Bitcoin
+-- Core refuses larger counts when it reads a compact size (@MAX_SIZE@).
+maxListSize :: Word64
+maxListSize = 0x02000000
+
+-- | Read a list that starts with its element count as a 'VarInt'. A count
+-- above 'maxListSize' fails the parse. Without this check a huge count would
+-- wrap around to a negative 'Int' and read as an empty list.
+getVarIntList :: (MonadGet m) => m a -> m [a]
+getVarIntList element = do
+  VarInt count <- deserialize
+  when (count > maxListSize) $
+    fail ("List count too large: " ++ show count)
+  replicateM (fromIntegral count) element
+
+-- | Write a list with its element count as a 'VarInt' in front.
+putVarIntList :: (MonadPut m) => (a -> m ()) -> [a] -> m ()
+putVarIntList element xs = do
+  putVarInt (length xs)
+  mapM_ element xs
 
 -- | Data type for serialization of variable-length strings.
 newtype VarString = VarString {get :: ByteString}

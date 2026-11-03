@@ -41,7 +41,6 @@ import Data.Aeson.Encoding
 import Data.Binary (Binary (..))
 import Data.Bits
 import Data.ByteString qualified as B
-import Data.ByteString.Builder (char7)
 import Data.ByteString.Lazy qualified as L
 import Data.Bytes.Get
 import Data.Bytes.Put
@@ -76,13 +75,11 @@ data Block = Block
 instance Serial Block where
   deserialize = do
     header <- deserialize
-    (VarInt c) <- deserialize
-    txs <- replicateM (fromIntegral c) deserialize
+    txs <- getVarIntList deserialize
     return $ Block header txs
   serialize (Block h txs) = do
     serialize h
-    putVarInt $ length txs
-    forM_ txs serialize
+    putVarIntList serialize txs
 
 instance Serialize Block where
   get = deserialize
@@ -140,20 +137,34 @@ instance FromJSON BlockHash where
 
 instance ToJSON BlockHash where
   toJSON = String . blockHashToHex
-  toEncoding = hexEncoding . L.reverse . runPutL . serialize
+  toEncoding (BlockHash h) = reversedHexEncoding h
 
 -- | Block hashes are reversed with respect to the in-memory byte order in a
 -- block hash when displayed.
 blockHashToHex :: BlockHash -> Text
-blockHashToHex (BlockHash h) = encodeHex (B.reverse (runPutS (serialize h)))
+blockHashToHex (BlockHash h) = reversedHex h
 
 -- | Convert a human-readable hex block hash into a 'BlockHash'. Bytes are
--- reversed as normal.
+-- reversed as normal. The text must hold exactly 32 bytes of hex.
 hexToBlockHash :: Text -> Maybe BlockHash
-hexToBlockHash hex = do
-  bs <- B.reverse <$> decodeHex hex
-  h <- eitherToMaybe (runGetS deserialize bs)
-  return $ BlockHash h
+hexToBlockHash = fmap BlockHash . hexToReversedHash
+
+-- | Hex of a 256-bit hash in display order, which is the reverse of its byte
+-- order in memory. Block hashes and Merkle roots are shown this way.
+reversedHex :: Hash256 -> Text
+reversedHex = encodeHex . B.reverse . runPutS . serialize
+
+-- | JSON encoding of a 256-bit hash in display order.
+reversedHexEncoding :: Hash256 -> Encoding
+reversedHexEncoding = hexEncoding . L.reverse . runPutL . serialize
+
+-- | Parse hex in display order into a 256-bit hash. Any input that is not
+-- exactly 32 bytes of hex is rejected instead of being truncated.
+hexToReversedHash :: Text -> Maybe Hash256
+hexToReversedHash hex = do
+  bs <- decodeHex hex
+  guard (B.length bs == 32)
+  eitherToMaybe $ runGetS deserialize $ B.reverse bs
 
 -- | Data type recording information of a 'Block'. The hash of a block is
 -- defined as the hash of this data structure, serialized. The block mining
@@ -161,6 +172,9 @@ hexToBlockHash hex = do
 -- 'BlockHeader' and/or additional entropy in the coinbase 'Transaction' of this
 -- 'Block'. Variations in the coinbase will result in different merkle roots in
 -- the 'BlockHeader'.
+--
+-- The JSON form shows the previous block hash and the Merkle root in display
+-- order, like the @getblockheader@ RPC call of Bitcoin Core.
 data BlockHeader = BlockHeader
   { version :: !Word32, --  4 bytes
 
@@ -188,7 +202,7 @@ instance ToJSON BlockHeader where
     object
       [ "version" .= v,
         "prevblock" .= p,
-        "merkleroot" .= encodeHex (runPutS $ serialize m),
+        "merkleroot" .= reversedHex m,
         "timestamp" .= t,
         "bits" .= b,
         "nonce" .= n
@@ -198,7 +212,7 @@ instance ToJSON BlockHeader where
       mconcat
         [ "version" `pair` word32 v,
           "prevblock" `pair` toEncoding p,
-          "merkleroot" `pair` hexEncoding (runPutL $ serialize m),
+          "merkleroot" `pair` reversedHexEncoding m,
           "timestamp" `pair` toEncoding t,
           "bits" `pair` toEncoding b,
           "nonce" `pair` toEncoding n
@@ -210,12 +224,12 @@ instance FromJSON BlockHeader where
       BlockHeader
         <$> o .: "version"
         <*> o .: "prevblock"
-        <*> (f =<< o .: "merkleroot")
+        <*> (merkleRoot =<< o .: "merkleroot")
         <*> o .: "timestamp"
         <*> o .: "bits"
         <*> o .: "nonce"
     where
-      f = maybe mzero return . (eitherToMaybe . runGetS deserialize <=< decodeHex)
+      merkleRoot = maybe (fail "Invalid Merkle root") return . hexToReversedHash
 
 instance Serial BlockHeader where
   deserialize = do
@@ -281,14 +295,11 @@ instance Serial GetBlocks where
   deserialize =
     GetBlocks
       <$> getWord32le
-      <*> (repList =<< deserialize)
+      <*> getVarIntList deserialize
       <*> deserialize
-    where
-      repList (VarInt c) = replicateM (fromIntegral c) deserialize
   serialize (GetBlocks v xs h) = do
     putWord32le v
-    putVarInt $ length xs
-    forM_ xs serialize
+    putVarIntList serialize xs
     serialize h
 
 instance Serialize GetBlocks where
@@ -313,14 +324,11 @@ instance Serial GetHeaders where
   deserialize =
     GetHeaders
       <$> getWord32le
-      <*> (repList =<< deserialize)
+      <*> getVarIntList deserialize
       <*> deserialize
-    where
-      repList (VarInt c) = replicateM (fromIntegral c) deserialize
   serialize (GetHeaders v xs h) = do
     putWord32le v
-    putVarInt $ length xs
-    forM_ xs serialize
+    putVarIntList serialize xs
     serialize h
 
 instance Serialize GetHeaders where
@@ -343,13 +351,9 @@ newtype Headers = Headers
   deriving (Eq, Show, Read, Generic, NFData)
 
 instance Serial Headers where
-  deserialize = Headers <$> (repList =<< deserialize)
-    where
-      repList (VarInt c) = replicateM (fromIntegral c) action
-      action = liftM2 (,) deserialize deserialize
-  serialize (Headers xs) = do
-    putVarInt $ length xs
-    forM_ xs $ \(a, b) -> serialize a >> serialize b
+  deserialize = Headers <$> getVarIntList (liftM2 (,) deserialize deserialize)
+  serialize (Headers xs) =
+    putVarIntList (\(a, b) -> serialize a >> serialize b) xs
 
 instance Serialize Headers where
   put = serialize
@@ -397,9 +401,13 @@ decodeCompact nCompact = (if neg then res * (-1) else res, over)
            )
 
 -- | Encode an 'Integer' to the compact number format used in the difficulty
--- target of a block.
+-- target of a block. The exponent is a single byte, so numbers that need more
+-- than 255 bytes cannot be encoded and raise an error, as the assertion in
+-- Bitcoin Core does.
 encodeCompact :: Integer -> Word32
-encodeCompact i = nCompact
+encodeCompact i
+  | nSize > 255 = error "encodeCompact: number too large for the compact format"
+  | otherwise = nCompact
   where
     i' = abs i
     neg = i < 0

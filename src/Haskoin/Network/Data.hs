@@ -15,6 +15,7 @@ import Data.Text (Text)
 import Data.Word (Word32, Word64, Word8)
 import GHC.Generics (Generic)
 import Haskoin.Block.Common
+import Haskoin.Transaction.Common (Tx)
 
 -- | Network definition.
 data Network = Network
@@ -34,6 +35,8 @@ data Network = Network
     magic :: !Word32,
     -- | genesis block header
     genesisHeader :: !BlockHeader,
+    -- | coinbase transaction of the genesis block
+    genesisTx :: !Tx,
     -- | maximum block size in bytes
     maxBlockSize :: !Int,
     -- | maximum amount of satoshi

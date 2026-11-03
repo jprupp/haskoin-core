@@ -45,40 +45,46 @@ module Haskoin.Block.Headers
     initialChain,
     genesisMap,
 
-    -- ** Helper Functions
-    appendBlocks,
+    -- ** Validation
     validBlock,
     validCP,
     afterLastCP,
     bip34,
     validVersion,
     validTimeWarp,
-    lastNoMinDiff,
+    medianTime,
+    mtp,
+
+    -- ** Difficulty
     nextWorkRequired,
-    nextEdaWorkRequired,
-    nextDaaWorkRequired,
-    nextAsertWorkRequired,
-    computeAsertBits,
-    computeTarget,
-    getSuitableBlock,
     nextPowWorkRequired,
     calcNextWork,
+    lastNoMinDiff,
+    diffInterval,
+    nextEdaWorkRequired,
+    nextDaaWorkRequired,
+    computeTarget,
+    getSuitableBlock,
+    nextAsertWorkRequired,
+    asertAnchor,
+    computeAsertBits,
     isValidPOW,
     blockPOW,
     headerWork,
-    diffInterval,
+
+    -- ** Helper Functions
     blockLocatorNodes,
+    skipHeight,
+    appendBlocks,
     mineBlock,
     computeSubsidy,
-    mtp,
     firstGreaterOrEqual,
     lastSmallerOrEqual,
   )
 where
 
-import Control.Applicative ((<|>))
 import Control.DeepSeq
-import Control.Monad (guard, mzero, unless, when)
+import Control.Monad (mzero, unless, when)
 import Control.Monad.Except (ExceptT (..), runExceptT, throwError)
 import Control.Monad.State.Strict as State (StateT, get, gets, lift, modify)
 import Control.Monad.Trans.Maybe
@@ -93,8 +99,10 @@ import Data.Function (on)
 import Data.HashMap.Strict (HashMap)
 import Data.HashMap.Strict qualified as HashMap
 import Data.Hashable
-import Data.List (sort, sortBy)
-import Data.Maybe (fromMaybe, listToMaybe)
+import Data.Int (Int32)
+import Data.List (sort)
+import Data.Maybe (fromMaybe, isJust)
+import Data.Ord (comparing)
 import Data.Serialize (Serialize (..))
 import Data.Typeable (Typeable)
 import Data.Word (Word32, Word64)
@@ -102,8 +110,8 @@ import GHC.Generics (Generic)
 import Haskoin.Block.Common
 import Haskoin.Crypto
 import Haskoin.Network.Data
-import Haskoin.Transaction.Genesis
 import Haskoin.Util
+import Numeric (showHex)
 
 -- | Short version of the block hash. Uses the good end of the hash (the part
 -- that doesn't have a long string of zeroes).
@@ -157,11 +165,14 @@ instance Binary BlockNode where
   put = serialize
   get = deserialize
 
+-- | Two nodes are the same when they hold the same header.
 instance Eq BlockNode where
   (==) = (==) `on` (.header)
 
+-- | Nodes are ordered by height, then by header, so that equal nodes compare
+-- as equal and nodes at the same height still have a total order.
 instance Ord BlockNode where
-  compare = compare `on` (.height)
+  compare = comparing (\bn -> (bn.height, bn.header))
 
 -- | Memory-based header tree.
 data HeaderMemory = HeaderMemory
@@ -281,8 +292,12 @@ genesisNode net =
       skip = headerHash net.genesisHeader
     }
 
--- | Validate a list of continuous block headers and import them to the
--- block chain. Return 'Left' on failure with error information.
+-- | Validate a list of continuous block headers and import them into the
+-- block chain. Each header is validated against the headers before it and
+-- added to the store as it passes, so a failure keeps the headers that came
+-- before it and makes the last of them the best block when it has the most
+-- work. Return 'Left' on failure with error information, otherwise the new
+-- nodes with the newest one first.
 connectBlocks ::
   (BlockHeaders m) =>
   Network ->
@@ -291,48 +306,21 @@ connectBlocks ::
   [BlockHeader] ->
   m (Either String [BlockNode])
 connectBlocks _ _ [] = return $ Right []
-connectBlocks net t bhs@(bh : _) =
-  runExceptT $ do
-    unless (chained bhs) $
-      throwError "Blocks to connect do not form a chain"
-    par <-
-      maybeToExceptT
-        "Could not get parent block"
-        (MaybeT (parentBlock bh))
-    pars <- lift $ getParents 10 par
-    bb <- lift getBestBlockHeader
-    go par [] bb par pars bhs >>= \case
-      bns@(bn : _) -> do
-        lift $ addBlockHeaders bns
-        let bb' = chooseBest bn bb
-        when (bb' /= bb) $ lift $ setBestBlockHeader bb'
-        return bns
-      _ -> undefined
+connectBlocks net t bhs
+  | not (chained bhs) = return $ Left "Blocks to connect do not form a chain"
+  | otherwise = do
+      best <- getBestBlockHeader
+      (result, nodes, best') <- go best [] bhs
+      when (best' /= best) $ setBestBlockHeader best'
+      return $ either Left (const (Right nodes)) result
   where
     chained (h1 : h2 : hs) = headerHash h1 == h2.prev && chained (h2 : hs)
     chained _ = True
-    skipit lbh ls par
-      | sh == lbh.height = return lbh
-      | sh < lbh.height = do
-          skM <- lift $ getAncestor sh lbh
-          case skM of
-            Just sk -> return sk
-            Nothing ->
-              throwError $
-                "BUG: Could not get skip for block "
-                  ++ show (headerHash $ par.header)
-      | otherwise = do
-          let sn = ls !! fromIntegral (par.height - sh)
-          when (sn.height /= sh) $
-            throwError "BUG: Node height not right in skip"
-          return sn
-      where
-        sh = skipHeight (par.height + 1)
-    go _ acc _ _ _ [] = return acc
-    go lbh acc bb par pars (h : hs) = do
-      sk <- skipit lbh acc par
-      bn <- ExceptT . return $ validBlock net t bb par pars h sk
-      go lbh (bn : acc) (chooseBest bn bb) bn (take 10 $ par : pars) hs
+    go best nodes [] = return (Right (), nodes, best)
+    go best nodes (bh : rest) =
+      connectHeader net t best bh >>= \case
+        Left err -> return (Left err, nodes, best)
+        Right node -> go (chooseBest best node) (node : nodes) rest
 
 -- | Block's parent. If the block header is in the store, its parent must also
 -- be there. No block header get deleted or pruned from the store.
@@ -353,27 +341,42 @@ connectBlock ::
   m (Either String BlockNode)
 connectBlock net t bh =
   runExceptT $ do
+    best <- lift getBestBlockHeader
+    node <- ExceptT $ connectHeader net t best bh
+    let best' = chooseBest best node
+    when (best' /= best) $ lift $ setBestBlockHeader best'
+    return node
+
+-- | Validate one header against the store and add it to the store. The best
+-- block passed in is only used by the checkpoint rule and is not updated.
+connectHeader ::
+  (BlockHeaders m) =>
+  Network ->
+  Timestamp ->
+  BlockNode ->
+  BlockHeader ->
+  m (Either String BlockNode)
+connectHeader net t best bh =
+  runExceptT $ do
     par <-
       maybeToExceptT
         "Could not get parent block"
         (MaybeT (parentBlock bh))
     pars <- lift $ getParents 10 par
-    skM <- lift $ getAncestor (skipHeight (par.height + 1)) par
-    sk <-
-      case skM of
+    skipNode <-
+      lift (getAncestor (skipHeight (par.height + 1)) par) >>= \case
         Just sk -> return sk
         Nothing ->
           throwError $
             "BUG: Could not get skip for block "
-              ++ show (headerHash $ par.header)
-    bb <- lift getBestBlockHeader
-    bn <- ExceptT . return $ validBlock net t bb par pars bh sk
-    let bb' = chooseBest bb bn
-    lift $ addBlockHeader bn
-    when (bb /= bb') . lift $ setBestBlockHeader bb'
-    return bn
+              ++ show (headerHash par.header)
+    requiredBits <- lift $ nextWorkRequired net par bh
+    node <- ExceptT . return $ validBlock net t best par pars bh skipNode requiredBits
+    lift $ addBlockHeader node
+    return node
 
--- | Validate this block header. Build a 'BlockNode' if successful.
+-- | Validate this block header. Build a 'BlockNode' if successful. The checks
+-- follow @CheckBlockHeader@ and @ContextualCheckBlockHeader@ in Bitcoin Core.
 validBlock ::
   Network ->
   -- | current time
@@ -388,8 +391,10 @@ validBlock ::
   BlockHeader ->
   -- | skip node (black magic)
   BlockNode ->
+  -- | difficulty bits the chain requires, from 'nextWorkRequired'
+  Word32 ->
   Either String BlockNode
-validBlock net t bb par pars bh sk = do
+validBlock net t bb par pars bh sk requiredBits = do
   let mt = medianTime . map (.header.timestamp) $ par : pars
       nt = bh.timestamp
       hh = headerHash bh
@@ -399,10 +404,14 @@ validBlock net t bb par pars bh sk = do
   unless (isValidPOW net bh) $
     Left $
       "Proof of work failed: " ++ show (headerHash bh)
-  unless (nt <= t + 2 * 60 * 60) $
+  unless (bh.bits == requiredBits) $
+    Left $
+      "Incorrect difficulty bits: " ++ showBits bh.bits ++ ", expected " ++ showBits requiredBits
+  unless (toInteger nt <= toInteger t + 2 * 60 * 60) $
     Left $
       "Invalid header timestamp: " ++ show nt
-  unless (nt >= mt) $
+  -- The timestamp must be strictly above the median time past.
+  unless (nt > mt) $
     Left $
       "Block timestamp too early: " ++ show nt
   unless (validTimeWarp net ng par.header.timestamp nt) $
@@ -427,13 +436,24 @@ validBlock net t bb par pars bh sk = do
         work = aw,
         skip = headerHash sk.header
       }
+  where
+    showBits b = "0x" ++ showHex b ""
 
--- | Return the median of all provided timestamps. Can be unsorted. Error on
--- empty list.
+-- | Return the median of all provided timestamps. Can be unsorted. For an
+-- even count the upper of the two middle values is taken, as Bitcoin Core
+-- does. Error on empty list.
 medianTime :: [Timestamp] -> Timestamp
 medianTime ts
   | null ts = error "Cannot compute median time of empty header list"
   | otherwise = sort ts !! (length ts `div` 2)
+
+-- | Median time past of a block: the median of the timestamps of the block and
+-- its ten closest ancestors, or fewer near genesis. This is
+-- @GetMedianTimePast@ in Bitcoin Core.
+mtp :: (BlockHeaders m) => BlockNode -> m Timestamp
+mtp bn = do
+  pars <- getParents 10 bn
+  return $ medianTime $ map (.header.timestamp) (bn : pars)
 
 -- | Calculate the height of the skip (magic) block that corresponds to the
 -- given height. The block hash of the ancestor at that height will be placed on
@@ -489,13 +509,9 @@ afterLastCP ::
   BlockHeight ->
   Bool
 afterLastCP net bestHeight newChildHeight =
-  case lM of
-    Just l -> l < newChildHeight
-    Nothing -> True
-  where
-    lM =
-      listToMaybe . reverse $
-        [c | (c, _) <- net.checkpoints, c <= bestHeight]
+  case [c | (c, _) <- net.checkpoints, c <= bestHeight] of
+    [] -> True
+    reached -> maximum reached < newChildHeight
 
 -- | This block should be at least version 2 (BIP34). Block height must be
 -- included in the coinbase transaction to prevent non-unique transaction
@@ -512,7 +528,9 @@ bip34 net height hsh
   | fst net.bip34Block == height = snd net.bip34Block == hsh
   | otherwise = True
 
--- | Check if the provided block height and version are valid.
+-- | Check if the provided block height and version are valid. The version is
+-- a signed 32-bit number in Bitcoin Core, so values with the top bit set are
+-- negative and count as below version 2.
 validVersion ::
   Network ->
   -- | new child height
@@ -521,10 +539,12 @@ validVersion ::
   Word32 ->
   Bool
 validVersion net height version
-  | version < 2 = height < fst net.bip34Block
-  | version < 3 = height < net.bip66Height
-  | version < 4 = height < net.bip65Height
+  | signedVersion < 2 = height < fst net.bip34Block
+  | signedVersion < 3 = height < net.bip66Height
+  | signedVersion < 4 = height < net.bip65Height
   | otherwise = True
+  where
+    signedVersion = fromIntegral version :: Int32
 
 -- | BIP94 time warp rule: the first block of a retarget period may not be more
 -- than 600 seconds earlier than its parent.
@@ -538,7 +558,8 @@ validTimeWarp ::
   Timestamp ->
   Bool
 validTimeWarp net height parent child
-  | net.bip94 && height `mod` diffInterval net == 0 = child + 600 >= parent
+  | net.bip94 && height `mod` diffInterval net == 0 =
+      toInteger child + 600 >= toInteger parent
   | otherwise = True
 
 -- | Find last block with normal, as opposed to minimum difficulty (for test
@@ -559,71 +580,73 @@ lastNoMinDiff net bn = do
       lastNoMinDiff net bn'
     else return bn
 
+-- | Test network rule: a block more than twice the target spacing after its
+-- parent may be mined at the minimum difficulty.
+minDiffGap :: Network -> BlockNode -> BlockHeader -> Bool
+minDiffGap net par bh =
+  toInteger bh.timestamp > toInteger par.header.timestamp + 2 * toInteger net.targetSpacing
+
 -- | Returns the work required on a block header given the previous block. This
--- coresponds to @bitcoind@ function @GetNextWorkRequired@ in @main.cpp@.
+-- corresponds to @GetNextWorkRequired@ in Bitcoin Core and Bitcoin Cash Node.
 nextWorkRequired ::
   (BlockHeaders m) =>
   Network ->
   BlockNode ->
   BlockHeader ->
   m Word32
-nextWorkRequired net par bh = do
-  ma <- getAsertAnchor net
-  case asert ma <|> daa <|> eda <|> pow of
-    Just f -> f par bh
-    Nothing -> error "Could not determine difficulty algorithm"
+nextWorkRequired net par bh
+  -- Bitcoin Cash Node never retargets on regtest, before picking an algorithm.
+  | usesCashRules && net.powNoRetarget = return par.header.bits
+  | otherwise =
+      asertAnchor net par >>= \case
+        Just anchor -> nextAsertWorkRequired net anchor par bh
+        Nothing
+          | activeAt net.daaHeight -> nextDaaWorkRequired net par bh
+          | activeAt net.edaHeight -> nextEdaWorkRequired net par bh
+          | otherwise -> nextPowWorkRequired net par bh
   where
-    asert ma = do
-      anchor <- ma
-      guard (par.height > anchor.height)
-      return $ nextAsertWorkRequired net anchor
-    daa = do
-      daa_height <- net.daaHeight
-      guard (par.height + 1 >= daa_height)
-      return $ nextDaaWorkRequired net
-    eda = do
-      eda_height <- net.edaHeight
-      guard (par.height + 1 >= eda_height)
-      return $ nextEdaWorkRequired net
-    pow = return $ nextPowWorkRequired net
+    usesCashRules =
+      isJust net.edaHeight || isJust net.daaHeight || isJust net.asertActivationTime
+    activeAt = maybe False (\h -> par.height + 1 >= h)
 
 -- | Find out the next amount of work required according to the Emergency
--- Difficulty Adjustment (EDA) algorithm from Bitcoin Cash.
+-- Difficulty Adjustment (EDA) algorithm from Bitcoin Cash. This corresponds to
+-- @GetNextEDAWorkRequired@ in Bitcoin Cash Node.
 nextEdaWorkRequired ::
   (BlockHeaders m) => Network -> BlockNode -> BlockHeader -> m Word32
 nextEdaWorkRequired net par bh
   | (par.height + 1) `mod` diffInterval net == 0 =
       nextPowWorkRequired net par bh
-  | mindiff = return (encodeCompact net.powLimit)
-  | par.header.bits == encodeCompact net.powLimit =
-      return (encodeCompact net.powLimit)
+  | net.minDiffBlocks =
+      if minDiffGap net par bh
+        then return powLimitBits
+        else (.header.bits) <$> lastNoMinDiff net par
+  | par.header.bits == powLimitBits =
+      return powLimitBits
   | otherwise = do
       par6 <- fromMaybe e1 <$> getAncestor (par.height - 6) par
-      pars <- getParents 10 par
-      pars6 <- getParents 10 par6
-      let par6med =
-            medianTime $ map (.header.timestamp) (par6 : pars6)
-          parmed = medianTime $ map (.header.timestamp) (par : pars)
-          mtp6 = parmed - par6med
-      if mtp6 < 12 * 3600
-        then return $ par.header.bits
-        else
-          return $
-            let (diff, _) = decodeCompact par.header.bits
-                ndiff = diff + (diff `shiftR` 2)
-             in if net.powLimit > ndiff
-                  then encodeCompact net.powLimit
-                  else encodeCompact ndiff
+      parMtp <- mtp par
+      par6Mtp <- mtp par6
+      -- If producing the last six blocks took less than twelve hours the
+      -- difficulty stays. Otherwise the target grows by a quarter.
+      if toInteger parMtp - toInteger par6Mtp < 12 * 3600
+        then return par.header.bits
+        else do
+          let (target, _) = decodeCompact par.header.bits
+              target' = target + (target `shiftR` 2)
+          return $ encodeCompact (min net.powLimit target')
   where
-    mindiff = bh.timestamp > par.header.timestamp + net.targetSpacing * 2
+    powLimitBits = encodeCompact net.powLimit
     e1 = error "Could not get seventh ancestor of block"
 
 -- | Find the next amount of work required according to the Difficulty
--- Adjustment Algorithm (DAA) from Bitcoin Cash.
+-- Adjustment Algorithm (DAA) from Bitcoin Cash. This corresponds to
+-- @GetNextCashWorkRequired@ in Bitcoin Cash Node. The parent must be at or
+-- above the difficulty interval height.
 nextDaaWorkRequired ::
   (BlockHeaders m) => Network -> BlockNode -> BlockHeader -> m Word32
 nextDaaWorkRequired net par bh
-  | mindiff = return (encodeCompact net.powLimit)
+  | net.minDiffBlocks && minDiffGap net par bh = return (encodeCompact net.powLimit)
   | otherwise = do
       unless (par.height >= diffInterval net) $
         error "Block height below difficulty interval"
@@ -636,14 +659,6 @@ nextDaaWorkRequired net par bh
         else return $ encodeCompact nextTarget
   where
     e1 = error "Cannot get ancestor at parent - 144 height"
-    mindiff = bh.timestamp > par.header.timestamp + net.targetSpacing * 2
-
-mtp :: (BlockHeaders m) => BlockNode -> m Timestamp
-mtp bn
-  | bn.height == 0 = return 0
-  | otherwise = do
-      pars <- getParents 11 bn
-      return $ medianTime (map (.header.timestamp) pars)
 
 firstGreaterOrEqual ::
   (BlockHeaders m) =>
@@ -714,39 +729,64 @@ middleBlock a b =
 middleOf :: (Integral a) => a -> a -> a
 middleOf a b = a + ((b - a) `div` 2)
 
--- TODO: Use known anchor after fork
-getAsertAnchor :: (BlockHeaders m) => Network -> m (Maybe BlockNode)
-getAsertAnchor net =
+-- | Anchor block of the aserti3-2d algorithm for the chain that ends at the
+-- given block: the earliest ancestor, or the block itself, whose median time
+-- past reaches the activation time. The anchor is the last block whose
+-- difficulty came from the previous algorithm. Returns 'Nothing' when the
+-- block's own median time past is still below the activation time, in which
+-- case the previous algorithm applies to its children.
+asertAnchor :: (BlockHeaders m) => Network -> BlockNode -> m (Maybe BlockNode)
+asertAnchor net tip =
   case net.asertActivationTime of
     Nothing -> return Nothing
-    Just act -> firstGreaterOrEqual net (f act)
+    Just activation -> do
+      tipMtp <- mtp tip
+      if tipMtp < activation
+        then return Nothing
+        else Just <$> search activation 0 tip.height
   where
-    f act bn = do
-      m <- mtp bn
-      return $ compare m act
+    -- The median time past never decreases along a chain, so a binary search
+    -- over the heights finds the first block that reaches the activation
+    -- time. The upper bound always satisfies it.
+    search activation lo hi
+      | lo >= hi = ancestorAt lo
+      | otherwise = do
+          let mid = lo + (hi - lo) `div` 2
+          midMtp <- mtp =<< ancestorAt mid
+          if midMtp >= activation
+            then search activation lo mid
+            else search activation (mid + 1) hi
+    ancestorAt h = fromMaybe e <$> getAncestor h tip
+    e = error "asertAnchor: could not get ancestor"
 
--- | Find the next amount of work required according to the aserti3-2d algorithm.
+-- | Find the next amount of work required according to the aserti3-2d
+-- algorithm. This corresponds to @GetNextASERTWorkRequired@ in Bitcoin Cash
+-- Node.
 nextAsertWorkRequired ::
   (BlockHeaders m) =>
   Network ->
+  -- | anchor block, see 'asertAnchor'
   BlockNode ->
+  -- | parent of the new block
   BlockNode ->
+  -- | new block header
   BlockHeader ->
   m Word32
-nextAsertWorkRequired net anchor par bh = do
-  anchor_parent <-
-    fromMaybe e_fork <$> getBlockHeader anchor.header.prev
-  let anchor_parent_time = toInteger anchor_parent.header.timestamp
-      time_diff = current_time - anchor_parent_time
-  return $ computeAsertBits halflife anchor_bits time_diff height_diff
+nextAsertWorkRequired net anchor par bh
+  | net.minDiffBlocks && minDiffGap net par bh = return (encodeCompact net.powLimit)
+  | otherwise = do
+      -- The clock starts at the anchor's parent. A genesis anchor has no
+      -- parent, so its own timestamp is used, as Bitcoin Cash Node does.
+      anchorParentTime <-
+        if isGenesis anchor
+          then return anchor.header.timestamp
+          else (.header.timestamp) . fromMaybe e <$> getBlockHeader anchor.header.prev
+      let timeDiff = toInteger bh.timestamp - toInteger anchorParentTime
+          heightDiff = toInteger par.height + 1 - toInteger anchor.height
+      return $
+        computeAsertBits net.powLimit net.asertHalfLife anchor.header.bits timeDiff heightDiff
   where
-    halflife = net.asertHalfLife
-    anchor_height = toInteger anchor.height
-    anchor_bits = anchor.header.bits
-    current_height = toInteger par.height + 1
-    height_diff = current_height - anchor_height
-    current_time = toInteger bh.timestamp
-    e_fork = error "Could not get fork block header"
+    e = error "Could not get parent of ASERT anchor block"
 
 idealBlockTime :: Integer
 idealBlockTime = 10 * 60
@@ -757,68 +797,84 @@ rBits = 16
 radix :: Integer
 radix = 1 `shiftL` rBits
 
-maxBits :: Word32
-maxBits = 0x1d00ffff
-
-maxTarget :: Integer
-maxTarget = fst $ decodeCompact maxBits
-
+-- | The aserti3-2d formula: the target of the anchor block, doubled for every
+-- half-life that the chain runs behind its ideal schedule and halved for every
+-- half-life it runs ahead, in 16.16 fixed point with a cubic approximation of
+-- the exponential.
 computeAsertBits ::
+  -- | proof-of-work limit (largest target) of the network
   Integer ->
+  -- | half-life in seconds
+  Integer ->
+  -- | bits of the anchor block
   Word32 ->
+  -- | seconds from the anchor's parent to the new block
   Integer ->
+  -- | blocks from the anchor to the new block
   Integer ->
   Word32
-computeAsertBits halflife anchor_bits time_diff height_diff =
-  if e2 >= 0 && e2 < 65536
-    then
-      if g4 == 0
-        then encodeCompact 1
-        else
-          if g4 > maxTarget
-            then maxBits
-            else encodeCompact g4
-    else error $ "Exponent not in range: " ++ show e2
+computeAsertBits powLimit halflife anchorBits timeDiff heightDiff
+  | target == 0 = encodeCompact 1
+  | target > powLimit = encodeCompact powLimit
+  | otherwise = encodeCompact target
   where
-    g1 = fst (decodeCompact anchor_bits)
-    e1 =
-      ((time_diff - idealBlockTime * (height_diff + 1)) * radix)
-        `quot` halflife
-    s = e1 `shiftR` rBits
-    e2 = e1 - s * radix
-    g2 =
-      g1
-        * ( radix
-              + ( (195766423245049 * e2 + 971821376 * e2 ^ 2 + 5127 * e2 ^ 3 + 2 ^ 47)
-                    `shiftR` (rBits * 3)
-                )
+    anchorTarget = fst (decodeCompact anchorBits)
+    -- Exponent in 16.16 fixed point. The reference C++ code truncates toward
+    -- zero, hence quot.
+    expo = ((timeDiff - idealBlockTime * (heightDiff + 1)) * radix) `quot` halflife
+    -- Whole half-lives (an arithmetic shift, so rounded down) and the
+    -- fractional part in [0, radix).
+    shifts = expo `shiftR` rBits
+    frac = expo - shifts * radix
+    -- 2 ^ (frac / radix) in 16.16 fixed point.
+    factor =
+      radix
+        + ( (195766423245049 * frac + 971821376 * frac ^ (2 :: Int) + 5127 * frac ^ (3 :: Int) + 2 ^ (47 :: Int))
+              `shiftR` (rBits * 3)
           )
-    g3 =
-      if s < 0
-        then g2 `shiftR` negate (fromIntegral s)
-        else g2 `shiftL` fromIntegral s
-    g4 = g3 `shiftR` rBits
+    scaled = anchorTarget * factor
+    shifted
+      | shifts < 0 = scaled `shiftR` fromInteger (negate shifts)
+      | otherwise = scaled `shiftL` fromInteger shifts
+    target = shifted `shiftR` rBits
 
--- | Compute Bitcoin Cash DAA target for a new block.
-computeTarget :: Network -> BlockNode -> BlockNode -> Integer
-computeTarget net f l =
-  let work = (l.work - f.work) * fromIntegral net.targetSpacing
-      tspan = l.header.timestamp - f.header.timestamp
-      tspan'
-        | tspan > 288 * net.targetSpacing =
-            288 * net.targetSpacing
-        | tspan < 72 * net.targetSpacing =
-            72 * net.targetSpacing
-        | otherwise = tspan
-      work' = work `div` fromIntegral tspan'
-   in 2 ^ (256 :: Integer) `div` work'
+-- | Compute Bitcoin Cash DAA target for a new block, like @ComputeTarget@ in
+-- Bitcoin Cash Node.
+computeTarget ::
+  Network ->
+  -- | first suitable block of the window
+  BlockNode ->
+  -- | last suitable block of the window
+  BlockNode ->
+  Integer
+computeTarget net firstBlock lastBlock =
+  let spacing = toInteger net.targetSpacing
+      work = (lastBlock.work - firstBlock.work) * spacing
+      actual = toInteger lastBlock.header.timestamp - toInteger firstBlock.header.timestamp
+      clamped = max (72 * spacing) (min (288 * spacing) actual)
+      work' = work `div` clamped
+   in -- (2^256 - work) / work, as the unsigned negation in the reference code
+      (2 ^ (256 :: Int) - work') `div` work'
 
--- | Get suitable block for Bitcoin Cash DAA computation.
+-- | Get suitable block for Bitcoin Cash DAA computation: the block with the
+-- median timestamp among the given block, its parent and its grandparent. On
+-- equal timestamps the same block as Bitcoin Cash Node's sorting network is
+-- chosen.
 getSuitableBlock :: (BlockHeaders m) => BlockNode -> m BlockNode
 getSuitableBlock par = do
   unless (par.height >= 3) $ error "Block height is less than three"
-  blocks <- (par :) <$> getParents 2 par
-  return $ sortBy (compare `on` (.header.timestamp)) blocks !! 1
+  parents <- getParents 2 par
+  case parents of
+    [parent, grandparent] -> return $ medianOfThree grandparent parent par
+    _ -> error "Could not get the two parents of the block"
+  where
+    later x y = x.header.timestamp > y.header.timestamp
+    -- Oldest first, swapping only on a strictly later timestamp.
+    medianOfThree b0 b1 b2 =
+      let (c0, c2) = if later b0 b2 then (b2, b0) else (b0, b2)
+          (d0, d1) = if later c0 b1 then (b1, c0) else (c0, b1)
+          (e1, _) = if later d1 c2 then (c2, d1) else (d1, c2)
+       in const e1 d0
 
 -- | Returns the work required on a block header given the previous block. This
 -- coresponds to bitcoind function GetNextWorkRequired in main.cpp.
@@ -828,7 +884,7 @@ nextPowWorkRequired net par bh
   | (par.height + 1) `mod` diffInterval net /= 0 =
       if net.minDiffBlocks
         then
-          if ht > pt + delta
+          if minDiffGap net par bh
             then return $ encodeCompact net.powLimit
             else do
               d <- lastNoMinDiff net par
@@ -845,11 +901,11 @@ nextPowWorkRequired net par bh
       return $ calcNextWork net h f.header.timestamp
   where
     e1 = error "Could not get ancestor for block header"
-    pt = par.header.timestamp
-    ht = bh.timestamp
-    delta = net.targetSpacing * 2
 
 -- | Computes the work required for the first block in a new retarget period.
+-- The actual timespan is limited to a quarter and four times the target
+-- timespan. A negative timespan, when the last block is dated before the
+-- first, is limited like a short one.
 calcNextWork ::
   Network ->
   -- | last block in previous retarget (parent)
@@ -857,18 +913,15 @@ calcNextWork ::
   -- | timestamp of first block in previous retarget
   Timestamp ->
   Word32
-calcNextWork net header time
+calcNextWork net header firstTime
   | net.powNoRetarget = header.bits
   | new > net.powLimit = encodeCompact net.powLimit
   | otherwise = encodeCompact new
   where
-    s = header.timestamp - time
-    n
-      | s < net.targetTimespan `div` 4 = net.targetTimespan `div` 4
-      | s > net.targetTimespan * 4 = net.targetTimespan * 4
-      | otherwise = s
-    l = fst $ decodeCompact header.bits
-    new = l * fromIntegral n `div` fromIntegral net.targetTimespan
+    timespan = toInteger net.targetTimespan
+    actual = toInteger header.timestamp - toInteger firstTime
+    clamped = max (timespan `div` 4) (min (timespan * 4) actual)
+    new = fst (decodeCompact header.bits) * clamped `div` timespan
 
 -- | Returns True if the difficulty target (bits) of the header is valid and the
 -- proof of work of the header matches the advertised difficulty target. This
@@ -887,18 +940,24 @@ blockPOW = bsToInteger . B.reverse . runPutS . serialize
 
 -- | Returns the work represented by this block. Work is defined as the number
 -- of tries needed to solve a block in the average case with respect to the
--- target.
+-- target. A header whose bits are negative, overflow or are zero has no work,
+-- like @GetBlockProof@ in Bitcoin Core.
 headerWork :: BlockHeader -> Integer
-headerWork bh = largestHash `div` (target + 1)
+headerWork bh
+  | target <= 0 || over = 0
+  | otherwise = largestHash `div` (target + 1)
   where
-    target = fst $ decodeCompact bh.bits
+    (target, over) = decodeCompact bh.bits
     largestHash = 1 `shiftL` 256
 
 -- | Number of blocks on average between difficulty cycles (2016 blocks).
 diffInterval :: Network -> Word32
 diffInterval net = net.targetTimespan `div` net.targetSpacing
 
--- | Compare two blocks to get the best.
+-- | Compare two blocks to get the best: the one with more accumulated work,
+-- then the higher one. When both are equal the first argument is kept, so
+-- callers pass the block they already have first and the block that was seen
+-- first stays the best.
 chooseBest :: BlockNode -> BlockNode -> BlockNode
 chooseBest b1 b2
   | b1.work == b2.work =
@@ -908,26 +967,23 @@ chooseBest b1 b2
   | b1.work > b2.work = b1
   | otherwise = b2
 
--- | Get list of blocks for a block locator.
+-- | Get list of blocks for a block locator: the ten blocks below the best, then
+-- blocks at exponentially growing distances, then genesis. This is
+-- @LocatorEntries@ in Bitcoin Core.
 blockLocatorNodes :: (BlockHeaders m) => BlockNode -> m [BlockNode]
 blockLocatorNodes best =
-  reverse <$> go [] best 1
+  reverse <$> go [] (0 :: Int) best 1
   where
     e1 = error "Could not get ancestor"
-    go loc bn n =
-      let loc' = bn : loc
-          n' =
-            if length loc' > 10
-              then n * 2
-              else 1
-       in if bn.height < n'
-            then do
-              a <- fromMaybe e1 <$> getAncestor 0 bn
-              return $ a : loc'
-            else do
-              let h = bn.height - n'
-              bn' <- fromMaybe e1 <$> getAncestor h bn
-              go loc' bn' n'
+    go acc count node step
+      | isGenesis node = return (node : acc)
+      | otherwise = do
+          let acc' = node : acc
+              count' = count + 1
+              height = if node.height > step then node.height - step else 0
+              step' = if count' > 10 then step * 2 else step
+          ancestor <- fromMaybe e1 <$> getAncestor height node
+          go acc' count' ancestor step'
 
 -- | Get block locator.
 blockLocator :: (BlockHeaders m) => BlockNode -> m BlockLocator
@@ -936,14 +992,13 @@ blockLocator bn = map (headerHash . (.header)) <$> blockLocatorNodes bn
 -- | Become rich beyond your wildest dreams.
 mineBlock :: Network -> Word32 -> BlockHeader -> BlockHeader
 mineBlock net seed h =
-  head
-    [ j
-    | i <- (+ seed) <$> [0 .. maxBound],
-      let j = h {nonce = i},
-      isValidPOW net j
-    ]
+  case filter (isValidPOW net) [h {nonce = i} | i <- (+ seed) <$> [0 .. maxBound]] of
+    (mined : _) -> mined
+    [] -> error "mineBlock: no nonce satisfies the target"
 
 -- | Generate and append new blocks (mining). Only practical in regtest network.
+-- Every block is dated one target spacing after its parent, so the chain
+-- passes the median time past rule.
 appendBlocks ::
   Network ->
   -- | random seed
@@ -961,6 +1016,7 @@ appendBlocks net seed bh i =
         seed
         bh
           { prev = headerHash bh,
+            timestamp = bh.timestamp + net.targetSpacing,
             -- Just to make it different in every header
             merkle = sha256 $ runPutS $ serialize seed
           }
@@ -984,8 +1040,8 @@ splitPoint l r = do
           f pl pr
 
 -- | Generate the entire Genesis block for 'Network'.
-genesisBlock :: Network -> Ctx -> Block
-genesisBlock net ctx = Block net.genesisHeader [genesisTx ctx]
+genesisBlock :: Network -> Block
+genesisBlock net = Block net.genesisHeader [net.genesisTx]
 
 -- | Compute block subsidy at particular height.
 computeSubsidy :: Network -> BlockHeight -> Word64

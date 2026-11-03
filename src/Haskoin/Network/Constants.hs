@@ -81,6 +81,7 @@ btc =
           0x1d00ffff
           2083236893,
       -- Hash 000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f
+      genesisTx = mainnetGenesisTx,
       maxBlockSize = 1000000,
       maxSatoshi = 2100000000000000,
       userAgent =
@@ -182,6 +183,7 @@ btcTest =
           486604799
           414098458,
       -- Hash 000000000933ea01ad0ee984209779baaec3ced90fa3f408719526f8d77f4943
+      genesisTx = mainnetGenesisTx,
       maxBlockSize = 1000000,
       maxSatoshi = 2100000000000000,
       userAgent = "/haskoin-btc-test:" <> versionString <> "/",
@@ -243,6 +245,7 @@ btcTest4 =
           0x1d00ffff
           393743547,
       -- Hash 00000000da84f2bafbbc53dee25a72ae507ff4914b867c565be350b0da8bf043
+      genesisTx = testnet4GenesisTx,
       maxBlockSize = 1000000,
       maxSatoshi = 2100000000000000,
       userAgent = "/haskoin-btc-test4:" <> versionString <> "/",
@@ -298,6 +301,7 @@ btcRegTest =
           1296688602
           0x207fffff
           2,
+      genesisTx = mainnetGenesisTx,
       maxBlockSize = 1000000,
       maxSatoshi = 2100000000000000,
       userAgent = "/haskoin-btc-regtest:" <> versionString <> "/",
@@ -350,6 +354,7 @@ bch =
           0x1d00ffff
           2083236893,
       -- Hash 000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f
+      genesisTx = mainnetGenesisTx,
       maxBlockSize = 32000000,
       maxSatoshi = 2100000000000000,
       userAgent = "/haskoin-bch:" <> versionString <> "/",
@@ -459,6 +464,7 @@ bchTest4 =
           0x1d00ffff
           114152193,
       -- Hash 000000001dd410c49a788668ce26751718cc797474d3152a5fc073dd44fd9f7b
+      genesisTx = mainnetGenesisTx,
       maxBlockSize = 2000000,
       maxSatoshi = 2100000000000000,
       userAgent = "/haskoin-bch-test4:" <> versionString <> "/",
@@ -531,6 +537,7 @@ bchTest =
           486604799
           414098458,
       -- Hash 000000000933ea01ad0ee984209779baaec3ced90fa3f408719526f8d77f4943
+      genesisTx = mainnetGenesisTx,
       maxBlockSize = 32000000,
       maxSatoshi = 2100000000000000,
       userAgent = "/haskoin-bch-test:" <> versionString <> "/",
@@ -601,6 +608,7 @@ bchRegTest =
           1296688602
           0x207fffff
           2,
+      genesisTx = mainnetGenesisTx,
       maxBlockSize = 1000000,
       maxSatoshi = 2100000000000000,
       userAgent = "/haskoin-bch-regtest:" <> versionString <> "/",
