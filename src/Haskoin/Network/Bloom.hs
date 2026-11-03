@@ -26,6 +26,9 @@ module Haskoin.Network.Bloom
     BloomFilter (..),
     FilterLoad (..),
     FilterAdd (..),
+    maxBloomSize,
+    maxHashFuncs,
+    maxFilterAddSize,
     bloomCreate,
     bloomInsert,
     bloomContains,
@@ -34,11 +37,13 @@ module Haskoin.Network.Bloom
     isBloomFull,
     acceptsFilters,
     bloomRelevantUpdate,
+    scriptPushData,
   )
 where
 
+import Control.Applicative ((<|>))
 import Control.DeepSeq
-import Control.Monad (forM_, replicateM)
+import Control.Monad (when)
 import Crypto.Secp256k1 (Ctx)
 import Data.Binary (Binary (..))
 import Data.Bits
@@ -52,19 +57,28 @@ import Data.Hash.Murmur (murmur3)
 import Data.List (foldl')
 import Data.Sequence qualified as S
 import Data.Serialize (Serialize (..))
+import Data.Serialize qualified as Ser
 import Data.Word
 import GHC.Generics (Generic)
 import Haskoin.Network.Common
+import Haskoin.Script.Common
 import Haskoin.Script.Standard
 import Haskoin.Transaction.Common
 import Haskoin.Util.Marshal
 
--- | 20,000 items with fp rate < 0.1% or 10,000 items and <0.0001%
+-- | Largest filter a peer may load, in bytes. 20,000 items with fp rate
+-- < 0.1% or 10,000 items and <0.0001%.
 maxBloomSize :: Int
 maxBloomSize = 36000
 
+-- | Largest number of hash functions a filter may use.
 maxHashFuncs :: Word32
 maxHashFuncs = 50
+
+-- | Largest data element a 'FilterAdd' message may carry, in bytes. It is
+-- the largest element a script can push (@MAX_SCRIPT_ELEMENT_SIZE@).
+maxFilterAddSize :: Int
+maxFilterAddSize = 520
 
 ln2Squared :: Double
 ln2Squared = 0.4804530139182014246671025263266649717305529515945455
@@ -86,13 +100,14 @@ data BloomFlags
     BloomUpdateP2PubKeyOnly
   deriving (Eq, Show, Read, Generic, NFData)
 
+-- | Only the two low bits of the flags byte count, as with the
+-- @BLOOM_UPDATE_MASK@ of Bitcoin Core. The value 3 means no update.
 instance Serial BloomFlags where
-  deserialize = go =<< getWord8
+  deserialize = go . (.&. 3) =<< getWord8
     where
-      go 0 = return BloomUpdateNone
       go 1 = return BloomUpdateAll
       go 2 = return BloomUpdateP2PubKeyOnly
-      go _ = fail "BloomFlags get: Invalid bloom flag"
+      go _ = return BloomUpdateNone
 
   serialize f = putWord8 $ case f of
     BloomUpdateNone -> 0
@@ -125,15 +140,21 @@ data BloomFilter = BloomFilter
   }
   deriving (Eq, Show, Read, Generic, NFData)
 
+-- | A filter with more than 'maxBloomSize' bytes or more than 'maxHashFuncs'
+-- hash functions fails the parse, as Bitcoin Core refuses such a
+-- @filterload@ message.
 instance Serial BloomFilter where
-  deserialize =
-    BloomFilter
-      <$> (S.fromList <$> (readDat =<< deserialize))
-      <*> getWord32le
-      <*> getWord32le
-      <*> deserialize
-    where
-      readDat (VarInt len) = replicateM (fromIntegral len) getWord8
+  deserialize = do
+    VarInt len <- deserialize
+    when (len > fromIntegral maxBloomSize) $
+      fail ("Bloom filter of " ++ show len ++ " bytes is too large")
+    bytes <- getByteString (fromIntegral len)
+    functions <- getWord32le
+    when (functions > maxHashFuncs) $
+      fail ("Bloom filter with " ++ show functions ++ " hash functions has too many")
+    tweak <- getWord32le
+    flags <- deserialize
+    return BloomFilter {array = S.fromList (BS.unpack bytes), ..}
 
   serialize BloomFilter {..} = do
     putVarInt $ S.length array
@@ -173,15 +194,16 @@ newtype FilterAdd = FilterAdd {get :: ByteString}
   deriving (Eq, Show, Read, Generic)
   deriving newtype (NFData)
 
+-- | An element longer than 'maxFilterAddSize' fails the parse, as Bitcoin
+-- Core refuses such a @filteradd@ message.
 instance Serial FilterAdd where
   deserialize = do
-    (VarInt len) <- deserialize
-    dat <- getByteString $ fromIntegral len
+    dat <- getVarIntBytes
+    when (BS.length dat > maxFilterAddSize) $
+      fail ("filteradd element of " ++ show (BS.length dat) ++ " bytes is too long")
     return $ FilterAdd dat
 
-  serialize (FilterAdd bs) = do
-    putVarInt $ BS.length bs
-    putByteString bs
+  serialize (FilterAdd bs) = putVarIntBytes bs
 
 instance Binary FilterAdd where
   put = serialize
@@ -192,7 +214,10 @@ instance Serialize FilterAdd where
   get = deserialize
 
 -- | Build a bloom filter that will provide the given false positive rate when
--- the given number of elements have been inserted.
+-- the given number of elements have been inserted. The size is capped at
+-- 'maxBloomSize' and the number of hash functions at 'maxHashFuncs'. A filter
+-- built for many more elements than fit in 'maxBloomSize' gets zero hash
+-- functions and then matches everything, as in Bitcoin Core.
 bloomCreate ::
   -- | number of elements
   Int ->
@@ -213,7 +238,9 @@ bloomCreate numElem fpRate =
     a = -1 / ln2Squared * fromIntegral numElem * log fpRate
     -- Maximum size in bits
     b = fromIntegral $ maxBloomSize * 8
-    numHashF = truncate $ min c (fromIntegral maxHashFuncs)
+    numHashF
+      | numElem == 0 = 0
+      | otherwise = truncate $ min c (fromIntegral maxHashFuncs)
     -- Suggested number of hash functions
     c = fromIntegral bloomSize * 8 / fromIntegral numElem * ln2
 
@@ -223,8 +250,14 @@ bloomHash b hashNum bs =
   where
     seed = hashNum * 0xfba4c795 + b.tweak
 
+-- | Bit positions that the hash functions of a filter map some data to. There
+-- are as many as the filter has hash functions. The filter must not be empty.
+bloomBits :: BloomFilter -> ByteString -> [Word32]
+bloomBits b bs =
+  map (\i -> bloomHash b i bs) (take (fromIntegral b.functions) [0 ..])
+
 -- | Insert arbitrary data into a bloom filter. Returns the new bloom filter
--- containing the new data.
+-- containing the new data. An empty filter stays empty.
 bloomInsert ::
   -- | Original bloom filter
   BloomFilter ->
@@ -233,19 +266,18 @@ bloomInsert ::
   -- | Bloom filter containing the new data
   BloomFilter
 bloomInsert b bs
-  | isBloomFull b = b
-  | otherwise = b {array = dat}
+  | S.null b.array = b
+  | otherwise = b {array = foldl' setBit' b.array (bloomBits b bs)}
   where
-    idxs = map (\i -> bloomHash b i bs) [0 .. b.functions - 1]
-    upd s i =
+    setBit' s i =
       S.adjust
         (.|. bitMask !! fromIntegral (7 .&. i))
         (fromIntegral $ i `shiftR` 3)
         s
-    dat = foldl upd b.array idxs
 
 -- | Tests if some arbitrary data matches the filter. This can be either because
--- the data was inserted into the filter or because it is a false positive.
+-- the data was inserted into the filter or because it is a false positive. An
+-- empty filter, and a filter with no hash functions, match everything.
 bloomContains ::
   -- | Bloom filter
   BloomFilter ->
@@ -254,20 +286,43 @@ bloomContains ::
   -- | Returns True if the data matches the filter
   Bool
 bloomContains b bs
-  | isBloomFull b = True
-  | isBloomEmpty b = False
-  | otherwise = all isSet idxs
+  | S.null b.array = True
+  | otherwise = all isSet (bloomBits b bs)
   where
-    s = b.array
-    idxs = map (\i -> bloomHash b i bs) [0 .. b.functions - 1]
     isSet i =
-      S.index s (fromIntegral $ i `shiftR` 3)
+      S.index b.array (fromIntegral $ i `shiftR` 3)
         .&. (bitMask !! fromIntegral (7 .&. i))
         /= 0
 
--- | Checks if any of the outputs of a tx is in the current bloom filter.
--- If it is, add the txid and vout as an outpoint (i.e. so that
--- a future tx that spends the output won't be missed).
+-- | Data elements pushed by a script, in order, without the empty ones. The
+-- scan stops at the first byte sequence that is not a valid operation, as
+-- @GetOp@ does in Bitcoin Core, and keeps the elements found before it.
+scriptPushData :: ByteString -> [ByteString]
+scriptPushData = either (const []) id . runGetS pushes
+  where
+    pushes :: Ser.Get [ByteString]
+    pushes = do
+      done <- isEmpty
+      if done
+        then return []
+        else do
+          op <- (Just <$> deserialize) <|> return Nothing
+          case op of
+            Nothing -> return []
+            Just (OP_PUSHDATA d _)
+              | not (BS.null d) -> (d :) <$> pushes
+            Just _ -> pushes
+
+-- | Checks if any output of a transaction matches the filter, as
+-- @IsRelevantAndUpdate@ does in Bitcoin Core. An output matches when any data
+-- element pushed by its script is in the filter. The outpoint of a matching
+-- output is inserted according to the flags: always with 'BloomUpdateAll',
+-- only for pay-to-pubkey and pay-to-multisig outputs with
+-- 'BloomUpdateP2PubKeyOnly', and never with 'BloomUpdateNone'. The result is
+-- 'Nothing' when no output matches, and otherwise the filter with the
+-- outpoints added, which lets a future transaction spending them match too.
+-- Non-standard output scripts are scanned like any other. An empty filter
+-- matches every transaction and gets no outpoints.
 bloomRelevantUpdate ::
   Ctx ->
   -- | Bloom filter
@@ -277,51 +332,28 @@ bloomRelevantUpdate ::
   -- | Returns an updated bloom filter adding relevant output
   Maybe BloomFilter
 bloomRelevantUpdate ctx b tx
-  | isBloomFull b || isBloomEmpty b = Nothing
-  | b.flags == BloomUpdateNone = Nothing
-  | not (null matchOuts) = Just $ foldl' addRelevant b matchOuts
+  | S.null b.array = Just b
+  | found = Just updated
   | otherwise = Nothing
   where
-    -- TxHash if we end up inserting an outpoint
-
-    h = txHash tx
-    -- Decode the scriptOutpus and add vOuts in case we make them outpoints
-    decodedOutputScripts = traverse (unmarshal ctx . (.script)) tx.outputs
-    err = error "Error Decoding output script"
-    idxOutputScripts = either (const err) (zip [0 ..]) decodedOutputScripts
-    -- Check if any txOuts were contained in the bloom filter
-    matchFilter =
-      filter (\(_, op) -> any (bloomContains b) (encodeScriptOut op))
-    matchOuts = matchFilter idxOutputScripts
-    addRelevant :: BloomFilter -> (Word32, ScriptOutput) -> BloomFilter
-    addRelevant bf (id', scriptOut) =
-      case (b.flags, scriptType) of
-        -- We filtered out BloomUpdateNone so we insert any PayPk or PayMulSig
-
-        (_, True) -> bloomInsert bf outpoint
-        (BloomUpdateAll, _) -> bloomInsert bf outpoint
-        _ -> error "Error Updating Bloom Filter with relevant outpoint"
-      where
-        outpoint = runPutS $ serialize $ OutPoint {hash = h, index = id'}
-        scriptType = (\s -> isPayPK s || isPayMulSig s) scriptOut
-    -- Encodes a scriptOutput so it can be checked agains the Bloom Filter
-    encodeScriptOut :: ScriptOutput -> [ByteString]
-    encodeScriptOut (PayPK pk) =
-      return $ marshal ctx pk
-    encodeScriptOut (PayPKHash ph) =
-      return . runPutS $ serialize ph
-    encodeScriptOut (PayMulSig outputMuSig _) =
-      map (marshal ctx) outputMuSig
-    encodeScriptOut (PayScriptHash sh) =
-      return . runPutS $ serialize sh
-    encodeScriptOut (PayWitnessPKHash ph) =
-      return . runPutS $ serialize ph
-    encodeScriptOut (PayWitnessScriptHash sh) =
-      return . runPutS $ serialize sh
-    encodeScriptOut (PayWitness _ wd) =
-      return wd
-    encodeScriptOut (DataCarrier dat) =
-      return dat
+    (found, updated) = foldl' step (False, b) (zip [0 ..] tx.outputs)
+    step :: (Bool, BloomFilter) -> (Word32, TxOut) -> (Bool, BloomFilter)
+    step (f, cur) (i, out)
+      | any (bloomContains cur) (scriptPushData out.script) =
+          (True, addOutpoint cur i out)
+      | otherwise = (f, cur)
+    addOutpoint :: BloomFilter -> Word32 -> TxOut -> BloomFilter
+    addOutpoint cur i out =
+      case b.flags of
+        BloomUpdateAll -> bloomInsert cur (outpoint i)
+        BloomUpdateP2PubKeyOnly
+          | paysToKeys out.script -> bloomInsert cur (outpoint i)
+        _ -> cur
+    outpoint i = runPutS $ serialize $ OutPoint {hash = txHash tx, index = i}
+    paysToKeys script =
+      case unmarshal ctx script of
+        Right o -> isPayPK o || isPayMulSig o
+        Left _ -> False
 
 -- | Returns True if the filter is empty (all bytes set to 0x00)
 isBloomEmpty :: BloomFilter -> Bool
@@ -342,4 +374,4 @@ isBloomValid BloomFilter {..} =
 
 -- | Does the peer with these version services accept bloom filters?
 acceptsFilters :: Word64 -> Bool
-acceptsFilters srv = srv .&. (1 `shiftL` 2) /= 0
+acceptsFilters srv = srv .&. nodeBloom /= 0

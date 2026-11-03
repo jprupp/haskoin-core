@@ -142,11 +142,12 @@ asertNet =
       asertHalfLife = 2 * 24 * 60 * 60
     }
 
--- | A header on top of the parent with the given timestamp and bits, and a
--- zero nonce.
+-- | A version 4 header on top of the parent with the given timestamp and
+-- bits, and a zero nonce. Version 4 passes the BIP34, BIP65 and BIP66 version
+-- rules at any height, which regtest applies from height 1 like Bitcoin Core.
 headerOn :: BlockHeader -> Timestamp -> Word32 -> BlockHeader
 headerOn parent time bits =
-  (parent :: BlockHeader) {prev = headerHash parent, timestamp = time, bits = bits, nonce = 0}
+  (parent :: BlockHeader) {version = 4, prev = headerHash parent, timestamp = time, bits = bits, nonce = 0}
 
 -- | Mine a header on top of the parent with the given timestamp and bits.
 mineOn :: Network -> BlockHeader -> Timestamp -> Word32 -> BlockHeader
@@ -517,9 +518,6 @@ validationSpec = describe "header validation" $ do
       b1 = mineOn net net.genesisHeader (t0 + 600) 0x207fffff
       b2 = mineOn net b1 (t0 + 1200) 0x207fffff
       b3 = mineOn net b2 (t0 + 1800) 0x207fffff
-      -- the same chain with version 2 headers, which BIP34 requires
-      v2a = mineBlock net 0 (headerWithVersion 2 (headerOn net.genesisHeader (t0 + 600) 0x207fffff))
-      v2b = mineBlock net 0 (headerWithVersion 2 (headerOn v2a (t0 + 1200) 0x207fffff))
   it "connects a chain and returns the newest node first" $
     let heights = withChain net $ do
           r <- connectBlocks net myTime [b1, b2, b3]
@@ -585,26 +583,31 @@ validationSpec = describe "header validation" $ do
      in withChain cpNet (connectAll cpNet [b1, b2, b3] >> connectHeight cpNet myTime fork3)
           `shouldBe` Right 3
   it "rejects the BIP34 activation block with the wrong hash" $
-    let bipNet = (net :: Network) {bip34Block = (2, headerHash b3)}
-     in withChain bipNet (connectAll bipNet [v2a] >> connectHeight bipNet myTime v2b)
+    let bipNet = (net :: Network) {bip34Height = 2, bip34Hash = Just (headerHash b3)}
+     in withChain bipNet (connectAll bipNet [b1] >> connectHeight bipNet myTime b2)
           `shouldSatisfy` either ("Rejected BIP-34 block: " `isPrefixOf`) (const False)
   it "accepts the BIP34 activation block with the right hash" $
-    let bipNet = (net :: Network) {bip34Block = (2, headerHash v2b)}
-     in withChain bipNet (connectAll bipNet [v2a] >> connectHeight bipNet myTime v2b)
+    let bipNet = (net :: Network) {bip34Height = 2, bip34Hash = Just (headerHash b2)}
+     in withChain bipNet (connectAll bipNet [b1] >> connectHeight bipNet myTime b2)
+          `shouldBe` Right 2
+  it "accepts any block at the BIP34 height when no hash is pinned" $
+    let bipNet = (net :: Network) {bip34Height = 2, bip34Hash = Nothing}
+     in withChain bipNet (connectAll bipNet [b1] >> connectHeight bipNet myTime b2)
           `shouldBe` Right 2
   it "rejects version 1 once BIP34 is active" $
-    let bipNet = (net :: Network) {bip34Block = (0, "0000000000000000000000000000000000000000000000000000000000000000")}
-     in withChain bipNet (connectHeight bipNet myTime b1) `shouldBe` Left "Invalid block version: 1"
+    let bipNet = (net :: Network) {bip34Height = 0, bip34Hash = Nothing}
+        hdr = mineBlock net 0 (headerWithVersion 1 (headerOn net.genesisHeader (t0 + 600) 0x207fffff))
+     in withChain bipNet (connectHeight bipNet myTime hdr) `shouldBe` Left "Invalid block version: 1"
   it "rejects a negative version once BIP34 is active" $
-    let bipNet = (net :: Network) {bip34Block = (0, "0000000000000000000000000000000000000000000000000000000000000000")}
+    let bipNet = (net :: Network) {bip34Height = 0, bip34Hash = Nothing}
         hdr = mineBlock net 0 (headerWithVersion 0xffffffff (headerOn net.genesisHeader (t0 + 600) 0x207fffff))
      in withChain bipNet (connectHeight bipNet myTime hdr) `shouldBe` Left "Invalid block version: 4294967295"
   it "rejects version 2 once BIP66 is active" $
-    let bipNet = (net :: Network) {bip34Block = (0, "0000000000000000000000000000000000000000000000000000000000000000"), bip66Height = 1}
+    let bipNet = (net :: Network) {bip34Height = 0, bip34Hash = Nothing, bip66Height = 1}
         hdr = mineBlock net 0 (headerWithVersion 2 (headerOn net.genesisHeader (t0 + 600) 0x207fffff))
      in withChain bipNet (connectHeight bipNet myTime hdr) `shouldBe` Left "Invalid block version: 2"
   it "accepts version 4 everywhere" $
-    let bipNet = (net :: Network) {bip34Block = (0, "0000000000000000000000000000000000000000000000000000000000000000"), bip66Height = 1, bip65Height = 1}
+    let bipNet = (net :: Network) {bip34Height = 0, bip34Hash = Nothing, bip66Height = 1, bip65Height = 1}
         hdr = mineBlock net 0 (headerWithVersion 4 (headerOn net.genesisHeader (t0 + 600) 0x207fffff))
      in withChain bipNet (connectHeight bipNet myTime hdr) `shouldBe` Right 1
   it "keeps the first block seen on equal work and height" $
@@ -921,8 +924,10 @@ checkpointSpec = describe "checkpoints and versions" $ do
     bip34 btc 227931 "000000000000024b89b42a942fe0d9fea3bb44ab7bd1b19115dd6a759c0808b8" `shouldBe` True
     bip34 btc 227931 genesisHash `shouldBe` False
     bip34 btc 227932 genesisHash `shouldBe` True
-    bip34 btcRegTest 100000000 genesisHash `shouldBe` False
+    -- regtest pins no hash, so any block passes at its BIP34 height
+    bip34 btcRegTest 1 genesisHash `shouldBe` True
     bip34 btcRegTest 5 genesisHash `shouldBe` True
+    bip34 bchRegTest 100000000 genesisHash `shouldBe` True
   it "requires block versions by height" $ do
     validVersion btc 227930 1 `shouldBe` True
     validVersion btc 227931 1 `shouldBe` False

@@ -73,8 +73,10 @@ library
       Haskoin.Crypto.Keys.Mnemonic
       Haskoin.Crypto.Signature
       Haskoin.Network
+      Haskoin.Network.BlockFilter
       Haskoin.Network.Bloom
       Haskoin.Network.Common
+      Haskoin.Network.CompactBlock
       Haskoin.Network.Constants
       Haskoin.Network.Data
       Haskoin.Network.Message
