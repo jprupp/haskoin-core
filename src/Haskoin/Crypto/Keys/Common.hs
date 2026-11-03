@@ -27,6 +27,7 @@ module Haskoin.Crypto.Keys.Common
     wrapPubKey,
     derivePublicKey,
     wrapSecKey,
+    decodeSecKey,
     fromMiniKey,
     tweakPubKey,
     tweakSecKey,
@@ -38,7 +39,7 @@ module Haskoin.Crypto.Keys.Common
 where
 
 import Control.DeepSeq
-import Control.Monad (guard, mzero, (<=<))
+import Control.Monad (guard, mzero, unless, (<=<))
 import Crypto.Secp256k1
 import Data.Aeson
   ( Encoding,
@@ -64,6 +65,7 @@ import Data.Maybe (fromMaybe)
 import Data.Serialize (Serialize (..))
 import Data.String (IsString, fromString)
 import Data.String.Conversions (cs)
+import Data.Text qualified as T
 import GHC.Generics (Generic)
 import Haskoin.Address.Base58
 import Haskoin.Crypto.Hash
@@ -85,7 +87,14 @@ instance MarshalJSON Ctx PublicKey where
   unmarshalValue ctx =
     withText "PublicKey" $ \t -> do
       bs <- maybe (fail "Expected hex public key") return $ decodeHex t
-      either fail return $ unmarshal ctx bs
+      either fail return $ runGetS getWholeKey bs
+    where
+      -- The hex string must hold the key and nothing else.
+      getWholeKey = do
+        k <- marshalGet ctx
+        done <- isEmpty
+        unless done $ fail "Trailing bytes after public key"
+        return k
 
 instance Marshal Ctx PublicKey where
   marshalGet ctx = do
@@ -133,9 +142,11 @@ instance Serial PrivateKey where
     putByteString p.key.get
     serialize p.compress
   deserialize = do
-    k <- getByteString 32
+    bs <- getByteString 32
     c <- deserialize
-    return PrivateKey {key = SecKey k, compress = c}
+    case decodeSecKey bs of
+      Nothing -> fail "Secret key is zero or not below the curve order"
+      Just k -> return PrivateKey {key = k, compress = c}
 
 instance MarshalJSON Network PrivateKey where
   marshalValue net = String . toWif net
@@ -148,6 +159,20 @@ instance MarshalJSON Network PrivateKey where
 wrapSecKey :: Bool -> SecKey -> PrivateKey
 wrapSecKey c d = PrivateKey d c
 
+-- | Order of the secp256k1 group. A secret key is a number in @[1, n-1]@.
+curveOrder :: Integer
+curveOrder = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141
+
+-- | Build a secret key from its 32 big-endian bytes. Fails when the value is
+-- zero or not below the curve order. 'Crypto.Secp256k1.secKey' only checks the
+-- length, and such a key would make 'derivePubKey' and 'signMsg' crash.
+decodeSecKey :: ByteString -> Maybe SecKey
+decodeSecKey bs = do
+  guard (BS.length bs == 32)
+  let n = bsToInteger bs
+  guard (n >= 1 && n < curveOrder)
+  secKey bs
+
 -- | Tweak a private key.
 tweakSecKey :: Ctx -> SecKey -> Hash256 -> Maybe SecKey
 tweakSecKey ctx k =
@@ -157,24 +182,35 @@ tweakSecKey ctx k =
 fromMiniKey :: ByteString -> Maybe PrivateKey
 fromMiniKey bs = do
   guard checkShortKey
-  wrapSecKey False <$> (secKey . runPutS . serialize . sha256) bs
+  wrapSecKey False <$> (decodeSecKey . runPutS . serialize . sha256) bs
   where
     checkHash = runPutS $ serialize $ sha256 $ bs `BS.append` "?"
     checkShortKey = BS.length bs `elem` [22, 30] && BS.head checkHash == 0x00
 
--- | Decode private key from WIF (wallet import format) string.
+-- | Longest Base58 string a WIF can take. A WIF holds at most 38 bytes with
+-- its checksum, which never need more than 52 digits because 58^52 is larger
+-- than 256^38. Longer strings are rejected before decoding, since the time to
+-- decode Base58 grows with the square of the length.
+maxWifLength :: Int
+maxWifLength = 52
+
+-- | Decode private key from WIF (wallet import format) string. Fails on a
+-- string of another network, of the wrong length, or holding a key that is
+-- zero or not below the curve order.
 fromWif :: Network -> Base58 -> Maybe PrivateKey
 fromWif net wif = do
+  guard (T.length wif <= maxWifLength)
   bs <- decodeBase58Check wif
+  (prefix, rest) <- BS.uncons bs
   -- Check that this is a private key
-  guard (BS.head bs == net.secretPrefix)
-  case BS.length bs of
+  guard (prefix == net.secretPrefix)
+  case BS.length rest of
     -- Uncompressed format
-    33 -> wrapSecKey False <$> (secKey . BS.tail) bs
-    -- Compressed format
-    34 -> do
-      guard $ BS.last bs == 0x01
-      wrapSecKey True <$> (secKey . BS.tail . BS.init) bs
+    32 -> wrapSecKey False <$> decodeSecKey rest
+    -- Compressed format: the key is followed by a 0x01 flag byte
+    33 -> do
+      guard $ BS.last rest == 0x01
+      wrapSecKey True <$> decodeSecKey (BS.init rest)
     -- Bad length
     _ -> Nothing
 

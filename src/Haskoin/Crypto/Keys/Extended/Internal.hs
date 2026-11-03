@@ -12,7 +12,7 @@ module Haskoin.Crypto.Keys.Extended.Internal
 where
 
 import Control.DeepSeq (NFData)
-import Control.Monad ((>=>))
+import Control.Monad (unless)
 import Data.Aeson
   ( FromJSON (parseJSON),
     ToJSON (toEncoding, toJSON),
@@ -22,10 +22,9 @@ import Data.Aeson.Encoding (text)
 import Data.Binary (Binary (..))
 import Data.Bytes.Get (getWord32be)
 import Data.Bytes.Put (putWord32be)
+import Data.ByteString qualified as B
 import Data.Bytes.Serial (Serial (..))
-import Data.Either (fromRight)
 import Data.Hashable (Hashable)
-import Data.Maybe (fromMaybe)
 import Data.Serialize (Serialize (..))
 import Data.Serialize qualified as S
 import Data.String (IsString (..))
@@ -44,29 +43,24 @@ newtype Fingerprint = Fingerprint {get :: Word32}
 fingerprintToText :: Fingerprint -> Text
 fingerprintToText = encodeHex . S.encode
 
+-- | Read a fingerprint from exactly eight hex digits.
 textToFingerprint :: Text -> Either String Fingerprint
-textToFingerprint =
-  maybe (Left "Fingerprint: invalid hex") Right . decodeHex >=> S.decode
+textToFingerprint t = do
+  bs <- maybe (Left "Fingerprint: invalid hex") Right (decodeHex t)
+  unless (B.length bs == 4) $ Left "Fingerprint: expected 4 bytes"
+  S.decode bs
 
 instance Show Fingerprint where
   show = show . Text.unpack . encodeHex . S.encode
 
 instance Read Fingerprint where
-  readPrec =
-    readPrec
-      >>= maybe (fail "Fingerprint: invalid hex") pure . decodeHex
-      >>= either (fail . ("Fingerprint: " <>)) pure . S.decode
+  readPrec = readPrec >>= either fail pure . textToFingerprint
 
 instance IsString Fingerprint where
   fromString =
-    fromRight decodeError
-      . S.decode
-      . fromMaybe hexError
-      . decodeHex
+    either (error . ("Fingerprint literal: " <>)) id
+      . textToFingerprint
       . Text.pack
-    where
-      decodeError = error "Fingerprint literal: Unable to decode"
-      hexError = error "Fingerprint literal: Invalid hex"
 
 instance Serial Fingerprint where
   serialize = putWord32be . (.get)

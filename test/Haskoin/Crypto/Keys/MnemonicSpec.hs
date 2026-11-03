@@ -8,10 +8,12 @@ import Data.Bits (shiftR, (.&.))
 import Data.ByteString qualified as BS
 import Data.Either (fromRight)
 import Data.List (isPrefixOf)
+import Data.Map.Strict qualified as M
 import Data.Maybe (fromJust)
 import Data.Serialize (Serialize, encode)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Vector qualified as V
 import Data.Word (Word32, Word64)
 import Haskoin (btc)
 import Haskoin.Crypto
@@ -30,23 +32,74 @@ spec =
     it "mnemonic sentence with invalid checksum" fromMnemonicInvalidTest
     it "empty mnemonic sentence is invalid" $ sequence_ [emptyMnemonicTest]
     it "generate 12 words" $ property toMnemonic128
-    it "generate 18 words" $ property toMnemonic160
+    it "generate 15 words" $ property toMnemonic160
     it "generate 24 words" $ property toMnemonic256
-    it "generate 48 words" $ property toMnemonic512
-    it "generate any number of words" $ property toMnemonicVar
+    it "refuses 64 bytes of entropy" $ property toMnemonic512
+    it "generate any allowed number of words" toMnemonicVar
+    it "refuses entropy below 16 bytes" toMnemonicTooShort
     it "encode and decode 128-bit entropy" $ property fromToMnemonic128
     it "encode and decode 160-bit entropy" $ property fromToMnemonic160
     it "encode and decode 256-bit entropy" $ property fromToMnemonic256
-    it "encode and decode 512-bit entropy" $ property fromToMnemonic512
-    it "encode and decode n-bit entropy" $ property fromToMnemonicVar
+    it "encode and decode n-bit entropy" fromToMnemonicVar
     it "convert 128-bit mnemonic to seed" $ property mnemonicToSeed128
     it "convert 160-bit mnemonic to seed" $ property mnemonicToSeed160
     it "convert 256-bit mnemonic to seed" $ property mnemonicToSeed256
-    it "convert 512-bit mnemonic to seed" $ property mnemonicToSeed512
-    it "convert n-bit mnemonic to seed" $ property mnemonicToSeedVar
+    it "convert n-bit mnemonic to seed" mnemonicToSeedVar
     it "get bits" $ property getBitsByteCount
     it "get end bits" $ property getBitsEndBits
     it "passes the Trezor vectors" trezorVectorTests
+    it "refuses entropy of 4 bytes" $
+      toMnemonic (BS.replicate 4 0)
+        `shouldBe` Left "toMnemonic: minimum entropy is 16 bytes (128 bits)"
+    it "refuses entropy of 64 bytes" $
+      toMnemonic (BS.replicate 64 0)
+        `shouldBe` Left "toMnemonic: maximum entropy is 32 bytes (256 bits)"
+    it "refuses entropy that is not a multiple of 4 bytes" $
+      toMnemonic (BS.replicate 17 0)
+        `shouldBe` Left "toMnemonic: entropy must be multiples of 4 bytes"
+    it "gives 12 to 24 words for 16 to 32 bytes of entropy" $
+      -- (bytes * 8 + bytes * 8 / 32) / 11 words: 16 bytes give 132 / 11 = 12
+      forM_ [(16, 12), (20, 15), (24, 18), (28, 21), (32, 24)] $ \(bytes, count) ->
+        fmap (length . T.words) (toMnemonic (BS.replicate bytes 0)) `shouldBe` Right count
+    it "refuses a sentence of 3 words" $
+      fromMnemonic "abandon abandon ability"
+        `shouldBe` Left "fromMnemonic: wrong number of words: 3"
+    it "refuses a sentence of 48 words" $
+      fromMnemonic (T.unwords (replicate 48 "abandon"))
+        `shouldBe` Left "fromMnemonic: wrong number of words: 48"
+    it "refuses a sentence of only whitespace" $
+      fromMnemonic "   " `shouldBe` Left "fromMnemonic: wrong number of words: 0"
+    it "refuses a word that is not in the list" $
+      fromMnemonic "Abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+        `shouldBe` Left "fromMnemonic: words not in the list: Abandon"
+    it "matches words after NFKD normalisation" $
+      -- the first word in fullwidth letters, which NFKD maps back to ASCII
+      fmap encodeHex (fromMnemonic "ａｂａｎｄｏｎ abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about")
+        `shouldBe` Right "00000000000000000000000000000000"
+    it "normalises the passphrase to NFKD before deriving the seed" $ do
+      -- PBKDF2-HMAC-SHA512, 2048 rounds, of the sentence with the salt
+      -- "mnemonic" ++ NFKD("café"), as python-mnemonic computes it. The
+      -- precomposed and the decomposed spelling must give the same seed.
+      fmap encodeHex (mnemonicToSeed "caf\x00e9" abandon12) `shouldBe` Right cafeSeed
+      fmap encodeHex (mnemonicToSeed "cafe\x0301" abandon12) `shouldBe` Right cafeSeed
+    it "has the 2048 BIP39 words in order" $ do
+      V.length wordList `shouldBe` 2048
+      wordList V.! 0 `shouldBe` "abandon"
+      wordList V.! 2047 `shouldBe` "zoo"
+      M.size wordListMap `shouldBe` 2048
+      M.lookup "abandon" wordListMap `shouldBe` Just 0
+      M.lookup "zoo" wordListMap `shouldBe` Just 2047
+
+-- | The first Trezor sentence, for 16 zero bytes of entropy.
+abandon12 :: Mnemonic
+abandon12 =
+  "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+
+-- | Seed of 'abandon12' with the passphrase "café".
+cafeSeed :: Text
+cafeSeed =
+  "af8bbd2566df7b69d926f2b09dfdbd75db6c994a3399b2cc65f928d63e3fd4e6\
+  \1218ee0d15f8c810be4d45e66d47b43c15a5cc753976b1666912377ff7ae9818"
 
 toMnemonicTest :: Assertion
 toMnemonicTest = zipWithM_ f ents mss
@@ -457,9 +510,11 @@ toMnemonic256 (a, b, c, d) = l == 24
         . fromRight (error "Could not decode mnemonic sentence")
         $ toMnemonic bs
 
+-- 64 bytes of entropy are above the 32 bytes BIP39 allows.
 toMnemonic512 ::
   ((Word64, Word64, Word64, Word64), (Word64, Word64, Word64, Word64)) -> Bool
-toMnemonic512 ((a, b, c, d), (e, f, g, h)) = l == 48
+toMnemonic512 ((a, b, c, d), (e, f, g, h)) =
+  toMnemonic bs == Left "toMnemonic: maximum entropy is 32 bytes (256 bits)"
   where
     bs =
       BS.concat
@@ -472,24 +527,31 @@ toMnemonic512 ((a, b, c, d), (e, f, g, h)) = l == 48
           encode g,
           encode h
         ]
-    l =
-      length
-        . T.words
-        . fromRight (error "Could not decode mnemonic sentence")
-        $ toMnemonic bs
 
-toMnemonicVar :: [Word32] -> Property
-toMnemonicVar ls = not (null ls) && length ls <= 8 ==> l == wc
-  where
-    bs = binWordsToBS ls
-    bl = BS.length bs
-    cb = bl `div` 4
-    wc = (cb + bl * 8) `div` 11
-    l =
-      length
-        . T.words
-        . fromRight (error "Could not decode mnemonic sentence")
-        $ toMnemonic bs
+-- Fewer than 4 words of 32 bits are below the 16 bytes BIP39 allows.
+toMnemonicTooShort :: Property
+toMnemonicTooShort =
+  forAll (choose (0, 3) >>= \n -> vectorOf n (arbitrary :: Gen Word32)) $ \ls ->
+    toMnemonic (binWordsToBS ls)
+      == Left "toMnemonic: minimum entropy is 16 bytes (128 bits)"
+
+-- | Entropy of 16 to 32 bytes in steps of 4 bytes, the sizes BIP39 allows.
+allowedEntropy :: Gen BS.ByteString
+allowedEntropy = do
+  n <- choose (4, 8)
+  binWordsToBS <$> vectorOf n (arbitrary :: Gen Word32)
+
+-- Every 32 bits of entropy add one checksum bit, and every 11 bits give a word.
+toMnemonicVar :: Property
+toMnemonicVar = forAll allowedEntropy $ \bs ->
+  let bl = BS.length bs
+      wc = (bl * 8 + bl `div` 4) `div` 11
+      l =
+        length
+          . T.words
+          . fromRight (error "Could not decode mnemonic sentence")
+          $ toMnemonic bs
+   in l == wc
 
 {- Encode/Decode -}
 
@@ -520,34 +582,12 @@ fromToMnemonic256 (a, b, c, d) = bs == bs'
         (error "Could not decode mnemonic entropy")
         (fromMnemonic =<< toMnemonic bs)
 
-fromToMnemonic512 ::
-  ((Word64, Word64, Word64, Word64), (Word64, Word64, Word64, Word64)) -> Bool
-fromToMnemonic512 ((a, b, c, d), (e, f, g, h)) = bs == bs'
-  where
-    bs =
-      BS.concat
-        [ encode a,
-          encode b,
-          encode c,
-          encode d,
-          encode e,
-          encode f,
-          encode g,
-          encode h
-        ]
-    bs' =
-      fromRight
-        (error "Could not decode mnemonic entropy")
-        (fromMnemonic =<< toMnemonic bs)
-
-fromToMnemonicVar :: [Word32] -> Property
-fromToMnemonicVar ls = not (null ls) && length ls <= 8 ==> bs == bs'
-  where
-    bs = binWordsToBS ls
-    bs' =
-      fromRight
-        (error "Could not decode mnemonic entropy")
-        (fromMnemonic =<< toMnemonic bs)
+fromToMnemonicVar :: Property
+fromToMnemonicVar = forAll allowedEntropy $ \bs ->
+  fromRight
+    (error "Could not decode mnemonic entropy")
+    (fromMnemonic =<< toMnemonic bs)
+    == bs
 
 {- Mnemonic to seed -}
 
@@ -581,36 +621,14 @@ mnemonicToSeed256 (a, b, c, d) = l == 64
         (mnemonicToSeed "" =<< toMnemonic bs)
     l = BS.length seed
 
-mnemonicToSeed512 ::
-  ((Word64, Word64, Word64, Word64), (Word64, Word64, Word64, Word64)) -> Bool
-mnemonicToSeed512 ((a, b, c, d), (e, f, g, h)) = l == 64
-  where
-    bs =
-      BS.concat
-        [ encode a,
-          encode b,
-          encode c,
-          encode d,
-          encode e,
-          encode f,
-          encode g,
-          encode h
-        ]
-    seed =
-      fromRight
+mnemonicToSeedVar :: Property
+mnemonicToSeedVar = forAll allowedEntropy $ \bs ->
+  BS.length
+    ( fromRight
         (error "Could not decode mnemonic seed")
         (mnemonicToSeed "" =<< toMnemonic bs)
-    l = BS.length seed
-
-mnemonicToSeedVar :: [Word32] -> Property
-mnemonicToSeedVar ls = not (null ls) && length ls <= 16 ==> l == 64
-  where
-    bs = binWordsToBS ls
-    seed =
-      fromRight
-        (error "Could not decode mnemonic seed")
-        (mnemonicToSeed "" =<< toMnemonic bs)
-    l = BS.length seed
+    )
+    == 64
 
 {- Get bits from ByteString -}
 

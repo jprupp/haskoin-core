@@ -6,9 +6,11 @@
 
 module Haskoin.Crypto.Keys.ExtendedSpec (spec) where
 
+import Control.Exception (evaluate)
 import Control.Monad (forM_)
 import Data.Aeson as A
 import Data.Bits ((.&.))
+import Data.ByteString qualified as B
 import Data.ByteString.Lazy.Char8 qualified as B8
 import Data.Bytes.Get
 import Data.Bytes.Put
@@ -16,19 +18,23 @@ import Data.Bytes.Serial
 import Data.Default (def)
 import Data.Either (isLeft)
 import Data.Maybe (fromJust, isJust, isNothing)
+import Data.Ord (comparing)
 import Data.String (fromString)
 import Data.String.Conversions (cs)
 import Data.Text (Text)
+import Data.Text qualified as T
 import Data.Word (Word32)
 import Haskoin.Address
 import Haskoin.Crypto
 import Haskoin.Network.Constants
+import Haskoin.Script
 import Haskoin.Util
 import Haskoin.Util.Arbitrary
 import Test.HUnit
 import Test.Hspec
 import Test.Hspec.QuickCheck
 import Test.QuickCheck hiding ((.&.))
+import Text.Read (readMaybe)
 
 identityTests :: Ctx -> IdentityTests
 identityTests ctx =
@@ -80,6 +86,248 @@ spec = prepareContext $ \ctx -> do
   describe "bip32 subkey derivation vector 1" $ vectorSpec ctx m1 vector1
   describe "bip32 subkey derivation vector 2" $ vectorSpec ctx m2 vector2
   describe "bip32 subkey derivation vector 3" $ vectorSpec ctx m3 vector3
+  describe "bip32 test vector 4: private keys with leading zeros" $
+    forM_ vector4 $ \(path, xpubText, xprvText) ->
+      it ("chain " <> path) $ do
+        let m = makeXPrvKey (fromJust (decodeHex m4))
+            k = derivePath ctx ((.get) (fromJust (parsePath path))) m
+        xPrvExport btc k `shouldBe` xprvText
+        xPubExport btc ctx (deriveXPubKey ctx k) `shouldBe` xpubText
+  describe "bip32 test vector 5: invalid extended keys" $
+    forM_ vector5 $ \(key, reason) ->
+      it ("refuses " <> reason) $ do
+        xPrvImport btc key `shouldBe` Nothing
+        xPubImport btc ctx key `shouldBe` Nothing
+  describe "Extended key import" $ do
+    it "refuses an xpub with trailing bytes" $
+      -- the 78 bytes of the vector 1 master xpub followed by de ad be ef
+      xPubImport btc ctx "7JJikZQ2NUXjSAnAF2v9rxutS1j84JbPJspH9roCjFfNvxFfhmgTczN53frJ4RaYoKmwYCj5r1qRsGbLz2fiUE4Aw7LqCR9NYxR72w6AThhWJsB43ZrGA"
+        `shouldBe` Nothing
+    it "refuses an xprv with trailing bytes" $
+      xPrvImport btc "7JJRGiiVuW9DCAkyM2PaXqVx51tHCM3s2Wbq9SnmstZD4r8Ryf4i7Dbe2YQyz9mUF9oZEcdkyzU96dsBwJz3Uvu6PzVTC5k53mBrVHWxZMPdSBtmunEjn"
+        `shouldBe` Nothing
+    it "refuses an xpub carrying an uncompressed public key" $
+      -- 110 bytes: the vector 1 master xpub with its key in the 65-byte form
+      xPubImport btc ctx "HarqLWPftSVzTwufEPMMMdZS33daVnF1pMQCFXEQoWwsd7tK1oCwB34reM1xTwhKvY11Pfgite2BcpvEDscYTtuZYL3pZAwQzAoZRLA1xCjK2F28jNBa3muZtLmsqfWHzwSGk2RRAd1e52SvdFecN97hmfA"
+        `shouldBe` Nothing
+    it "refuses a string longer than any extended key" $ do
+      xPrvImport btc (T.replicate 113 "z") `shouldBe` Nothing
+      xPubImport btc ctx (T.replicate 113 "z") `shouldBe` Nothing
+    it "refuses an extended key of another network" $ do
+      xPrvImport btcTest xprv1Text `shouldBe` Nothing
+      xPrvImport btc tprv1Text `shouldBe` Nothing
+      xPubImport btcTest ctx xpub1Text `shouldBe` Nothing
+      xPubImport btc ctx tpub1Text `shouldBe` Nothing
+    it "imports the testnet form of a key on testnet" $ do
+      fmap (.key) (xPrvImport btcTest tprv1Text) `shouldBe` Just (xprv1 ctx).key
+      fmap (.key) (xPubImport btcTest ctx tpub1Text) `shouldBe` Just (xpub1 ctx).key
+    it "refuses an xpub given to the private key importer, and the reverse" $ do
+      xPrvImport btc xpub1Text `shouldBe` Nothing
+      xPubImport btc ctx xprv1Text `shouldBe` Nothing
+    it "fails the JSON parse of an invalid extended key" $
+      -- BIP32 test vector 5: private key 0
+      (unmarshalJSON btc "\"xprv9s21ZrQH143K24Mfq5zL5MhWK9hUhhGbd45hLXo2Pq2oqzMMo63oStZzF93Y5wvzdUayhgkkFoicQZcP3y52uPPxFnfoLZB21Teqt1VvEHx\"" :: Maybe XPrvKey)
+        `shouldBe` Nothing
+  describe "Master key" $
+    it "has depth 0, no parent and index 0" $ do
+      let m = makeXPrvKey (fromJust (decodeHex m1))
+      m.depth `shouldBe` 0
+      m.parent `shouldBe` "00000000"
+      m.index `shouldBe` 0
+  describe "Derivation depth" $ do
+    let m = makeXPrvKey (fromJust (decodeHex m1))
+        atDepth255 = XPrvKey 255 m.parent m.index m.chain m.key
+        tooDeep = DerivationException "Maximum derivation depth exceeded"
+    it "a child is one level deeper than its parent" $ do
+      (prvSubKey ctx m 0).depth `shouldBe` 1
+      (hardSubKey ctx m 0).depth `shouldBe` 1
+      (pubSubKey ctx (deriveXPubKey ctx m) 0).depth `shouldBe` 1
+      (derivePath ctx (Deriv :| 0 :/ 1 :/ 2 :: DerivPath) m).depth `shouldBe` 3
+    it "refuses to derive a child of a key at depth 255" $ do
+      evaluate (prvSubKey ctx atDepth255 0) `shouldThrow` (== tooDeep)
+      evaluate (hardSubKey ctx atDepth255 0) `shouldThrow` (== tooDeep)
+      evaluate (pubSubKey ctx (deriveXPubKey ctx atDepth255) 0) `shouldThrow` (== tooDeep)
+    it "refuses a child index with the hard bit set" $ do
+      evaluate (prvSubKey ctx m 0x80000000) `shouldThrow` anyErrorCall
+      evaluate (hardSubKey ctx m 0x80000000) `shouldThrow` anyErrorCall
+      evaluate (pubSubKey ctx (deriveXPubKey ctx m) 0x80000000) `shouldThrow` anyErrorCall
+  describe "Child index" $ do
+    let m = makeXPrvKey (fromJust (decodeHex m1))
+    it "a hardened child stores its index with the hard bit set" $ do
+      let k = hardSubKey ctx m 7
+      k.index `shouldBe` 0x80000007
+      xPrvChild k `shouldBe` 7
+      xPrvIsHard k `shouldBe` True
+      xPubChild (deriveXPubKey ctx k) `shouldBe` 7
+      xPubIsHard (deriveXPubKey ctx k) `shouldBe` True
+    it "a soft child stores its index as given" $ do
+      let k = prvSubKey ctx m 7
+      k.index `shouldBe` 7
+      xPrvChild k `shouldBe` 7
+      xPrvIsHard k `shouldBe` False
+      xPubChild (deriveXPubKey ctx k) `shouldBe` 7
+      xPubIsHard (deriveXPubKey ctx k) `shouldBe` False
+  describe "Addresses of an extended public key" $ do
+    -- BIP32 vector 1 master public key 0339a360…85c2 has HASH160 3442193e…f811
+    it "pay to public key hash" $
+      addrToText btc (xPubAddr ctx (xpub1 ctx)) `shouldBe` Just "15mKKb2eos1hWa6tisdPwwDC1a5J1y9nma"
+    it "pay to witness public key hash" $
+      addrToText btc (xPubWitnessAddr ctx (xpub1 ctx)) `shouldBe` Just "bc1qx3ppj0smkuy3d6g525sh9n2w9k7fm7q3x30rtg"
+    it "pay to script hash wrapping a witness public key hash" $
+      addrToText btc (xPubCompatWitnessAddr ctx (xpub1 ctx)) `shouldBe` Just "3PpgpssV7mcAGpZRWiCWhodUTnjpoSZg7a"
+  describe "Address derivation helpers" $ do
+    -- BIP32 vector 2: child 0 of the master key has public key 02fc9e5a…12ea
+    it "deriveAddr gives the address and the public key of the child" $ do
+      let (addr, key) = deriveAddr ctx (xpub2 ctx) 0
+      addrToText btc addr `shouldBe` Just "19EuDJdgfRkwCmRzbzVBHZWQG9QNWhftbZ"
+      encodeHex (exportPubKey ctx True key)
+        `shouldBe` "02fc9e5af0ac8d9b3cecfe2a888e2117ba3d089d8585886c9c826b6b22a98d12ea"
+    it "deriveWitnessAddr gives the witness address of the child" $
+      addrToText btc (fst (deriveWitnessAddr ctx (xpub2 ctx) 0))
+        `shouldBe` Just "bc1qtfsllr4h4t9rqyxmjl4a5asjzcgt0qykp3q3we"
+    it "deriveCompatWitnessAddr gives the wrapped witness address of the child" $
+      addrToText btc (fst (deriveCompatWitnessAddr ctx (xpub2 ctx) 0))
+        `shouldBe` Just "39cFMGtVaEw6AfksMcaLpu8frZxmqngh8c"
+    it "deriveAddrs lists children from the start index and wraps around" $ do
+      map lst3 (take 3 (deriveAddrs ctx (xpub2 ctx) 0x7ffffffe))
+        `shouldBe` [0x7ffffffe, 0x7fffffff, 0]
+      map addressAndIndex (take 1 (deriveAddrs ctx (xpub2 ctx) 5))
+        `shouldBe` [(Just "16KmCWXw8kPgr9nnvETXoqzmsYcvscXfGL", 5)]
+    it "deriveWitnessAddrs lists witness addresses with their index" $
+      map addressAndIndex (take 1 (deriveWitnessAddrs ctx (xpub2 ctx) 5))
+        `shouldBe` [(Just "bc1q8fjs9hakl9489q0fem0gya4m8yqr4gl32dhjr9", 5)]
+    it "deriveCompatWitnessAddrs lists wrapped witness addresses with their index" $
+      map addressAndIndex (take 1 (deriveCompatWitnessAddrs ctx (xpub2 ctx) 5))
+        `shouldBe` [(Just "3FzrsDTC8KiEsBeBTrhDnJoJYvkDpWaWR6", 5)]
+    it "prvSubKeys, pubSubKeys and hardSubKeys list children with their index" $ do
+      let m = makeXPrvKey (fromJust (decodeHex m1))
+      map snd (take 3 (prvSubKeys ctx m 0x7ffffffe)) `shouldBe` [0x7ffffffe, 0x7fffffff, 0]
+      map snd (take 2 (hardSubKeys ctx m 0)) `shouldBe` [0, 1]
+      map ((.index) . fst) (take 1 (hardSubKeys ctx m 1)) `shouldBe` [0x80000001]
+      map (\(k, i) -> (addrToText btc (xPubAddr ctx k), i)) (take 1 (pubSubKeys ctx (xpub2 ctx) 0))
+        `shouldBe` [(Just "19EuDJdgfRkwCmRzbzVBHZWQG9QNWhftbZ", 0)]
+    it "cycleIndex runs through the soft indices from the start and wraps around" $ do
+      take 3 (cycleIndex 0x7ffffffe) `shouldBe` [0x7ffffffe, 0x7fffffff, 0]
+      take 2 (cycleIndex 0) `shouldBe` [0, 1]
+      evaluate (cycleIndex 0x80000000) `shouldThrow` anyErrorCall
+  describe "Multisig derivation" $ do
+    -- 2-of-2 of child 0 of vectors 1 and 2; sorted keys 027c4b09… then 02fc9e5a…
+    it "deriveMSAddr gives the P2SH address of the sorted multisig script" $ do
+      let (addr, rdm) = deriveMSAddr ctx [xpub2 ctx, xpub1 ctx] 2 0
+      addrToText btc addr `shouldBe` Just "3ARSZ47cqQBb9y6QhTk6UoWHMwpruUryZp"
+      encodeHex (marshal ctx rdm)
+        `shouldBe` "5221027c4b09ffb985c298afe7e5813266cbfcb7780b480ac294b0b43dc21f2be3d13c\
+                   \2102fc9e5af0ac8d9b3cecfe2a888e2117ba3d089d8585886c9c826b6b22a98d12ea52ae"
+    it "deriveMSAddrs lists multisig addresses with their index" $ do
+      map lst3 (take 2 (deriveMSAddrs ctx [xpub1 ctx, xpub2 ctx] 2 0)) `shouldBe` [0, 1]
+      -- 2-of-2 of child 1 of vectors 1 and 2
+      map addressAndIndex (take 1 (deriveMSAddrs ctx [xpub1 ctx, xpub2 ctx] 2 1))
+        `shouldBe` [(Just "3Pp8RkaJc8eNreFuTTTJ92QfXECQMXDEoE", 1)]
+  describe "Address derivation below a path" $ do
+    -- vector 2: m/0/0 has public key 0205c889…ef8c
+    it "derivePathAddr derives the address of a child below a soft path" $ do
+      let (addr, key) = derivePathAddr ctx (xpub2 ctx) (Deriv :/ 0) 0
+      addrToText btc addr `shouldBe` Just "1NyMg76BQxDvV6vRsQugNS4ED2hpZCJtwK"
+      encodeHex (exportPubKey ctx True key)
+        `shouldBe` "0205c8897fd0ff5644adba4545a84020cd6aa94d90e1e0a56bb4b8eb7522e3ef8c"
+    it "derivePathAddrs lists children below the path with their index" $
+      map addressAndIndex (take 1 (derivePathAddrs ctx (xpub2 ctx) (Deriv :/ 0) 0))
+        `shouldBe` [(Just "1NyMg76BQxDvV6vRsQugNS4ED2hpZCJtwK", 0)]
+    it "derivePathMSAddr derives a multisig address below a soft path" $ do
+      -- 2-of-2 of m/1/0 of vectors 1 and 2
+      let (addr, _) = derivePathMSAddr ctx [xpub1 ctx, xpub2 ctx] (Deriv :/ 1) 2 0
+      addrToText btc addr `shouldBe` Just "39HHTbxsnt5SrM4h2BtUgVRFzGYcavJ8M4"
+    it "derivePathMSAddrs lists multisig addresses below the path with their index" $
+      map addressAndIndex (take 1 (derivePathMSAddrs ctx [xpub1 ctx, xpub2 ctx] (Deriv :/ 1) 2 0))
+        `shouldBe` [(Just "39HHTbxsnt5SrM4h2BtUgVRFzGYcavJ8M4", 0)]
+  describe "Path operations" $ do
+    it "++/ appends two paths into a mixed path" $ do
+      let p = (Deriv :| 44 :| 0 :: HardPath) ++/ (Deriv :/ 0 :/ 5 :: SoftPath)
+      p `shouldBe` (Deriv :| 44 :| 0 :/ 0 :/ 5)
+      pathToStr p `shouldBe` "/44'/0'/0/5"
+    it "toHard keeps a path only when every segment is hardened" $ do
+      toHard (Deriv :| 1 :| 2 :: DerivPath) `shouldBe` Just (Deriv :| 1 :| 2)
+      toHard (Deriv :| 1 :/ 2 :: DerivPath) `shouldBe` Nothing
+    it "toSoft keeps a path only when no segment is hardened" $ do
+      toSoft (Deriv :/ 1 :/ 2 :: DerivPath) `shouldBe` Just (Deriv :/ 1 :/ 2)
+      toSoft (Deriv :| 1 :/ 2 :: DerivPath) `shouldBe` Nothing
+    it "toGeneric keeps every segment" $ do
+      toGeneric (Deriv :| 1 :| 2 :: HardPath) `shouldBe` (Deriv :| 1 :| 2)
+      toGeneric (Deriv :/ 1 :/ 2 :: SoftPath) `shouldBe` (Deriv :/ 1 :/ 2)
+    it "writes hardened segments with an apostrophe" $ do
+      pathToStr (Deriv :| 44 :/ 0 :: DerivPath) `shouldBe` "/44'/0"
+      show (ParsedPrv (Deriv :| 44 :/ 0)) `shouldBe` "ParsedPath \"m/44'/0\""
+      show (ParsedPub (Deriv :| 44 :/ 0)) `shouldBe` "ParsedPath \"M/44'/0\""
+    it "pathToList sets the hard bit on hardened segments" $
+      pathToList (Deriv :| 1 :/ 2 :: DerivPath) `shouldBe` [0x80000001, 2]
+    it "listToPath reads the hard bit back" $
+      listToPath [0x80000001, 2] `shouldBe` (Deriv :| 1 :/ 2)
+    it "serializes a path as a count and its indices with the hard bit" $
+      runPutS (serialize (Deriv :| 1 :/ 2 :: DerivPath))
+        `shouldBe` hex "0000000000000002" <> hex "80000001" <> hex "00000002"
+    it "binary hard path refuses a soft segment" $
+      (runGetS deserialize (hex "0000000000000001" <> hex "00000001") :: Either String HardPath)
+        `shouldSatisfy` isLeft
+    it "binary soft path refuses a hardened segment" $
+      (runGetS deserialize (hex "0000000000000001" <> hex "80000001") :: Either String SoftPath)
+        `shouldSatisfy` isLeft
+    it "sorts a shorter path first, then by segment, soft before hard" $ do
+      (Deriv :/ 9 :: DerivPath) < (Deriv :/ 0 :/ 1) `shouldBe` True
+      (Deriv :/ 5 :: DerivPath) < (Deriv :| 0) `shouldBe` True
+      (Deriv :/ 1 :: DerivPath) < (Deriv :/ 2) `shouldBe` True
+    prop "ordering agrees with the shortlex order of the index lists" $
+      forAll arbitraryDerivPath $ \a ->
+        forAll arbitraryDerivPath $ \b ->
+          compare a b == comparing (\p -> (length (pathToList p), pathToList p)) a b
+  describe "Path parsing" $ do
+    it "accepts the apostrophe, h and H as hardened markers" $ do
+      parsePath "m/44h/0H/1'" `shouldBe` Just (ParsedPrv (Deriv :| 44 :| 0 :| 1))
+      parseHard "m/44h/0H" `shouldBe` Just (Deriv :| 44 :| 0)
+      (fromString "m/44h/0H/1" :: DerivPath) `shouldBe` (Deriv :| 44 :| 0 :/ 1)
+    it "accepts the largest index, 2^31 - 1" $
+      parsePath "m/2147483647'" `shouldBe` Just (ParsedPrv (Deriv :| 2147483647))
+    it "refuses an index that does not fit in 31 bits instead of wrapping it" $ do
+      parsePath "m/2147483648" `shouldBe` Nothing
+      parsePath "m/4294967296" `shouldBe` Nothing -- 2^32, would wrap to 0
+      parsePath "m/4294967297'" `shouldBe` Nothing -- 2^32 + 1, would wrap to 1
+      parsePath "m/-4294967295" `shouldBe` Nothing -- would wrap to 1
+      parsePath "m/18446744073709551617" `shouldBe` Nothing -- 2^64 + 1
+    it "refuses anything but decimal digits in an index" $ do
+      parsePath "m/0x10" `shouldBe` Nothing
+      parsePath "m/(7)" `shouldBe` Nothing
+      parsePath "m/+1" `shouldBe` Nothing
+      parsePath "m/1e3" `shouldBe` Nothing
+      parsePath "m/ 1" `shouldBe` Nothing
+      parsePath "m/1 " `shouldBe` Nothing
+      parsePath "m/1''" `shouldBe` Nothing
+      parsePath "m/'" `shouldBe` Nothing
+    it "refuses empty segments" $ do
+      parsePath "m/" `shouldBe` Nothing
+      parsePath "m//1" `shouldBe` Nothing
+      parsePath "m/1/" `shouldBe` Nothing
+    it "fails the JSON parse of an out-of-range index" $
+      (A.decode "[\"m/4294967296\"]" :: Maybe [DerivPath]) `shouldBe` Nothing
+    it "refuses to read a path index that does not fit in 31 bits" $
+      readMaybe "Bip32SoftIndex 4294967296" `shouldBe` (Nothing :: Maybe Bip32PathIndex)
+  describe "Fingerprint text" $ do
+    -- the identifier of the vector 1 master key starts with 3442193e
+    it "writes eight hex digits" $
+      fingerprintToText (xPubFP ctx (xpub1 ctx)) `shouldBe` "3442193e"
+    it "reads eight hex digits" $
+      textToFingerprint "3442193e" `shouldBe` Right (xPubFP ctx (xpub1 ctx))
+    it "refuses more or fewer than four bytes" $ do
+      textToFingerprint "0011223344" `shouldSatisfy` isLeft
+      textToFingerprint "001122" `shouldSatisfy` isLeft
+      textToFingerprint "" `shouldSatisfy` isLeft
+    it "refuses text that is not hex" $
+      textToFingerprint "zzzzzzzz" `shouldSatisfy` isLeft
+    it "parses from JSON and refuses the wrong length" $ do
+      A.decode "\"3442193e\"" `shouldBe` Just (xPubFP ctx (xpub1 ctx))
+      (A.decode "\"0011223344\"" :: Maybe Fingerprint) `shouldBe` Nothing
+    it "refuses to read the wrong length" $
+      readMaybe "\"0011223344\"" `shouldBe` (Nothing :: Maybe Fingerprint)
+    it "refuses a literal of the wrong length" $
+      evaluate ("0011223344" :: Fingerprint) `shouldThrow` anyErrorCall
   describe "bip32 subkey derivation using string path" $ do
     it "either derivations" $ testApplyPath ctx
     it "either derivations" $ testBadApplyPath ctx
@@ -110,7 +358,8 @@ spec = prepareContext $ \ctx -> do
   describe "Extended Keys" $ do
     let net = btc
     prop "computes pubkey of a subkey is subkey of the pubkey" $
-      forAll arbitraryXPrvKey $
+      -- a key at depth 255 cannot have children
+      forAll (arbitraryXPrvKey `suchThat` ((< 255) . (.depth))) $
         pubKeyOfSubKeyIsSubKeyOfPubKey ctx
     prop "exports and imports extended private key" $
       forAll arbitraryXPrvKey $ \k ->
@@ -118,6 +367,29 @@ spec = prepareContext $ \ctx -> do
     prop "exports and imports extended public key" $
       forAll (arbitraryXPubKey ctx) $ \k ->
         xPubImport net ctx (xPubExport net ctx k) == Just k
+
+hex :: Text -> B.ByteString
+hex = fromJust . decodeHex
+
+-- | The address text and the index of an entry of a derivation list.
+addressAndIndex :: (Address, a, KeyIndex) -> (Maybe Text, KeyIndex)
+addressAndIndex (addr, _, i) = (addrToText btc addr, i)
+
+-- | Master keys of BIP32 test vectors 1 and 2, and the testnet form of the
+-- first.
+xpub1Text, xprv1Text, tpub1Text, tprv1Text, xpub2Text :: Text
+xpub1Text = "xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8"
+xprv1Text = "xprv9s21ZrQH143K3QTDL4LXw2F7HEK3wJUD2nW2nRk4stbPy6cq3jPPqjiChkVvvNKmPGJxWUtg6LnF5kejMRNNU3TGtRBeJgk33yuGBxrMPHi"
+tpub1Text = "tpubD6NzVbkrYhZ4XgiXtGrdW5XDAPFCL9h7we1vwNCpn8tGbBcgfVYjXyhWo4E1xkh56hjod1RhGjxbaTLV3X4FyWuejifB9jusQ46QzG87VKp"
+tprv1Text = "tprv8ZgxMBicQKsPeDgjzdC36fs6bMjGApWDNLR9erAXMs5skhMv36j9MV5ecvfavji5khqjWaWSFhN3YcCUUdiKH6isR4Pwy3U5y5egddBr16m"
+xpub2Text = "xpub661MyMwAqRbcFW31YEwpkMuc5THy2PSt5bDMsktWQcFF8syAmRUapSCGu8ED9W6oDMSgv6Zz8idoc4a6mr8BDzTJY47LJhkJ8UB7WEGuduB"
+
+xpub1, xpub2 :: Ctx -> XPubKey
+xpub1 ctx = fromJust (xPubImport btc ctx xpub1Text)
+xpub2 ctx = fromJust (xPubImport btc ctx xpub2Text)
+
+xprv1 :: Ctx -> XPrvKey
+xprv1 _ = fromJust (xPrvImport btc xprv1Text)
 
 pubKeyOfSubKeyIsSubKeyOfPubKey :: Ctx -> XPrvKey -> Word32 -> Bool
 pubKeyOfSubKeyIsSubKeyOfPubKey ctx k i =
@@ -568,6 +840,49 @@ vector2 =
 
 m3 :: TestKey
 m3 = "4b381541583be4423346c643850da4b320e46a87ae3d2a4e6da11eba819cd4acba45d239319ac14f863b8d5ab5a0d0c64d2e8a1e7d1457df2e5a3c51c73235be"
+
+-- Test vector 4 checks that private keys with leading zero bytes are kept at
+-- 32 bytes. Each entry is the path, the extended public key and the extended
+-- private key.
+m4 :: TestKey
+m4 = "3ddd5602285899a946114506157c7997e5444528f3003f6134712147db19b678"
+
+vector4 :: [(String, Text, Text)]
+vector4 =
+  [ ( "m",
+      "xpub661MyMwAqRbcGczjuMoRm6dXaLDEhW1u34gKenbeYqAix21mdUKJyuyu5F1rzYGVxyL6tmgBUAEPrEz92mBXjByMRiJdba9wpnN37RLLAXa",
+      "xprv9s21ZrQH143K48vGoLGRPxgo2JNkJ3J3fqkirQC2zVdk5Dgd5w14S7fRDyHH4dWNHUgkvsvNDCkvAwcSHNAQwhwgNMgZhLtQC63zxwhQmRv"
+    ),
+    ( "m/0'",
+      "xpub69AUMk3qDBi3uW1sXgjCmVjJ2G6WQoYSnNHyzkmdCHEhSZ4tBok37xfFEqHd2AddP56Tqp4o56AePAgCjYdvpW2PU2jbUPFKsav5ut6Ch1m",
+      "xprv9vB7xEWwNp9kh1wQRfCCQMnZUEG21LpbR9NPCNN1dwhiZkjjeGRnaALmPXCX7SgjFTiCTT6bXes17boXtjq3xLpcDjzEuGLQBM5ohqkao9G"
+    ),
+    ( "m/0'/1'",
+      "xpub6BJA1jSqiukeaesWfxe6sNK9CCGaujFFSJLomWHprUL9DePQ4JDkM5d88n49sMGJxrhpjazuXYWdMf17C9T5XnxkopaeS7jGk1GyyVziaMt",
+      "xprv9xJocDuwtYCMNAo3Zw76WENQeAS6WGXQ55RCy7tDJ8oALr4FWkuVoHJeHVAcAqiZLE7Je3vZJHxspZdFHfnBEjHqU5hG1Jaj32dVoS6XLT1"
+    )
+  ]
+
+-- Test vector 5 lists extended keys that must be refused, with the reason.
+vector5 :: [(Text, String)]
+vector5 =
+  [ ("xpub661MyMwAqRbcEYS8w7XLSVeEsBXy79zSzH1J8vCdxAZningWLdN3zgtU6LBpB85b3D2yc8sfvZU521AAwdZafEz7mnzBBsz4wKY5fTtTQBm", "pubkey version / prvkey mismatch"),
+    ("xprv9s21ZrQH143K24Mfq5zL5MhWK9hUhhGbd45hLXo2Pq2oqzMMo63oStZzFGTQQD3dC4H2D5GBj7vWvSQaaBv5cxi9gafk7NF3pnBju6dwKvH", "prvkey version / pubkey mismatch"),
+    ("xpub661MyMwAqRbcEYS8w7XLSVeEsBXy79zSzH1J8vCdxAZningWLdN3zgtU6Txnt3siSujt9RCVYsx4qHZGc62TG4McvMGcAUjeuwZdduYEvFn", "invalid pubkey prefix 04"),
+    ("xprv9s21ZrQH143K24Mfq5zL5MhWK9hUhhGbd45hLXo2Pq2oqzMMo63oStZzFGpWnsj83BHtEy5Zt8CcDr1UiRXuWCmTQLxEK9vbz5gPstX92JQ", "invalid prvkey prefix 04"),
+    ("xpub661MyMwAqRbcEYS8w7XLSVeEsBXy79zSzH1J8vCdxAZningWLdN3zgtU6N8ZMMXctdiCjxTNq964yKkwrkBJJwpzZS4HS2fxvyYUA4q2Xe4", "invalid pubkey prefix 01"),
+    ("xprv9s21ZrQH143K24Mfq5zL5MhWK9hUhhGbd45hLXo2Pq2oqzMMo63oStZzFAzHGBP2UuGCqWLTAPLcMtD9y5gkZ6Eq3Rjuahrv17fEQ3Qen6J", "invalid prvkey prefix 01"),
+    ("xprv9s2SPatNQ9Vc6GTbVMFPFo7jsaZySyzk7L8n2uqKXJen3KUmvQNTuLh3fhZMBoG3G4ZW1N2kZuHEPY53qmbZzCHshoQnNf4GvELZfqTUrcv", "zero depth with non-zero parent fingerprint (xprv)"),
+    ("xpub661no6RGEX3uJkY4bNnPcw4URcQTrSibUZ4NqJEw5eBkv7ovTwgiT91XX27VbEXGENhYRCf7hyEbWrR3FewATdCEebj6znwMfQkhRYHRLpJ", "zero depth with non-zero parent fingerprint (xpub)"),
+    ("xprv9s21ZrQH4r4TsiLvyLXqM9P7k1K3EYhA1kkD6xuquB5i39AU8KF42acDyL3qsDbU9NmZn6MsGSUYZEsuoePmjzsB3eFKSUEh3Gu1N3cqVUN", "zero depth with non-zero index (xprv)"),
+    ("xpub661MyMwAuDcm6CRQ5N4qiHKrJ39Xe1R1NyfouMKTTWcguwVcfrZJaNvhpebzGerh7gucBvzEQWRugZDuDXjNDRmXzSZe4c7mnTK97pTvGS8", "zero depth with non-zero index (xpub)"),
+    ("DMwo58pR1QLEFihHiXPVykYB6fJmsTeHvyTp7hRThAtCX8CvYzgPcn8XnmdfHGMQzT7ayAmfo4z3gY5KfbrZWZ6St24UVf2Qgo6oujFktLHdHY4", "unknown extended key version (first)"),
+    ("DMwo58pR1QLEFihHiXPVykYB6fJmsTeHvyTp7hRThAtCX8CvYzgPcn8XnmdfHPmHJiEDXkTiJTVV9rHEBUem2mwVbbNfvT2MTcAqj3nesx8uBf9", "unknown extended key version (second)"),
+    ("xprv9s21ZrQH143K24Mfq5zL5MhWK9hUhhGbd45hLXo2Pq2oqzMMo63oStZzF93Y5wvzdUayhgkkFoicQZcP3y52uPPxFnfoLZB21Teqt1VvEHx", "private key 0 not in 1..n-1"),
+    ("xprv9s21ZrQH143K24Mfq5zL5MhWK9hUhhGbd45hLXo2Pq2oqzMMo63oStZzFAzHGBP2UuGCqWLTAPLcMtD5SDKr24z3aiUvKr9bJpdrcLg1y3G", "private key n not in 1..n-1"),
+    ("xpub661MyMwAqRbcEYS8w7XLSVeEsBXy79zSzH1J8vCdxAZningWLdN3zgtU6Q5JXayek4PRsn35jii4veMimro1xefsM58PgBMrvdYre8QyULY", "invalid pubkey 020000000000000000000000000000000000000000000000000000000000000007"),
+    ("xprv9s21ZrQH143K3QTDL4LXw2F7HEK3wJUD2nW2nRk4stbPy6cq3jPPqjiChkVvvNKmPGJxWUtg6LnF5kejMRNNU3TGtRBeJgk33yuGBxrMPHL", "invalid checksum")
+  ]
 
 vector3 :: [TestVector]
 vector3 =

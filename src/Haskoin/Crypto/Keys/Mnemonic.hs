@@ -25,7 +25,7 @@ module Haskoin.Crypto.Keys.Mnemonic
   )
 where
 
-import Control.Monad (when)
+import Control.Monad (unless, when)
 import Crypto.Hash (SHA256 (..), hashWith)
 import Crypto.KDF.PBKDF2 (Parameters (..), fastPBKDF2_SHA512)
 import Data.Bits (shiftL, shiftR)
@@ -39,6 +39,7 @@ import Data.String.Conversions (cs)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as E
+import Data.Text.Normalize (NormalizationMode (NFKD), normalize)
 import Data.Vector (Vector, (!))
 import Data.Vector qualified as V
 import Haskoin.Util
@@ -63,16 +64,28 @@ type Checksum = ByteString
 pbkdfParams :: Parameters
 pbkdfParams = Parameters {iterCounts = 2048, outputLength = 64}
 
--- | Provide intial 'Entropy' as a 'ByteString' of length multiple of 4 bytes.
--- Output a 'Mnemonic' sentence.
+-- | Smallest entropy BIP39 allows: 128 bits, which gives 12 words.
+minEntropyBytes :: Int
+minEntropyBytes = 16
+
+-- | Largest entropy BIP39 allows: 256 bits, which gives 24 words.
+maxEntropyBytes :: Int
+maxEntropyBytes = 32
+
+-- | Word counts of the sentences BIP39 allows, for 128 to 256 bits of entropy.
+validWordCounts :: [Int]
+validWordCounts = [12, 15, 18, 21, 24]
+
+-- | Provide initial 'Entropy' as a 'ByteString' of 16 to 32 bytes, in steps
+-- of 4 bytes, as BIP39 allows. Output a 'Mnemonic' sentence of 12 to 24 words.
 toMnemonic :: Entropy -> Either String Mnemonic
 toMnemonic ent = do
-  when (B.null ent) $
-    Left "toMnemonic: entropy can not be empty"
   when (remainder /= 0) $
     Left "toMnemonic: entropy must be multiples of 4 bytes"
-  when (cs_len > 16) $
-    Left "toMnemonic: maximum entropy is 64 bytes (512 bits)"
+  when (B.length ent < minEntropyBytes) $
+    Left "toMnemonic: minimum entropy is 16 bytes (128 bits)"
+  when (B.length ent > maxEntropyBytes) $
+    Left "toMnemonic: maximum entropy is 32 bytes (256 bits)"
   return ms
   where
     (cs_len, remainder) = B.length ent `quotRem` 4
@@ -83,16 +96,16 @@ toMnemonic ent = do
 -- | Revert 'toMnemonic'. Do not use this to generate a 'Seed'. Instead use
 -- 'mnemonicToSeed'. This outputs the original 'Entropy' used to generate a
 -- 'Mnemonic' sentence.
+--
+-- The sentence is NFKD-normalised before its words are looked up, as BIP39
+-- requires. Only sentences of 12, 15, 18, 21 or 24 words are accepted.
 fromMnemonic :: Mnemonic -> Either String Entropy
 fromMnemonic ms = do
   when (T.null ms) $
     Left "fromMnemonic: empty mnemonic"
-  when (word_count > 48) $
+  unless (word_count `elem` validWordCounts) $
     Left $
-      "fromMnemonic: too many words: " ++ show word_count
-  when (word_count `mod` 3 /= 0) $
-    Left $
-      "fromMnemonic: wrong number of words:" ++ show word_count
+      "fromMnemonic: wrong number of words: " ++ show word_count
   ms_bs <- indicesToBS =<< getIndices ms_words
   let (ms_ent, ms_cs) = B.splitAt (ent_len * 4) ms_bs
       ms_cs_num = numCS cs_len ms_cs
@@ -102,7 +115,7 @@ fromMnemonic ms = do
       "fromMnemonic: checksum failed: " ++ sh ent_cs_num ms_cs_num
   return ms_ent
   where
-    ms_words = T.words ms
+    ms_words = T.words (normalize NFKD ms)
     word_count = length ms_words
     (ent_len, cs_len) = (word_count * 11) `quotRem` 32
     sh cs_a cs_b = show cs_a ++ " /= " ++ show cs_b
@@ -120,18 +133,20 @@ numCS len =
       x -> flip shiftR x
 
 -- | Turn an arbitrary sequence of characters into a 512-bit 'Seed'. Use
--- 'mnemonicToSeed' to get a seed from a 'Mnemonic' sentence. Warning: Does not
--- perform NFKD normalization.
+-- 'mnemonicToSeed' to get a seed from a 'Mnemonic' sentence. Both inputs are
+-- NFKD-normalised first, as BIP39 requires.
 anyToSeed :: Passphrase -> Mnemonic -> Seed
 anyToSeed pf ms =
   fastPBKDF2_SHA512
     pbkdfParams
-    (E.encodeUtf8 ms)
-    ("mnemonic" `mappend` E.encodeUtf8 pf)
+    (E.encodeUtf8 (normalize NFKD ms))
+    ("mnemonic" `mappend` E.encodeUtf8 (normalize NFKD pf))
 
 -- | Get a 512-bit 'Seed' from a 'Mnemonic' sentence. Will validate checksum.
 -- 'Passphrase' can be used to protect the 'Mnemonic'. Use an empty string as
--- 'Passphrase' if none is required.
+-- 'Passphrase' if none is required. The sentence and the passphrase are
+-- NFKD-normalised as BIP39 requires, so a passphrase with accented letters
+-- gives the same seed here as in other wallets.
 mnemonicToSeed :: Passphrase -> Mnemonic -> Either String Seed
 mnemonicToSeed pf ms = do
   ent <- fromMnemonic ms
@@ -142,7 +157,7 @@ mnemonicToSeed pf ms = do
 getIndices :: [Text] -> Either String [Int]
 getIndices ws
   | null n = return $ catMaybes i
-  | otherwise = Left $ "getIndices: words not found: " ++ cs w
+  | otherwise = Left $ "fromMnemonic: words not in the list: " ++ cs w
   where
     i = map (`M.lookup` wordListMap) ws
     n = elemIndices Nothing i

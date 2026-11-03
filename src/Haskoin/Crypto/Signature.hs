@@ -82,9 +82,10 @@ instance Marshal Ctx Sig where
 instance MarshalJSON Ctx Sig where
   marshalValue ctx = String . encodeHex . exportSig ctx
   marshalEncoding ctx = hexEncoding . L.fromStrict . exportSig ctx
+  -- Decoding is as strict as the binary form: low-S and non-zero components.
   unmarshalValue ctx =
     withText "Sig" $ \t ->
-      case decodeHex t >>= importSig ctx of
+      case decodeHex t >>= decodeStrictSig ctx of
         Nothing -> fail $ "Could not decode signature: " <> T.unpack t
         Just s -> return s
 

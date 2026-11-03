@@ -37,15 +37,14 @@ arbitraryKeyPair ctx = do
 arbitraryFingerprint :: Gen Fingerprint
 arbitraryFingerprint = Fingerprint <$> arbitrary
 
--- | Arbitrary extended private key.
+-- | Arbitrary extended private key. A key at depth 0 is a master key, and
+-- BIP32 requires it to have a zero parent fingerprint and index.
 arbitraryXPrvKey :: Gen XPrvKey
-arbitraryXPrvKey =
-  XPrvKey
-    <$> arbitrary
-    <*> arbitraryFingerprint
-    <*> arbitrary
-    <*> arbitraryHash256
-    <*> arbitrary
+arbitraryXPrvKey = do
+  depth <- arbitrary
+  parent <- if depth == 0 then pure (Fingerprint 0) else arbitraryFingerprint
+  index <- if depth == 0 then pure 0 else arbitrary
+  XPrvKey depth parent index <$> arbitraryHash256 <*> arbitrary
 
 -- | Arbitrary extended public key.
 arbitraryXPubKey :: Ctx -> Gen XPubKey

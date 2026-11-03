@@ -106,7 +106,7 @@ where
 import Control.Applicative
 import Control.DeepSeq
 import Control.Exception (Exception, throw)
-import Control.Monad (guard, mzero, unless, (<=<))
+import Control.Monad (guard, mzero, unless, when, (<=<))
 import Crypto.Secp256k1
 import Data.Aeson as Aeson
   ( FromJSON,
@@ -122,6 +122,7 @@ import Data.Binary (Binary (get, put))
 import Data.Bits (clearBit, setBit, testBit)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as B
+import Data.Char (isDigit)
 import Data.Bytes.Get
   ( MonadGet
       ( getByteString,
@@ -162,6 +163,7 @@ import Haskoin.Util
 import Text.Read as Read
   ( Lexeme (Ident, Number, String),
     Read (readPrec),
+    ReadPrec,
     lexP,
     parens,
     pfail,
@@ -204,12 +206,11 @@ instance Marshal Network XPrvKey where
     ver <- getWord32be
     unless (ver == net.xPrvPrefix) $
       fail "Get: Invalid version for extended private key"
-    XPrvKey
-      <$> getWord8
-      <*> deserialize
-      <*> getWord32be
-      <*> deserialize
-      <*> getPadPrvKey
+    d <- getWord8
+    p <- deserialize
+    i <- getWord32be
+    checkMasterFields d p i
+    XPrvKey d p i <$> deserialize <*> getPadPrvKey
 
   marshalPut net k = do
     putWord32be net.xPrvPrefix
@@ -250,11 +251,12 @@ instance Marshal (Network, Ctx) XPubKey where
     ver <- getWord32be
     unless (ver == net.xPubPrefix) $
       fail "Get: Invalid version for extended public key"
-    XPubKey
-      <$> getWord8
-      <*> deserialize
-      <*> getWord32be
-      <*> deserialize
+    d <- getWord8
+    p <- deserialize
+    i <- getWord32be
+    checkMasterFields d p i
+    XPubKey d p i
+      <$> deserialize
       <*> ((\PublicKey {point} -> point) <$> marshalGet ctx)
 
   marshalPut (net, ctx) k = do
@@ -276,14 +278,24 @@ instance MarshalJSON (Network, Ctx) XPubKey where
 
   marshalEncoding (net, ctx) = text . xPubExport net ctx
 
+-- | A key at depth 0 is a master key. BIP32 requires its parent fingerprint
+-- and child index to be zero; test vector 5 lists keys that break this rule
+-- as invalid.
+checkMasterFields :: (MonadGet m) => Word8 -> Fingerprint -> KeyIndex -> m ()
+checkMasterFields depth parent index =
+  when (depth == 0 && (parent /= Fingerprint 0 || index /= 0)) $
+    fail "Extended key at depth 0 must have a zero parent fingerprint and index"
+
 -- | Build a BIP32 compatible extended private key from a bytestring. This will
--- produce a root node (@depth=0@ and @parent=0@).
+-- produce a root node (@depth=0@ and @parent=0@). Throws 'DerivationException'
+-- in the vanishingly unlikely case that the seed gives a key outside the curve
+-- order, which BIP32 declares invalid.
 makeXPrvKey :: ByteString -> XPrvKey
 makeXPrvKey bs =
   XPrvKey 0 (Fingerprint 0) 0 c k
   where
     (p, c) = split512 $ hmac512 "Bitcoin seed" bs
-    k = fromMaybe err (secKey (runPutS (serialize p)))
+    k = fromMaybe err (decodeSecKey (runPutS (serialize p)))
     err = throw $ DerivationException "Invalid seed"
 
 -- | Derive an extended public key from an extended private key. This function
@@ -310,8 +322,8 @@ prvSubKey ::
   -- | extended child private key
   XPrvKey
 prvSubKey ctx xkey child
-  | child >= 0 && child < 0x80000000 =
-      XPrvKey (xkey.depth + 1) (xPrvFP ctx xkey) child c k
+  | child < 0x80000000 =
+      XPrvKey (nextDepth xkey.depth) (xPrvFP ctx xkey) child c k
   | otherwise = error "Invalid child derivation index"
   where
     pK = (deriveXPubKey ctx xkey).key
@@ -331,8 +343,8 @@ pubSubKey ::
   -- | extended child public key
   XPubKey
 pubSubKey ctx xKey child
-  | child >= 0 && child < 0x80000000 =
-      XPubKey (xKey.depth + 1) (xPubFP ctx xKey) child c pK
+  | child < 0x80000000 =
+      XPubKey (nextDepth xKey.depth) (xPubFP ctx xKey) child c pK
   | otherwise = error "Invalid child derivation index"
   where
     m = B.append (exportPubKey ctx True xKey.key) (runPutS $ serialize child)
@@ -355,8 +367,8 @@ hardSubKey ::
   -- | extended child private key
   XPrvKey
 hardSubKey ctx xkey child
-  | child >= 0 && child < 0x80000000 =
-      XPrvKey (xkey.depth + 1) (xPrvFP ctx xkey) i c k
+  | child < 0x80000000 =
+      XPrvKey (nextDepth xkey.depth) (xPrvFP ctx xkey) i c k
   | otherwise = error "Invalid child derivation index"
   where
     i = setBit child 31
@@ -364,6 +376,14 @@ hardSubKey ctx xkey child
     (a, c) = split512 $ hmac512 (runPutS $ serialize xkey.chain) m
     k = fromMaybe err $ tweakSecKey ctx xkey.key a
     err = throw $ DerivationException "Invalid hardSubKey derivation"
+
+-- | Depth of a child key. BIP32 stores the depth in one byte, so a key at
+-- depth 255 can have no children. Bitcoin Core wraps around to 0 here, which
+-- gives a key that cannot be told from a master key. This library refuses, as
+-- rust-bitcoin does.
+nextDepth :: Word8 -> Word8
+nextDepth 255 = throw $ DerivationException "Maximum derivation depth exceeded"
+nextDepth d = d + 1
 
 -- | Returns true if the extended private key was derived through a hard
 -- derivation.
@@ -452,16 +472,39 @@ xPubExport :: Network -> Ctx -> XPubKey -> Base58
 xPubExport net ctx = encodeBase58Check . marshal (net, ctx)
 
 -- | Decodes a BIP32 encoded extended private key. This function will fail if
--- invalid base 58 characters are detected or if the checksum fails.
+-- invalid base 58 characters are detected, if the checksum fails, if the
+-- payload is not exactly 78 bytes, or if the key fails the checks of BIP32.
 xPrvImport :: Network -> Base58 -> Maybe XPrvKey
 xPrvImport net =
-  eitherToMaybe . unmarshal net <=< decodeBase58Check
+  eitherToMaybe . unmarshal net <=< decodeExtendedKey
 
 -- | Decodes a BIP32 encoded extended public key. This function will fail if
--- invalid base 58 characters are detected or if the checksum fails.
+-- invalid base 58 characters are detected, if the checksum fails, if the
+-- payload is not exactly 78 bytes, or if the key fails the checks of BIP32.
 xPubImport :: Network -> Ctx -> Base58 -> Maybe XPubKey
 xPubImport net ctx =
-  eitherToMaybe . unmarshal (net, ctx) <=< decodeBase58Check
+  eitherToMaybe . unmarshal (net, ctx) <=< decodeExtendedKey
+
+-- | Size in bytes of a serialized extended key, without its checksum.
+extendedKeySize :: Int
+extendedKeySize = 78
+
+-- | Longest Base58 string an extended key can take. The 82 bytes of key and
+-- checksum never need more than 112 digits because 58^112 is larger than
+-- 256^82. Longer strings are rejected before decoding, since the time to decode
+-- Base58 grows with the square of the length.
+maxExtendedKeyLength :: Int
+maxExtendedKeyLength = 112
+
+-- | Decode the Base58Check form of an extended key into its 78 bytes. A payload
+-- of another size is refused, as Bitcoin Core does, so that trailing bytes or
+-- an uncompressed public key cannot slip through.
+decodeExtendedKey :: Base58 -> Maybe ByteString
+decodeExtendedKey t = do
+  guard (Text.length t <= maxExtendedKeyLength)
+  bs <- decodeBase58Check t
+  guard (B.length bs == extendedKeySize)
+  return bs
 
 -- | Export an extended private key to WIF (Wallet Import Format).
 xPrvWif :: Network -> XPrvKey -> Base58
@@ -636,7 +679,8 @@ instance Ord (DerivPathI t) where
     if nextA == nextB then iA `compare` iB else nextA `compare` nextB
   (nextA :/ iA) `compare` (nextB :/ iB) =
     if nextA == nextB then iA `compare` iB else nextA `compare` nextB
-  -- Different hardness: hard paths are LT soft paths
+  -- Different hardness: a soft path sorts before a hard one, as it does when
+  -- comparing the index lists of 'pathToList', where the hard bit is set.
   (nextA :/ _iA) `compare` (nextB :| _iB) =
     if nextA == nextB then LT else nextA `compare` nextB
   (nextA :| _iA) `compare` (nextB :/ _iB) =
@@ -909,12 +953,24 @@ appendBip32Segment :: DerivPath -> Bip32PathIndex -> DerivPath
 appendBip32Segment d (Bip32SoftIndex i) = d :/ i
 appendBip32Segment d (Bip32HardIndex i) = d :| i
 
--- | Parse a BIP32 derivation path index element from a string.
+-- | Parse a BIP32 derivation path index element from a string. The element is
+-- a decimal number below 2^31, followed by @'@, @h@ or @H@ for a hardened
+-- index. Bitcoin Core accepts the same three markers. The number is read as an
+-- 'Integer' so that a value too large for 32 bits cannot wrap around.
 parseBip32PathIndex :: String -> Maybe Bip32PathIndex
-parseBip32PathIndex segment = case reads segment of
-  [(i, "")] -> guard (is31Bit i) >> return (Bip32SoftIndex i)
-  [(i, "'")] -> guard (is31Bit i) >> return (Bip32HardIndex i)
-  _ -> Nothing
+parseBip32PathIndex segment =
+  case span isDigit segment of
+    ("", _) -> Nothing
+    (digits, "") -> Bip32SoftIndex <$> parseIndex digits
+    (digits, [marker])
+      | marker `elem` hardMarkers -> Bip32HardIndex <$> parseIndex digits
+    _ -> Nothing
+  where
+    hardMarkers = "'hH" :: String
+    parseIndex digits = do
+      let n = read digits :: Integer
+      guard (is31Bit n)
+      return (fromInteger n)
 
 -- | Type for BIP32 path index element.
 data Bip32PathIndex
@@ -937,18 +993,19 @@ instance Read Bip32PathIndex where
         parens $ do
           Ident "Bip32HardIndex" <- lexP
           Number n <- lexP
-          maybe
-            pfail
-            (return . Bip32HardIndex . fromIntegral)
-            (numberToInteger n)
+          maybe pfail (fmap Bip32HardIndex . readIndex) (numberToInteger n)
       s =
         parens $ do
           Ident "Bip32SoftIndex" <- lexP
           Number n <- lexP
-          maybe
-            pfail
-            (return . Bip32SoftIndex . fromIntegral)
-            (numberToInteger n)
+          maybe pfail (fmap Bip32SoftIndex . readIndex) (numberToInteger n)
+
+-- | Read a derivation index that was lexed as a number, refusing values that
+-- do not fit in 31 bits instead of wrapping them around.
+readIndex :: Integer -> ReadPrec KeyIndex
+readIndex i
+  | is31Bit i = return (fromInteger i)
+  | otherwise = pfail
 
 -- | Test whether the number could be a valid BIP32 derivation index.
 is31Bit :: (Integral a) => a -> Bool
@@ -1050,8 +1107,8 @@ getPadPrvKey = do
   pad <- getWord8
   unless (pad == 0x00) $ fail "Private key must be padded with 0x00"
   bs <- getByteString 32
-  case secKey bs of
-    Nothing -> fail $ "Could not decode secret key: " ++ cs (encodeHex bs)
+  case decodeSecKey bs of
+    Nothing -> fail "Secret key is zero or not below the curve order"
     Just x -> return x
 
 -- | Serialize HDW-specific private key.
