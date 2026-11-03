@@ -39,6 +39,10 @@ data Network = Network
     genesisTx :: !Tx,
     -- | maximum block size in bytes
     maxBlockSize :: !Int,
+    -- | largest P2P message that 'getMessage' accepts, in bytes. Bitcoin Core
+    -- refuses any message over 4,000,000 bytes (@MAX_PROTOCOL_MESSAGE_LENGTH@).
+    -- Bitcoin Cash Node refuses block messages over twice the block size.
+    maxMessageSize :: !Word32,
     -- | maximum amount of satoshi
     maxSatoshi :: !Word64,
     -- | user agent string
@@ -53,8 +57,11 @@ data Network = Network
     bip94 :: !Bool,
     -- | proof-of-work target higest possible value
     powLimit :: !Integer,
-    -- | block at which BIP34 activates
-    bip34Block :: !(BlockHeight, BlockHash),
+    -- | height at which BIP34 activates
+    bip34Height :: !BlockHeight,
+    -- | hash of the block at 'bip34Height', when the chain pins one. Bitcoin
+    -- Core pins none on regtest.
+    bip34Hash :: !(Maybe BlockHash),
     -- | block at which BIP65 activates
     bip65Height :: !BlockHeight,
     -- | block at which BIP66 activates

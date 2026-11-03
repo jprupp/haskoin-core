@@ -25,7 +25,7 @@ module Haskoin.Network.Message
 where
 
 import Control.DeepSeq
-import Control.Monad (unless)
+import Control.Monad (unless, when)
 import Data.Binary (Binary (..))
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as B
@@ -38,8 +38,10 @@ import GHC.Generics (Generic)
 import Haskoin.Block.Common
 import Haskoin.Block.Merkle
 import Haskoin.Crypto.Hash
+import Haskoin.Network.BlockFilter
 import Haskoin.Network.Bloom
 import Haskoin.Network.Common
+import Haskoin.Network.CompactBlock
 import Haskoin.Network.Data
 import Haskoin.Transaction.Common
 
@@ -89,6 +91,8 @@ data Message
   = MVersion !Version
   | MVerAck
   | MAddr !Addr
+  | MAddrV2 !AddrV2
+  | MSendAddrV2
   | MInv !Inv
   | MGetData !GetData
   | MNotFound !NotFound
@@ -108,7 +112,21 @@ data Message
   | MMempool
   | MReject !Reject
   | MSendHeaders
-  | MOther !ByteString !ByteString
+  | MFeeFilter !FeeFilter
+  | MSendCompact !SendCompact
+  | MCompactBlock !CompactBlock
+  | MGetBlockTxn !GetBlockTxn
+  | MBlockTxn !BlockTxn
+  | MGetCFilters !GetCFilters
+  | MCFilter !CFilter
+  | MGetCFHeaders !GetCFHeaders
+  | MCFHeaders !CFHeaders
+  | MGetCFCheckpt !GetCFCheckpt
+  | MCFCheckpt !CFCheckpt
+  | MWtxidRelay
+  | MSendTxRcncl !SendTxRcncl
+  | -- | a message of a command this library does not know, with its payload
+    MOther !ByteString !ByteString
   deriving (Eq, Show, Generic, NFData)
 
 -- | Get 'MessageCommand' assocated with a message.
@@ -116,6 +134,8 @@ msgType :: Message -> MessageCommand
 msgType (MVersion _) = MCVersion
 msgType MVerAck = MCVerAck
 msgType (MAddr _) = MCAddr
+msgType (MAddrV2 _) = MCAddrV2
+msgType MSendAddrV2 = MCSendAddrV2
 msgType (MInv _) = MCInv
 msgType (MGetData _) = MCGetData
 msgType (MNotFound _) = MCNotFound
@@ -125,6 +145,7 @@ msgType (MTx _) = MCTx
 msgType (MBlock _) = MCBlock
 msgType (MMerkleBlock _) = MCMerkleBlock
 msgType (MHeaders _) = MCHeaders
+msgType MGetAddr = MCGetAddr
 msgType (MFilterLoad _) = MCFilterLoad
 msgType (MFilterAdd _) = MCFilterAdd
 msgType MFilterClear = MCFilterClear
@@ -134,60 +155,88 @@ msgType (MAlert _) = MCAlert
 msgType MMempool = MCMempool
 msgType (MReject _) = MCReject
 msgType MSendHeaders = MCSendHeaders
-msgType MGetAddr = MCGetAddr
+msgType (MFeeFilter _) = MCFeeFilter
+msgType (MSendCompact _) = MCSendCmpct
+msgType (MCompactBlock _) = MCCmpctBlock
+msgType (MGetBlockTxn _) = MCGetBlockTxn
+msgType (MBlockTxn _) = MCBlockTxn
+msgType (MGetCFilters _) = MCGetCFilters
+msgType (MCFilter _) = MCCFilter
+msgType (MGetCFHeaders _) = MCGetCFHeaders
+msgType (MCFHeaders _) = MCCFHeaders
+msgType (MGetCFCheckpt _) = MCGetCFCheckpt
+msgType (MCFCheckpt _) = MCCFCheckpt
+msgType MWtxidRelay = MCWtxidRelay
+msgType (MSendTxRcncl _) = MCSendTxRcncl
 msgType (MOther c _) = MCOther c
 
--- | Deserializer for network messages.
+-- | Deserializer for network messages. It reads one message and nothing
+-- more, so messages can be read one after the other from a stream. The parse
+-- fails for a header with the magic of another network, a payload larger
+-- than the 'maxMessageSize' of the network, or a checksum that does not
+-- match the payload. Only the declared payload is handed to the parser of the
+-- message type. A message type that carries no payload is accepted with
+-- whatever payload it comes with, as in Bitcoin Core.
 getMessage :: (MonadGet m) => Network -> m Message
 getMessage net = do
   (MessageHeader mgc cmd len chk) <- deserialize
-  bs <- lookAhead $ getByteString $ fromIntegral len
   unless
     (mgc == net.magic)
     (fail $ "get: Invalid network magic bytes: " ++ show mgc)
+  when (len > net.maxMessageSize) $
+    fail $
+      "get: Message of "
+        ++ show len
+        ++ " bytes is larger than the limit of "
+        ++ show net.maxMessageSize
+  payload <- getByteString (fromIntegral len)
   unless
-    (checkSum32 bs == chk)
+    (checkSum32 payload == chk)
     (fail $ "get: Invalid message checksum: " ++ show chk)
-  if len > 0
-    then do
-      bs <- ensure (fromIntegral len)
-      let f = case cmd of
-            MCVersion -> MVersion <$> deserialize
-            MCAddr -> MAddr <$> deserialize
-            MCInv -> MInv <$> deserialize
-            MCGetData -> MGetData <$> deserialize
-            MCNotFound -> MNotFound <$> deserialize
-            MCGetBlocks -> MGetBlocks <$> deserialize
-            MCGetHeaders -> MGetHeaders <$> deserialize
-            MCTx -> MTx <$> deserialize
-            MCBlock -> MBlock <$> deserialize
-            MCMerkleBlock -> MMerkleBlock <$> deserialize
-            MCHeaders -> MHeaders <$> deserialize
-            MCFilterLoad -> MFilterLoad <$> deserialize
-            MCFilterAdd -> MFilterAdd <$> deserialize
-            MCPing -> MPing <$> deserialize
-            MCPong -> MPong <$> deserialize
-            MCAlert -> MAlert <$> deserialize
-            MCReject -> MReject <$> deserialize
-            MCOther c -> MOther c <$> getByteString (fromIntegral len)
-            _ ->
-              fail $
-                "get: command "
-                  ++ show cmd
-                  ++ " should not carry a payload"
-      either fail return (runGetS f bs)
-    else case cmd of
-      MCGetAddr -> return MGetAddr
-      MCVerAck -> return MVerAck
-      MCFilterClear -> return MFilterClear
-      MCMempool -> return MMempool
-      MCSendHeaders -> return MSendHeaders
-      MCOther c -> return (MOther c B.empty)
-      _ ->
-        fail $
-          "get: command "
-            ++ show cmd
-            ++ " is expected to carry a payload"
+  either fail return (runGetS (getPayload cmd len) payload)
+
+-- | Parser for the payload of a message of the given command.
+getPayload :: (MonadGet m) => MessageCommand -> Word32 -> m Message
+getPayload cmd len =
+  case cmd of
+    MCVersion -> MVersion <$> deserialize
+    MCVerAck -> return MVerAck
+    MCAddr -> MAddr <$> deserialize
+    MCAddrV2 -> MAddrV2 <$> deserialize
+    MCSendAddrV2 -> return MSendAddrV2
+    MCInv -> MInv <$> deserialize
+    MCGetData -> MGetData <$> deserialize
+    MCNotFound -> MNotFound <$> deserialize
+    MCGetBlocks -> MGetBlocks <$> deserialize
+    MCGetHeaders -> MGetHeaders <$> deserialize
+    MCTx -> MTx <$> deserialize
+    MCBlock -> MBlock <$> deserialize
+    MCMerkleBlock -> MMerkleBlock <$> deserialize
+    MCHeaders -> MHeaders <$> deserialize
+    MCGetAddr -> return MGetAddr
+    MCFilterLoad -> MFilterLoad <$> deserialize
+    MCFilterAdd -> MFilterAdd <$> deserialize
+    MCFilterClear -> return MFilterClear
+    MCPing -> MPing <$> deserialize
+    MCPong -> MPong <$> deserialize
+    MCAlert -> MAlert <$> deserialize
+    MCMempool -> return MMempool
+    MCReject -> MReject <$> deserialize
+    MCSendHeaders -> return MSendHeaders
+    MCFeeFilter -> MFeeFilter <$> deserialize
+    MCSendCmpct -> MSendCompact <$> deserialize
+    MCCmpctBlock -> MCompactBlock <$> deserialize
+    MCGetBlockTxn -> MGetBlockTxn <$> deserialize
+    MCBlockTxn -> MBlockTxn <$> deserialize
+    MCGetCFilters -> MGetCFilters <$> deserialize
+    MCCFilter -> MCFilter <$> deserialize
+    MCGetCFHeaders -> MGetCFHeaders <$> deserialize
+    MCCFHeaders -> MCFHeaders <$> deserialize
+    MCGetCFCheckpt -> MGetCFCheckpt <$> deserialize
+    MCCFCheckpt -> MCFCheckpt <$> deserialize
+    MCWtxidRelay -> return MWtxidRelay
+    MCSendTxRcncl -> MSendTxRcncl <$> deserialize
+    MCOther c -> MOther c <$> getByteString (fromIntegral len)
 
 -- | Serializer for network messages.
 putMessage :: (MonadPut m) => Network -> Message -> m ()
@@ -197,6 +246,8 @@ putMessage net msg = do
           MVersion m -> (MCVersion, runPutS $ serialize m)
           MVerAck -> (MCVerAck, B.empty)
           MAddr m -> (MCAddr, runPutS $ serialize m)
+          MAddrV2 m -> (MCAddrV2, runPutS $ serialize m)
+          MSendAddrV2 -> (MCSendAddrV2, B.empty)
           MInv m -> (MCInv, runPutS $ serialize m)
           MGetData m -> (MCGetData, runPutS $ serialize m)
           MNotFound m -> (MCNotFound, runPutS $ serialize m)
@@ -216,6 +267,19 @@ putMessage net msg = do
           MMempool -> (MCMempool, B.empty)
           MReject m -> (MCReject, runPutS $ serialize m)
           MSendHeaders -> (MCSendHeaders, B.empty)
+          MFeeFilter m -> (MCFeeFilter, runPutS $ serialize m)
+          MSendCompact m -> (MCSendCmpct, runPutS $ serialize m)
+          MCompactBlock m -> (MCCmpctBlock, runPutS $ serialize m)
+          MGetBlockTxn m -> (MCGetBlockTxn, runPutS $ serialize m)
+          MBlockTxn m -> (MCBlockTxn, runPutS $ serialize m)
+          MGetCFilters m -> (MCGetCFilters, runPutS $ serialize m)
+          MCFilter m -> (MCCFilter, runPutS $ serialize m)
+          MGetCFHeaders m -> (MCGetCFHeaders, runPutS $ serialize m)
+          MCFHeaders m -> (MCCFHeaders, runPutS $ serialize m)
+          MGetCFCheckpt m -> (MCGetCFCheckpt, runPutS $ serialize m)
+          MCFCheckpt m -> (MCCFCheckpt, runPutS $ serialize m)
+          MWtxidRelay -> (MCWtxidRelay, B.empty)
+          MSendTxRcncl m -> (MCSendTxRcncl, runPutS $ serialize m)
           MOther c p -> (MCOther c, p)
       chk = checkSum32 payload
       len = fromIntegral $ B.length payload

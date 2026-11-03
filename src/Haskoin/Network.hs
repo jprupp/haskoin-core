@@ -17,11 +17,15 @@ module Haskoin.Network
     module Common,
     module Message,
     module Bloom,
+    module CompactBlock,
+    module BlockFilter,
   )
 where
 
+import Haskoin.Network.BlockFilter as BlockFilter
 import Haskoin.Network.Bloom as Bloom
 import Haskoin.Network.Common as Common
+import Haskoin.Network.CompactBlock as CompactBlock
 import Haskoin.Network.Constants as Constants
 import Haskoin.Network.Data as Data
 import Haskoin.Network.Message as Message

@@ -83,6 +83,7 @@ btc =
       -- Hash 000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f
       genesisTx = mainnetGenesisTx,
       maxBlockSize = 1000000,
+      maxMessageSize = 4000000,
       maxSatoshi = 2100000000000000,
       userAgent =
         "/haskoin-btc:" <> versionString <> "/",
@@ -92,10 +93,8 @@ btc =
       bip94 = False,
       powLimit =
         0x00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff,
-      bip34Block =
-        ( 227931,
-          "000000000000024b89b42a942fe0d9fea3bb44ab7bd1b19115dd6a759c0808b8"
-        ),
+      bip34Height = 227931,
+      bip34Hash = Just "000000000000024b89b42a942fe0d9fea3bb44ab7bd1b19115dd6a759c0808b8",
       bip65Height = 388381,
       bip66Height = 363725,
       targetTimespan = 14 * 24 * 60 * 60,
@@ -185,6 +184,7 @@ btcTest =
       -- Hash 000000000933ea01ad0ee984209779baaec3ced90fa3f408719526f8d77f4943
       genesisTx = mainnetGenesisTx,
       maxBlockSize = 1000000,
+      maxMessageSize = 4000000,
       maxSatoshi = 2100000000000000,
       userAgent = "/haskoin-btc-test:" <> versionString <> "/",
       defaultPort = 18333,
@@ -193,10 +193,8 @@ btcTest =
       bip94 = False,
       powLimit =
         0x00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff,
-      bip34Block =
-        ( 21111,
-          "0000000023b3a96d3484e5abb3755c413e7d41500f8e2a5c3f0dd01299cd8ef8"
-        ),
+      bip34Height = 21111,
+      bip34Hash = Just "0000000023b3a96d3484e5abb3755c413e7d41500f8e2a5c3f0dd01299cd8ef8",
       bip65Height = 581885,
       bip66Height = 330776,
       targetTimespan = 14 * 24 * 60 * 60,
@@ -247,6 +245,7 @@ btcTest4 =
       -- Hash 00000000da84f2bafbbc53dee25a72ae507ff4914b867c565be350b0da8bf043
       genesisTx = testnet4GenesisTx,
       maxBlockSize = 1000000,
+      maxMessageSize = 4000000,
       maxSatoshi = 2100000000000000,
       userAgent = "/haskoin-btc-test4:" <> versionString <> "/",
       defaultPort = 48333,
@@ -255,10 +254,8 @@ btcTest4 =
       bip94 = True,
       powLimit =
         0x00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff,
-      bip34Block =
-        ( 1,
-          "0000000012982b6d5f621229286b880e909984df669c2afabb102ce311b13f28"
-        ),
+      bip34Height = 1,
+      bip34Hash = Just "0000000012982b6d5f621229286b880e909984df669c2afabb102ce311b13f28",
       bip65Height = 1,
       bip66Height = 1,
       targetTimespan = 14 * 24 * 60 * 60,
@@ -303,6 +300,7 @@ btcRegTest =
           2,
       genesisTx = mainnetGenesisTx,
       maxBlockSize = 1000000,
+      maxMessageSize = 4000000,
       maxSatoshi = 2100000000000000,
       userAgent = "/haskoin-btc-regtest:" <> versionString <> "/",
       defaultPort = 18444,
@@ -311,12 +309,10 @@ btcRegTest =
       bip94 = False,
       powLimit =
         0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff,
-      bip34Block =
-        ( 100000000,
-          "0000000000000000000000000000000000000000000000000000000000000000"
-        ),
-      bip65Height = 1351,
-      bip66Height = 1251,
+      bip34Height = 1,
+      bip34Hash = Nothing,
+      bip65Height = 1,
+      bip66Height = 1,
       targetTimespan = 14 * 24 * 60 * 60,
       targetSpacing = 10 * 60,
       checkpoints = [],
@@ -356,6 +352,7 @@ bch =
       -- Hash 000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f
       genesisTx = mainnetGenesisTx,
       maxBlockSize = 32000000,
+      maxMessageSize = 64000000,
       maxSatoshi = 2100000000000000,
       userAgent = "/haskoin-bch:" <> versionString <> "/",
       defaultPort = 8333,
@@ -364,10 +361,8 @@ bch =
       bip94 = False,
       powLimit =
         0x00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff,
-      bip34Block =
-        ( 227931,
-          "000000000000024b89b42a942fe0d9fea3bb44ab7bd1b19115dd6a759c0808b8"
-        ),
+      bip34Height = 227931,
+      bip34Hash = Just "000000000000024b89b42a942fe0d9fea3bb44ab7bd1b19115dd6a759c0808b8",
       bip65Height = 388381,
       bip66Height = 363725,
       targetTimespan = 14 * 24 * 60 * 60,
@@ -421,10 +416,20 @@ bch =
 
           ( 504031,
             "0000000000000000011ebf65b60d0a3de80b8175be709d653b4c1a1beeb6ab9c"
+          ),
+          ( 951145,
+            "000000000000000000f64dbed68370486f945097ba90b17e30d7bf5c43df7a60"
+          ),
+          ( 960710,
+            "00000000000000000275ee55c04aa109347c9ee0b5bb4617837df3044f7e1be5"
+          ),
+          ( 970892,
+            "000000000000000000e76270e57f4ebbd2b282db46a1695984935126c0a68cd8"
           )
         ],
       seeds =
         [ "seed.flowee.cash", -- Flowee
+          "seed-bch.bitcoinforks.org", -- Bitcoin Forks
           "btccash-seeder.bitcoinunlimited.info", -- Bitcoin Unlimited
           "seed.bchd.cash", -- BCHD
           "seed.bch.loping.net", -- Loping.net
@@ -466,6 +471,7 @@ bchTest4 =
       -- Hash 000000001dd410c49a788668ce26751718cc797474d3152a5fc073dd44fd9f7b
       genesisTx = mainnetGenesisTx,
       maxBlockSize = 2000000,
+      maxMessageSize = 4000000,
       maxSatoshi = 2100000000000000,
       userAgent = "/haskoin-bch-test4:" <> versionString <> "/",
       defaultPort = 28333,
@@ -474,10 +480,8 @@ bchTest4 =
       bip94 = False,
       powLimit =
         0x00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff,
-      bip34Block =
-        ( 2,
-          "00000000b0c65b1e03baace7d5c093db0d6aac224df01484985ffd5e86a1a20c"
-        ),
+      bip34Height = 2,
+      bip34Hash = Just "00000000b0c65b1e03baace7d5c093db0d6aac224df01484985ffd5e86a1a20c",
       bip65Height = 3,
       bip66Height = 4,
       targetTimespan = 14 * 24 * 60 * 60,
@@ -496,6 +500,15 @@ bchTest4 =
           ),
           ( 54700,
             "00000000009af4379d87f17d0f172ee4769b48839a5a3a3e81d69da4322518b8"
+          ),
+          ( 305848,
+            "00000000601bf68f9927154cf55557b1c08245b4d415658d1cbcd1eb4502dabc"
+          ),
+          ( 313651,
+            "000000005c58d20403191a778c51206eca7552629c1e390313e786d2c388d0fb"
+          ),
+          ( 325709,
+            "00000000000097a6ca206aa88b45a2158eea1a9ab8a49aed8f4b193d558e74b4"
           )
         ],
       seeds =
@@ -539,6 +552,7 @@ bchTest =
       -- Hash 000000000933ea01ad0ee984209779baaec3ced90fa3f408719526f8d77f4943
       genesisTx = mainnetGenesisTx,
       maxBlockSize = 32000000,
+      maxMessageSize = 64000000,
       maxSatoshi = 2100000000000000,
       userAgent = "/haskoin-bch-test:" <> versionString <> "/",
       defaultPort = 18333,
@@ -547,10 +561,8 @@ bchTest =
       bip94 = False,
       powLimit =
         0x00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff,
-      bip34Block =
-        ( 21111,
-          "0000000023b3a96d3484e5abb3755c413e7d41500f8e2a5c3f0dd01299cd8ef8"
-        ),
+      bip34Height = 21111,
+      bip34Hash = Just "0000000023b3a96d3484e5abb3755c413e7d41500f8e2a5c3f0dd01299cd8ef8",
       bip65Height = 581885,
       bip66Height = 330776,
       targetTimespan = 14 * 24 * 60 * 60,
@@ -568,6 +580,15 @@ bchTest =
 
           ( 1188697,
             "0000000000170ed0918077bde7b4d36cc4c91be69fa09211f748240dabe047fb"
+          ),
+          ( 1710483,
+            "00000000078fe0c74ffa0c5221081c34774aa7d17a3c14c36f952f829463f120"
+          ),
+          ( 1718198,
+            "00000000fb70d93bc600b9189f2bb13383b0e44d96a4547615b3c194680e6308"
+          ),
+          ( 1730264,
+            "000000000001ce982fa29717a4ed233b0e5a7a8b9936a17fdeeccc5c1d0af795"
           )
         ],
       seeds =
@@ -609,7 +630,8 @@ bchRegTest =
           0x207fffff
           2,
       genesisTx = mainnetGenesisTx,
-      maxBlockSize = 1000000,
+      maxBlockSize = 32000000,
+      maxMessageSize = 64000000,
       maxSatoshi = 2100000000000000,
       userAgent = "/haskoin-bch-regtest:" <> versionString <> "/",
       defaultPort = 18444,
@@ -618,10 +640,8 @@ bchRegTest =
       bip94 = False,
       powLimit =
         0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff,
-      bip34Block =
-        ( 100000000,
-          "0000000000000000000000000000000000000000000000000000000000000000"
-        ),
+      bip34Height = 100000000,
+      bip34Hash = Nothing,
       bip65Height = 1351,
       bip66Height = 1251,
       targetTimespan = 14 * 24 * 60 * 60,

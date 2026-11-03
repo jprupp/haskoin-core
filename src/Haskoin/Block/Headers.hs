@@ -524,9 +524,8 @@ bip34 ::
   BlockHash ->
   Bool
 bip34 net height hsh
-  | fst net.bip34Block == 0 = True
-  | fst net.bip34Block == height = snd net.bip34Block == hsh
-  | otherwise = True
+  | height /= net.bip34Height = True
+  | otherwise = maybe True (== hsh) net.bip34Hash
 
 -- | Check if the provided block height and version are valid. The version is
 -- a signed 32-bit number in Bitcoin Core, so values with the top bit set are
@@ -539,7 +538,7 @@ validVersion ::
   Word32 ->
   Bool
 validVersion net height version
-  | signedVersion < 2 = height < fst net.bip34Block
+  | signedVersion < 2 = height < net.bip34Height
   | signedVersion < 3 = height < net.bip66Height
   | signedVersion < 4 = height < net.bip65Height
   | otherwise = True
@@ -1015,7 +1014,10 @@ appendBlocks net seed bh i =
         net
         seed
         bh
-          { prev = headerHash bh,
+          { -- Version 4 passes the version rules of BIP34, BIP65 and BIP66
+            -- at any height. Regtest applies them from height 1.
+            version = 4,
+            prev = headerHash bh,
             timestamp = bh.timestamp + net.targetSpacing,
             -- Just to make it different in every header
             merkle = sha256 $ runPutS $ serialize seed
