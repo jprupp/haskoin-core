@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 - PSBT version 2 (BIP 370) in `Haskoin.Transaction.Psbt`: a PSBT of version 2 is read and written as its maps, with the unsigned transaction its fields describe and the lock time they determine. The roles take both versions, and version 2 has its constructor (`addInput`, `addOutput`), its updater (`setInputSequence`), the flags of `PSBT_GLOBAL_TX_MODIFIABLE`, which the signer and the combiner keep as the spec and Bitcoin Core do, and conversion between the versions (`withVersion`). The test vectors of BIP 370 and files of Bitcoin Core 32.1 check it.
 - `addrToBase58`, `addrToBech32` and `addrToCash` encode an address in one chosen format. `addrToBase58` gives the legacy form of a Bitcoin Cash address.
 - Token-aware CashAddr addresses (types 2 and 3) can be paid. `addressToOutput`, `addressHash160` and `addressHash256` treat them like their plain P2PKH, P2SH and P2SH32 counterparts.
+- `decodeSecKey` in `Haskoin.Crypto.Keys.Common` builds a secret key from 32 bytes and refuses zero and values at or above the curve order. `fromWif`, `fromMiniKey`, `xPrvImport`, `makeXPrvKey` and the binary form of `PrivateKey` use it. The `secKey` of secp256k1-haskell 1.7.0 only checks the length, so such keys used to import and then crash `derivePubKey` and `signMsg` with an error call.
+- Derivation paths accept `h` and `H` as hardened markers, as Bitcoin Core does, so `m/84h/0h/0h` parses.
+- Tests for BIP32 test vectors 4 and 5, for a BIP39 passphrase with accented letters, and for every function of the `Haskoin.Crypto` modules.
 
 ### Changed
 
@@ -40,6 +43,14 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 - `outputAddress` and `scriptToAddress` no longer report the P2PKH address of the key for a pay-to-public-key output. Such coins cannot be spent with the P2PKH input script, so the address was misleading.
 - `convertBits` in `Haskoin.Util.Helpers` returns `Maybe [Word]` and fails on padding bits that are not zero, or that are wide enough to hold a whole input digit, when padding is not allowed.
 - JSON encoding of an address that has no text form on the given network now fails with an error instead of writing `null`.
+- `mnemonicToSeed` NFKD-normalises the sentence and the passphrase, as BIP39 requires and as Trezor, Electrum, python-mnemonic and bitcoinjs do. A passphrase with accented letters used to give a seed that no other wallet derives, so the funds could not be restored elsewhere. `fromMnemonic` normalises the sentence before looking up its words. This adds a dependency on `unicode-transforms`.
+- `toMnemonic` accepts 16 to 32 bytes of entropy and `fromMnemonic` accepts sentences of 12, 15, 18, 21 or 24 words, the sizes BIP39 allows. Entropy of 4 to 12 bytes and of 36 to 64 bytes, and sentences of 3 to 9 and 27 to 48 words, were accepted before, and no other wallet reads them. A word that is not in the list is reported with the `fromMnemonic:` prefix.
+- `xPrvImport` and `xPubImport` require a payload of exactly 78 bytes, as Bitcoin Core does. Trailing bytes and an uncompressed public key used to be accepted. They also refuse a key at depth 0 whose parent fingerprint or index is not zero, as BIP32 test vector 5 requires.
+- `fromWif` refuses strings longer than 52 characters, and `xPrvImport` and `xPubImport` strings longer than 112, before decoding them. No valid key is longer, and the time to decode Base58 grows with the square of the length.
+- `prvSubKey`, `pubSubKey` and `hardSubKey` throw `DerivationException` when the parent is at depth 255. The depth of the child used to wrap around to 0.
+- Parsing a derivation path reads each index as an unbounded integer and accepts decimal digits only. `m/4294967296` used to wrap around to `m/0`, and hex, parenthesised and signed numbers were accepted.
+- The JSON form of `Sig` is decoded with `decodeStrictSig`, like the binary form, so a high-S signature is refused by both.
+- The `Read` instances of `Hash160`, `Hash256` and `Hash512`, and `textToFingerprint`, refuse hex of the wrong length, as the string literal instances already did. A two-byte hash could be read and then crash `signHash`.
 
 ### Fixed
 
@@ -59,6 +70,8 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 - The Bech32 and bit conversion accumulators are masked so that they cannot overflow on long inputs.
 - `encodeOutput` had no case for `PayScript32Hash` and crashed on it, so a P2SH32 address could not be turned into a script.
 - The P2WSH test generator produced P2WPKH addresses.
+- `fromWif` threw an exception on a Base58Check string with an empty payload, such as `3QJmnh`, also through the JSON parser of `PrivateKey`. It returns `Nothing` now.
+- The JSON parser of `PublicKey` accepted bytes after the key.
 
 ## [1.4.0] - 2026-10-31
 

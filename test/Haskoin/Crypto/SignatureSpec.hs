@@ -5,9 +5,11 @@
 module Haskoin.Crypto.SignatureSpec (spec) where
 
 import Control.Monad
+import Data.Aeson qualified as A
 import Data.Bits (testBit)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
+import Data.Either (isLeft)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe
@@ -66,6 +68,79 @@ spec = prepareContext $ \ctx -> do
       testP2WSHMulsig ctx
     it "agrees with BIP143 p2sh-p2wsh multisig example" $
       testBip143p2shp2wpkhMulsig ctx
+  describe "Strict signature decoding" $ do
+    it "accepts the smallest signature, r = 1 and s = 1" $
+      -- DER: 30 06 | 02 01 01 | 02 01 01
+      fmap (exportSig ctx) (decodeStrictSig ctx (hex "3006020101020101"))
+        `shouldBe` Just (hex "3006020101020101")
+    it "refuses a signature whose r is zero" $
+      decodeStrictSig ctx (hex "3006020100020101") `shouldBe` Nothing
+    it "refuses a signature whose s is zero" $
+      decodeStrictSig ctx (hex "3006020101020100") `shouldBe` Nothing
+    prop "refuses a signature whose s is above half the curve order" $
+      forAll (arbitrarySignature ctx) $ \(_, _, s) ->
+        decodeStrictSig ctx (exportSig ctx (highSVariant ctx s)) == Nothing
+  describe "Binary signature decoding" $ do
+    it "decodes the smallest signature" $
+      fmap (exportSig ctx) (unmarshal ctx (hex "3006020101020101"))
+        `shouldBe` Right (hex "3006020101020101")
+    it "refuses an identifier byte other than 0x30" $
+      (unmarshal ctx (hex "3106020101020101") :: Either String Sig) `shouldSatisfy` isLeft
+    it "refuses the indefinite length form" $
+      (unmarshal ctx (hex "3000020101020101") :: Either String Sig) `shouldSatisfy` isLeft
+    it "refuses a length of more than one byte" $
+      (unmarshal ctx (hex "308106020101020101") :: Either String Sig) `shouldSatisfy` isLeft
+    it "refuses a signature cut short" $
+      (unmarshal ctx (hex "3006020101") :: Either String Sig) `shouldSatisfy` isLeft
+  describe "Signature JSON" $ do
+    prop "refuses a high-S signature, like the binary form" $
+      forAll (arbitrarySignature ctx) $ \(_, _, s) ->
+        (unmarshalJSON ctx (A.encode (encodeHex (exportSig ctx (highSVariant ctx s)))) :: Maybe Sig)
+          == Nothing
+    it "refuses a signature that is not hex" $
+      (unmarshalJSON ctx "\"zz\"" :: Maybe Sig) `shouldBe` Nothing
+  describe "High-S signatures" $ do
+    prop "are not in canonical half order" $
+      forAll (arbitrarySignature ctx) $ \(_, _, s) ->
+        not (isCanonicalHalfOrder ctx (highSVariant ctx s))
+    prop "still verify after normalisation, as in Bitcoin Core" $
+      forAll (arbitrarySignature ctx) $ \(m, key', s) ->
+        verifyHashSig ctx m (highSVariant ctx s) (derivePubKey ctx key')
+    prop "a signature does not verify for another message" $
+      forAll (arbitrarySignature ctx) $ \(m, key', s) ->
+        forAll arbitraryHash256 $ \other ->
+          other /= m ==> not (verifyHashSig ctx other s (derivePubKey ctx key'))
+  describe "Bitcoin Core deterministic signature vectors" $
+    it "signs 'Very deterministic message' as Bitcoin Core does" $
+      case getImpl ctx of
+        Just ImplCore -> do
+          let h = doubleSHA256 ("Very deterministic message" :: ByteString)
+          encodeHex (exportSig ctx (signHash ctx coreKey1 h))
+            `shouldBe` "304402205dbbddda71772d95ce91cd2d14b592cfbc1dd0aabd6a394b6c2d377bbe59d31d\
+                       \022014ddda21494a4e221f0824f0b8b924c43fa43c0ad57dccdaa11f81a6bd4582f6"
+          encodeHex (exportSig ctx (signHash ctx coreKey2 h))
+            `shouldBe` "3044022052d8a32079c11e79db95af63bb9600c5b04f21a9ca33dc129c2bfa8ac9dc1cd5\
+                       \022061d8ae5e0f6c1a16bde3719c64c2fd70e404b6428ab9a69566962e8771b5944d"
+        _ -> pendingWith "the vector is for the nonce function of Bitcoin Core"
+
+hex :: Text -> ByteString
+hex = fromJust . decodeHex
+
+-- | The keys strSecret1 and strSecret2 of key_tests.cpp in Bitcoin Core.
+coreKey1, coreKey2 :: SecKey
+coreKey1 = (fromJust (fromWif btc "5HxWvvfubhXpYYpS3tJkw6fq9jE9j18THftkZjHHfmFiWtmAbrj")).key
+coreKey2 = (fromJust (fromWif btc "5KC4ejrDjv152FGwP386VD1i2NYc5KkfSMyv1nGy1VGDxGHqVY3")).key
+
+-- | The same signature with s replaced by n - s. It verifies as well, but it
+-- is not in the low-S form that BIP62 requires.
+highSVariant :: Ctx -> Sig -> Sig
+highSVariant ctx s =
+  fromJust $ importCompactSig ctx $ fromJust $ compactSig (r <> highS)
+  where
+    (r, lowS) = BS.splitAt 32 (exportCompactSig ctx s).get
+    n = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141
+    highS = padTo32 (integerToBS (n - bsToInteger lowS))
+    padTo32 bs = BS.replicate (32 - BS.length bs) 0 <> bs
 
 -- github.com/bitcoin/bitcoin/blob/master/src/script.cpp
 -- from function IsCanonicalSignature

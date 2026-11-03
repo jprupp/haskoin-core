@@ -15,11 +15,13 @@ import Data.Bytes.Get
 import Data.Bytes.Put
 import Data.Bytes.Serial
 import Data.Default (def)
+import Data.Either (isLeft)
 import Data.Maybe
 import Data.Serialize qualified as S
 import Data.String (fromString)
 import Data.String.Conversions (cs)
 import Data.Text (Text)
+import Data.Text qualified as T
 import Haskoin.Address
 import Haskoin.Crypto
 import Haskoin.Network.Constants
@@ -80,6 +82,103 @@ spec = prepareContext $ \ctx -> do
     it "Passes deterministic signing tests" $ testDetSigning ctx
   describe "MiniKey vectors" $
     it "Passes MiniKey decoding tests" testMiniKey
+  describe "Secret key range" $ do
+    it "accepts the smallest secret key, 1" $
+      decodeSecKey (B.replicate 31 0 <> B.singleton 1) `shouldBe` Just secKey1
+    it "accepts the largest secret key, n - 1" $
+      decodeSecKey (hex "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364140")
+        `shouldSatisfy` isJust
+    it "refuses the zero key" $
+      decodeSecKey (B.replicate 32 0) `shouldBe` Nothing
+    it "refuses the curve order n" $
+      decodeSecKey (hex "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141")
+        `shouldBe` Nothing
+    it "refuses a key that is not 32 bytes" $ do
+      decodeSecKey (B.replicate 31 1) `shouldBe` Nothing
+      decodeSecKey (B.replicate 33 1) `shouldBe` Nothing
+  describe "WIF" $ do
+    it "decodes the compressed WIF of key 1" $
+      fromWif btc "KwDiBf89QgGbjEhKnhXJuH7LrciVrZi3qYjgd9M7rFU73sVHnoWn"
+        `shouldBe` Just (wrapSecKey True secKey1)
+    it "decodes the uncompressed WIF of key 1" $
+      fromWif btc "5HpHagT65TZzG1PH3CSu63k8DbpvD8s5ip4nEB3kEsreAnchuDf"
+        `shouldBe` Just (wrapSecKey False secKey1)
+    it "refuses the WIF of key 0" $ do
+      fromWif btc "KwDiBf89QgGbjEhKnhXJuH7LrciVrZi3qYjgd9M7rFU73Nd2Mcv1" `shouldBe` Nothing
+      fromWif btc "5HpHagT65TZzG1PH3CSu63k8DbpvD8s5ip4nEB3kEsreAbuatmU" `shouldBe` Nothing
+    it "refuses the WIF of the curve order n" $ do
+      fromWif btc "L5oLkpV3aqBjhki6LmvChTCV6odsp4SXM6FfU2Gppt5kFqRzExJJ" `shouldBe` Nothing
+      fromWif btc "5Km2kuu7vtFDPpxywn4u3NLpbr5jKpTB3jsuDU2KYEqetwr388P" `shouldBe` Nothing
+    it "refuses a compressed WIF whose flag byte is not 0x01" $
+      -- key 1 followed by the flag byte 0x02
+      fromWif btc "KwDiBf89QgGbjEhKnhXJuH7LrciVrZi3qYjgd9M7rFU73sfZr2ym" `shouldBe` Nothing
+    it "refuses the WIF of another network" $ do
+      -- key 1 with the testnet prefix 0xef
+      fromWif btc "cMahea7zqjxrtgAbB7LSGbcQUr1uX1ojuat9jZodMN87JcbXMTcA" `shouldBe` Nothing
+      fromWif btcTest "cMahea7zqjxrtgAbB7LSGbcQUr1uX1ojuat9jZodMN87JcbXMTcA"
+        `shouldBe` Just (wrapSecKey True secKey1)
+    it "refuses a Base58Check string with no payload" $
+      -- "3QJmnh" is the Base58Check encoding of the empty string
+      fromWif btc "3QJmnh" `shouldBe` Nothing
+    it "refuses a string longer than any WIF" $
+      fromWif btc (T.replicate 53 "z") `shouldBe` Nothing
+    it "fails the JSON parse of an invalid WIF instead of throwing" $ do
+      (unmarshalJSON btc "\"3QJmnh\"" :: Maybe PrivateKey) `shouldBe` Nothing
+      (unmarshalJSON btc "\"KwDiBf89QgGbjEhKnhXJuH7LrciVrZi3qYjgd9M7rFU73Nd2Mcv1\"" :: Maybe PrivateKey)
+        `shouldBe` Nothing
+  describe "Mini keys" $ do
+    it "decodes a 22-character mini key" $
+      -- the example key of the Bitcoin wiki
+      fromMiniKey "S4b3N3oGqDqR5jNuxEvDwf"
+        `shouldBe` Just (wrapSecKey False "0c28fca386c7a227600b2fe50b7cae11ec86d3bf1fbe471be89827e19d72aa1d")
+    it "refuses a mini key whose check byte is not zero" $
+      -- SHA-256 of "S4b3N3oGqDqR5jNuxEvDwg?" starts with 0x8f
+      fromMiniKey "S4b3N3oGqDqR5jNuxEvDwg" `shouldBe` Nothing
+    it "refuses a mini key of another length" $
+      fromMiniKey "S4b3N3oGqDqR5jNuxEvDw" `shouldBe` Nothing
+  describe "Key tweaks" $ do
+    it "adding a zero tweak leaves the secret key unchanged" $
+      tweakSecKey ctx secKey1 zeroHash `shouldBe` Just secKey1
+    it "adding one to secret key 1 gives secret key 2" $
+      tweakSecKey ctx secKey1 oneHash
+        `shouldBe` Just "0000000000000000000000000000000000000000000000000000000000000002"
+    it "refuses a tweak that brings the secret key to zero" $
+      -- 1 + (n - 1) = n, which is 0 modulo n
+      tweakSecKey ctx secKey1 orderMinusOneHash `shouldBe` Nothing
+    it "refuses a tweak at or above the curve order" $
+      tweakSecKey ctx secKey1 orderHash `shouldBe` Nothing
+    it "adding one to the public key of 1 gives the public key of 2" $
+      tweakPubKey ctx (pubKey1 ctx) oneHash `shouldBe` Just (pubKey2 ctx)
+    it "refuses a tweak that brings the public key to infinity" $
+      tweakPubKey ctx (pubKey1 ctx) orderMinusOneHash `shouldBe` Nothing
+    prop "tweaking the public key matches tweaking the secret key" $
+      forAll arbitraryPrivateKey $ \k ->
+        forAll arbitraryHash256 $ \t ->
+          (derivePubKey ctx <$> tweakSecKey ctx k.key t)
+            == tweakPubKey ctx (derivePubKey ctx k.key) t
+  describe "Public key text forms" $ do
+    it "parses a compressed public key from JSON" $
+      unmarshalJSON ctx "\"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\""
+        `shouldBe` Just (wrapPubKey True (pubKey1 ctx))
+    it "parses an uncompressed public key from JSON" $
+      unmarshalJSON
+        ctx
+        "\"0479be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\
+        \483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8\""
+        `shouldBe` Just (wrapPubKey False (pubKey1 ctx))
+    it "refuses a public key with trailing bytes" $
+      (unmarshalJSON ctx "\"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798deadbeef\"" :: Maybe PublicKey)
+        `shouldBe` Nothing
+    it "refuses a public key with an unknown prefix byte" $
+      (unmarshalJSON ctx "\"0579be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\"" :: Maybe PublicKey)
+        `shouldBe` Nothing
+    it "refuses a point that is not on the curve" $
+      -- the invalid public key of BIP32 test vector 5
+      (unmarshalJSON ctx "\"020000000000000000000000000000000000000000000000000000000000000007\"" :: Maybe PublicKey)
+        `shouldBe` Nothing
+  describe "Binary private key" $
+    it "refuses a serialized zero key" $
+      (runGetS deserialize (B.replicate 33 0) :: Either String PrivateKey) `shouldSatisfy` isLeft
   describe "key_io_valid.json vectors" $ do
     vectors <- runIO (readTestFile "key_io_valid.json" :: IO [(Text, Text, A.Value)])
     it "Passes the key_io_valid.json vectors" $
@@ -88,6 +187,25 @@ spec = prepareContext $ \ctx -> do
     vectors <- runIO (readTestFile "key_io_invalid.json" :: IO [[Text]])
     it "Passes the key_io_invalid.json vectors" $
       mapM_ (testKeyIOInvalidVector ctx) vectors
+
+hex :: Text -> B.ByteString
+hex = fromJust . decodeHex
+
+-- | The secret key 1.
+secKey1 :: SecKey
+secKey1 = "0000000000000000000000000000000000000000000000000000000000000001"
+
+-- | Public keys of the secret keys 1 and 2, that is G and 2G.
+pubKey1, pubKey2 :: Ctx -> PubKey
+pubKey1 ctx = fromJust $ importPubKey ctx $ hex "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+pubKey2 ctx = fromJust $ importPubKey ctx $ hex "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"
+
+-- | Tweaks of 0, 1, n - 1 and n, where n is the curve order.
+zeroHash, oneHash, orderMinusOneHash, orderHash :: Hash256
+zeroHash = "0000000000000000000000000000000000000000000000000000000000000000"
+oneHash = "0000000000000000000000000000000000000000000000000000000000000001"
+orderMinusOneHash = "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364140"
+orderHash = "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141"
 
 -- github.com/bitcoin/bitcoin/blob/master/src/script.cpp
 -- from function IsCanonicalPubKey

@@ -40,6 +40,7 @@ module Haskoin.Crypto.Hash
 where
 
 import Control.DeepSeq
+import Control.Monad (guard)
 import Crypto.Hash
 import Crypto.MAC.HMAC (HMAC, hmac)
 import Data.Binary (Binary (..))
@@ -82,6 +83,15 @@ instance Binary CheckSum32 where
   put = serialize
   get = deserialize
 
+-- | Decode a hex string that must hold exactly the given number of bytes. The
+-- text forms of the hash types use it so that a hash can never have the wrong
+-- length.
+decodeHexBytes :: Int -> String -> Maybe ByteString
+decodeHexBytes n str = do
+  bs <- decodeHex (cs str)
+  guard (B.length bs == n)
+  return bs
+
 -- | Type for 512-bit hashes.
 newtype Hash512 = Hash512 {get :: ShortByteString}
   deriving (Eq, Ord, Generic)
@@ -103,7 +113,7 @@ instance Show Hash512 where
 instance Read Hash512 where
   readPrec = do
     R.String str <- lexP
-    maybe pfail (return . Hash512 . toShort) (decodeHex (cs str))
+    maybe pfail (return . Hash512 . toShort) (decodeHexBytes 64 str)
 
 instance Show Hash256 where
   showsPrec _ = shows . encodeHex . fromShort . (.get)
@@ -111,7 +121,7 @@ instance Show Hash256 where
 instance Read Hash256 where
   readPrec = do
     R.String str <- lexP
-    maybe pfail (return . Hash256 . toShort) (decodeHex (cs str))
+    maybe pfail (return . Hash256 . toShort) (decodeHexBytes 32 str)
 
 instance Show Hash160 where
   showsPrec _ = shows . encodeHex . fromShort . (.get)
@@ -119,16 +129,10 @@ instance Show Hash160 where
 instance Read Hash160 where
   readPrec = do
     R.String str <- lexP
-    maybe pfail (return . Hash160 . toShort) (decodeHex (cs str))
+    maybe pfail (return . Hash160 . toShort) (decodeHexBytes 20 str)
 
 instance IsString Hash512 where
-  fromString str =
-    case decodeHex $ cs str of
-      Nothing -> e
-      Just bs ->
-        case B.length bs of
-          64 -> Hash512 (toShort bs)
-          _ -> e
+  fromString = maybe e (Hash512 . toShort) . decodeHexBytes 64
     where
       e = error "Could not decode hash from hex string"
 
@@ -145,13 +149,7 @@ instance Binary Hash512 where
   get = deserialize
 
 instance IsString Hash256 where
-  fromString str =
-    case decodeHex $ cs str of
-      Nothing -> e
-      Just bs ->
-        case B.length bs of
-          32 -> Hash256 (toShort bs)
-          _ -> e
+  fromString = maybe e (Hash256 . toShort) . decodeHexBytes 32
     where
       e = error "Could not decode hash from hex string"
 
@@ -168,13 +166,7 @@ instance Binary Hash256 where
   get = deserialize
 
 instance IsString Hash160 where
-  fromString str =
-    case decodeHex $ cs str of
-      Nothing -> e
-      Just bs ->
-        case B.length bs of
-          20 -> Hash160 (toShort bs)
-          _ -> e
+  fromString = maybe e (Hash160 . toShort) . decodeHexBytes 20
     where
       e = error "Could not decode hash from hex string"
 

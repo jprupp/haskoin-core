@@ -5,7 +5,10 @@
 
 module Haskoin.Crypto.HashSpec (spec) where
 
+import Control.Exception (evaluate)
+import Crypto.Hash (hashFinalize, hashUpdate)
 import Data.Bits
+import Data.ByteArray qualified as BA
 import Data.ByteString (ByteString)
 import Data.ByteString.Builder
 import Data.ByteString.Char8 qualified as Char8
@@ -28,6 +31,7 @@ import Test.HUnit
 import Test.Hspec
 import Test.Hspec.QuickCheck
 import Test.QuickCheck
+import Text.Read (readMaybe)
 
 identityTests :: IdentityTests
 identityTests =
@@ -77,6 +81,59 @@ spec =
         mapM_ (testHMACVector hmac256 (.get)) hmacSha256Vectors
       it "Passes HMAC_SHA512 test vectors" $
         mapM_ (testHMACVector hmac512 (.get)) hmacSha512Vectors
+    describe "Composite hashes" $ do
+      it "double SHA-256 hashes the SHA-256 of the input again" $ do
+        -- sha256(sha256("")) and sha256(sha256("abc"))
+        doubleSHA256 ("" :: ByteString)
+          `shouldBe` "5df6e0e2761359d30a8275058e299fcc0381534545f55cf43e41983f5d4c9456"
+        doubleSHA256 ("abc" :: ByteString)
+          `shouldBe` "4f8b42c22dd3729b519ba6f68d2da7cc5b2d606d05daed5ad5128cc03e6c6358"
+      it "address hash is the RIPEMD-160 of the SHA-256 of the input" $ do
+        addressHash ("" :: ByteString)
+          `shouldBe` "b472a266d0bd89c13706a4132ccfb16f7c3b9fcb"
+        addressHash ("abc" :: ByteString)
+          `shouldBe` "bb1be98c142444d7a56aa3981c3942a978e4dc33"
+      it "32-bit checksum is the first four bytes of the double SHA-256" $
+        -- double SHA-256 of "" starts with 5d f6 e0 e2
+        (checkSum32 ("" :: ByteString)).get `shouldBe` 0x5df6e0e2
+      it "tagged hash is SHA-256 of the hashed tag twice and the message" $ do
+        -- sha256(sha256("TapLeaf") || sha256("TapLeaf") || msg), as in BIP340
+        taggedHex "TapLeaf" ""
+          `shouldBe` "5212c288a377d1f8164962a5a13429f9ba6a7b84e59776a52c6637df2106facb"
+        taggedHex "TapLeaf" "abc"
+          `shouldBe` "83a56308a9c56f467e8df293da5ae5fdbc85b871952a83c4bf0575ee948ec230"
+      it "split512 gives the two halves of a 512-bit hash" $
+        -- SHA-512 of "" is cf83e135…d36ce9ce followed by 47d0d13c…f927da3e
+        split512 (sha512 ("" :: ByteString))
+          `shouldBe` ( "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce",
+                       "47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e"
+                     )
+      it "join512 puts the two halves back together" $
+        join512
+          ( "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce",
+            "47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e"
+          )
+          `shouldBe` "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce\
+                     \47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e"
+    describe "Hash text forms" $ do
+      it "reads a hash from its hex string" $
+        readMaybe "\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\""
+          `shouldBe` Just ("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" :: Hash256)
+      it "refuses to read a hash of the wrong length" $ do
+        readMaybe "\"abcd\"" `shouldBe` (Nothing :: Maybe Hash160)
+        readMaybe "\"abcd\"" `shouldBe` (Nothing :: Maybe Hash256)
+        readMaybe "\"abcd\"" `shouldBe` (Nothing :: Maybe Hash512)
+      it "refuses to read a hash that is not hex" $
+        readMaybe "\"zz\"" `shouldBe` (Nothing :: Maybe Hash256)
+      it "refuses a hash literal of the wrong length" $ do
+        evaluate ("abcd" :: Hash160) `shouldThrow` anyErrorCall
+        evaluate ("abcd" :: Hash256) `shouldThrow` anyErrorCall
+        evaluate ("abcd" :: Hash512) `shouldThrow` anyErrorCall
+
+-- | Hex of the BIP340 tagged hash of a message.
+taggedHex :: ByteString -> ByteString -> Text
+taggedHex tag msg =
+  encodeHex (BA.convert (hashFinalize (hashUpdate (initTaggedHash tag) msg)))
 
 joinSplit512 :: Hash256 -> Hash256 -> Bool
 joinSplit512 a b = split512 (join512 (a, b)) == (a, b)
