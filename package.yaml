@@ -1,5 +1,5 @@
 name: haskoin-core
-version: 1.4.0
+version: 1.5.0
 synopsis: Bitcoin & Bitcoin Cash library for Haskell
 description: Please see the README on GitHub at <https://github.com/jprupp/haskoin-core#readme>
 category: Bitcoin, Finance, Network
@@ -11,6 +11,7 @@ homepage: http://github.com/jprupp/haskoin-core#readme
 github: jprupp/haskoin-core.git
 bug-reports: http://github.com/jprupp/haskoin-core/issues
 extra-source-files:
+  - data/*.hex
   - data/*.json
   - data/*.txt
   - README.md

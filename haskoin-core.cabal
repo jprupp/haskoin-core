@@ -5,7 +5,7 @@ cabal-version: 1.12
 -- see: https://github.com/sol/hpack
 
 name:           haskoin-core
-version:        1.4.0
+version:        1.5.0
 synopsis:       Bitcoin & Bitcoin Cash library for Haskell
 description:    Please see the README on GitHub at <https://github.com/jprupp/haskoin-core#readme>
 category:       Bitcoin, Finance, Network
@@ -17,6 +17,7 @@ license:        MIT
 license-file:   LICENSE
 build-type:     Simple
 extra-source-files:
+    data/block_100000.hex
     data/bip341.json
     data/complex_psbt.json
     data/forkid_script_tests.json

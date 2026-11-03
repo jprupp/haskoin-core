@@ -5,9 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/)
 and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.5.0] - 2026-11-03
 
 ### Added
+
+- `connectBlock` and `connectBlocks` now check that a header carries the difficulty bits the chain requires, as `ContextualCheckBlockHeader` does in Bitcoin Core. `validBlock` takes the required bits as a new argument. Without this check a chain of headers mined at the minimum difficulty was accepted.
+- `asertAnchor` finds the anchor block of the aserti3-2d algorithm for the chain that ends at a given block. `mtp` is now the median time past of the block itself, as in Bitcoin Core, instead of its parent's.
+- `getVarIntList` and `putVarIntList` in `Haskoin.Network.Common` read and write lists with their `VarInt` count. A count above `maxListSize` (32 MiB, the `MAX_SIZE` of Bitcoin Core) fails the parse instead of wrapping around and reading an empty list. Blocks, Merkle blocks, `getblocks`, `getheaders`, `headers`, `inv`, `getdata`, `notfound` and `addr` messages use them.
+- `genesisTx` in `Network` holds the coinbase transaction of the genesis block. `Haskoin.Transaction.Genesis` exports `mainnetGenesisTx`, `testnet4GenesisTx` and `genesisCoinbase`.
+- `skipHeight` and `medianTime` are exported from `Haskoin.Block.Headers`.
+- Tests for every function of the `Haskoin.Block` modules, with vectors from Bitcoin Core and from mainnet block 100000.
 
 - PSBT version 2 (BIP 370) in `Haskoin.Transaction.Psbt`: a PSBT of version 2 is read and written as its maps, with the unsigned transaction its fields describe and the lock time they determine. The roles take both versions, and version 2 has its constructor (`addInput`, `addOutput`), its updater (`setInputSequence`), the flags of `PSBT_GLOBAL_TX_MODIFIABLE`, which the signer and the combiner keep as the spec and Bitcoin Core do, and conversion between the versions (`withVersion`). The test vectors of BIP 370 and files of Bitcoin Core 32.1 check it.
 - `addrToBase58`, `addrToBech32` and `addrToCash` encode an address in one chosen format. `addrToBase58` gives the legacy form of a Bitcoin Cash address.
@@ -15,6 +22,18 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 
 ### Changed
 
+- `buildMerkleRoot` returns `Either String MerkleRoot`. It fails for an empty list, which used to crash, and for a mutated tree in which two sibling nodes are identical (CVE-2012-2459). `extractMatches` rejects such a tree too, as `CPartialMerkleTree::TraverseAndExtract` does in Bitcoin Core, and reports why a partial tree is malformed.
+- `buildMerkleRoot`, `buildPartialMerkle` and `calcHash` build the tree in linear time instead of quadratic. `decodeMerkleFlags` is linear too; it took a minute for 100 KB of flags, which a peer could send in a `merkleblock` message.
+- `genesisBlock` no longer takes a `Ctx` and returns the right coinbase for every network. Bitcoin testnet4 has its own genesis coinbase, so `genesisBlock btcTest4` used to return a block whose transactions did not match its header.
+- The `merkleroot` field of the JSON form of `BlockHeader` is in display order, like `prevblock` and the `getblockheader` RPC call of Bitcoin Core. It was in internal byte order.
+- `hexToBlockHash` and the JSON parser of `BlockHeader` reject a hash that is not exactly 32 bytes. They used to accept longer input and drop the leading bytes.
+- `computeAsertBits` takes the proof-of-work limit of the network as its first argument instead of using the mainnet limit.
+- `connectBlocks` adds each header to the store as it passes, so a batch with a bad header keeps the headers before it and makes the last of them the best block when it has the most work.
+- `Ord BlockNode` compares the height and then the header, so that it agrees with `Eq`, which compares the header.
+- `appendBlocks` dates every block one target spacing after its parent, so the chains it mines pass the median time past rule.
+- `blockLocatorNodes` steps back like `LocatorEntries` in Bitcoin Core and lists the genesis block once.
+- `encodeCompact` raises an error for a number wider than 255 bytes instead of wrapping the exponent.
+- `traverseAndBuild` and `traverseAndExtract` are no longer exported.
 - Replace the PSBT module with `Haskoin.Transaction.Psbt`, which keeps every field of a PSBT, known or not, writes maps with their keys in order as Bitcoin Core does, refuses what breaks BIP 174 (duplicate keys, keys out of shape, bytes after the last map, other versions), and reads and writes the global xpub and proprietary fields. It still creates, combines, signs, finalizes and extracts. The `Haskoin.Transaction.Partial` module and its types are gone.
 - `pubKeyWitnessAddr` and `pubKeyCompatWitnessAddr` now return `Maybe Address` and refuse uncompressed keys. BIP 143 makes witness spends with uncompressed keys non-standard, so coins sent to such an address could not be spent through the normal network.
 - The `WitnessAddress` and `CashAddress` constructors are now patterns that can only match. Build these addresses with `witnessAddress` and `cashAddress`, which validate the version and payload and return the dedicated constructor when one exists. Every address now has a single representation, so equal addresses compare equal.
@@ -24,6 +43,12 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 
 ### Fixed
 
+- A block whose timestamp equals the median time past of its parent is rejected, as in Bitcoin Core. It used to be accepted.
+- `connectBlocks` keeps the block that was seen first as the best block when a competing block has the same work and height, as `connectBlock` and Bitcoin Core do. It used to switch the best block to every competitor.
+- `calcNextWork` and `computeTarget` measure the time span of a retarget period as a signed number. A period whose last block is dated before its first block used to wrap around to four times the target timespan instead of being limited to a quarter.
+- `headerWork` returns zero for bits that are negative, overflow or encode a zero target, like `GetBlockProof` in Bitcoin Core. It used to divide by zero for bits `0x03800001`.
+- The block version is compared as a signed number, as in Bitcoin Core, so versions with the top bit set are rejected once BIP34 is active.
+- The Bitcoin Cash difficulty algorithms follow Bitcoin Cash Node: the minimum-difficulty rule of test networks applies to the ASERT algorithm and no longer applies to the EDA and DAA algorithms on mainnet, the EDA returns the bits of the last block without minimum difficulty on test networks, `getSuitableBlock` picks the same block as Bitcoin Cash Node when timestamps are equal, `computeTarget` no longer overshoots by one, the ASERT anchor is the first block whose own median time past reaches the activation time, and regtest never retargets.
 - A PSBT of another version is refused by its version. The unsigned transaction was looked for first, and a PSBT of version 2 holds none.
 - `addressBytes` returned a length-prefixed value for a generic CashAddr instead of the raw hash.
 - Base58, Bech32 and CashAddr decoders accepted non-ASCII look-alike characters. Base58 truncated code points to one byte and Bech32 used Unicode case folding. All three now accept ASCII only, as the specifications require.

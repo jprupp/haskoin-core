@@ -23,32 +23,29 @@ module Haskoin.Block.Merkle
     merkleBlockTxs,
     testMerkleRoot,
     buildPartialMerkle,
+    extractMatches,
     decodeMerkleFlags,
     encodeMerkleFlags,
     calcTreeHeight,
     calcTreeWidth,
     hash2,
     calcHash,
-    traverseAndBuild,
-    traverseAndExtract,
-    extractMatches,
     splitIn,
     boolsToWord8,
   )
 where
 
 import Control.DeepSeq
-import Control.Monad (forM_, replicateM, when)
+import Control.Monad (when)
 import Data.Binary (Binary (..))
 import Data.Bits
-import qualified Data.ByteString as BS
 import Data.Bytes.Get
 import Data.Bytes.Put
 import Data.Bytes.Serial
 import Data.Either (isRight)
 import Data.Hashable
-import Data.Maybe
 import Data.Serialize (Serialize (..))
+import qualified Data.Vector as V
 import Data.Word (Word32, Word8)
 import GHC.Generics
 import Haskoin.Block.Common
@@ -84,20 +81,15 @@ instance Serial MerkleBlock where
   deserialize = do
     header <- deserialize
     ntx <- getWord32le
-    (VarInt matchLen) <- deserialize
-    hashes <- replicateM (fromIntegral matchLen) deserialize
-    (VarInt flagLen) <- deserialize
-    ws <- replicateM (fromIntegral flagLen) getWord8
-    return $ MerkleBlock header ntx hashes (decodeMerkleFlags ws)
+    hashes <- getVarIntList deserialize
+    flagBytes <- getVarIntList getWord8
+    return $ MerkleBlock header ntx hashes (decodeMerkleFlags flagBytes)
 
   serialize (MerkleBlock h ntx hashes flags) = do
     serialize h
     putWord32le ntx
-    putVarInt $ length hashes
-    forM_ hashes serialize
-    let ws = encodeMerkleFlags flags
-    putVarInt $ length ws
-    forM_ ws putWord8
+    putVarIntList serialize hashes
+    putVarIntList putWord8 (encodeMerkleFlags flags)
 
 instance Binary MerkleBlock where
   put = serialize
@@ -107,13 +99,12 @@ instance Serialize MerkleBlock where
   put = serialize
   get = deserialize
 
--- | Unpack Merkle flags into 'FlagBits' structure.
+-- | Unpack Merkle flags into 'FlagBits' structure. The least significant bit
+-- of each byte comes first.
 decodeMerkleFlags :: [Word8] -> FlagBits
-decodeMerkleFlags ws =
-  [ b | p <- [0 .. length ws * 8 - 1], b <- [testBit (ws !! (p `div` 8)) (p `mod` 8)]
-  ]
+decodeMerkleFlags = concatMap (\w -> map (testBit w) [0 .. 7])
 
--- | Pack Merkle flags from 'FlagBits'.
+-- | Pack Merkle flags from 'FlagBits'. The last byte is padded with zero bits.
 encodeMerkleFlags :: FlagBits -> [Word8]
 encodeMerkleFlags bs = map boolsToWord8 $ splitIn 8 bs
 
@@ -139,19 +130,51 @@ calcTreeWidth ::
   Int
 calcTreeWidth ntx h = (ntx + (1 `shiftL` h) - 1) `shiftR` h
 
--- | Computes the root of a Merkle tree from a list of leaf node hashes.
+-- | Every level of a Merkle tree, leaves first and root last. Each level
+-- lists its nodes from left to right. A level with an odd number of nodes
+-- pairs its last node with itself to build the level above.
+type MerkleLevels = [V.Vector Hash256]
+
+-- | Build all levels of the Merkle tree over the given leaves, in linear
+-- time. Also report whether some node combines two identical hashes, which
+-- Bitcoin Core calls a mutated tree (CVE-2012-2459). The last node of an odd
+-- level pairing with itself does not count as a duplicate.
+merkleLevels :: [Hash256] -> (MerkleLevels, Bool)
+merkleLevels leaves = go (V.fromList leaves) False []
+  where
+    go level mutated above
+      | V.length level <= 1 = (reverse (level : above), mutated)
+      | otherwise = go (V.fromList parents) (mutated || duplicated) (level : above)
+      where
+        count = V.length level
+        pairs = [(level V.! i, level V.! min (i + 1) (count - 1)) | i <- [0, 2 .. count - 1]]
+        parents = [hash2 l r | (l, r) <- pairs]
+        duplicated = or [level V.! i == level V.! (i + 1) | i <- [0, 2 .. count - 2]]
+
+-- | Computes the root of a Merkle tree from a list of leaf node hashes. Fails
+-- for an empty list, since a block has at least its coinbase, and for a
+-- mutated tree, in which two sibling nodes are identical (CVE-2012-2459). A
+-- block with duplicate transactions is invalid, and its mutated tree has the
+-- same root as the valid block it was derived from.
 buildMerkleRoot ::
   -- | transaction hashes (leaf nodes)
   [TxHash] ->
   -- | root of the Merkle tree
-  MerkleRoot
-buildMerkleRoot txs = calcHash (calcTreeHeight $ length txs) 0 txs
+  Either String MerkleRoot
+buildMerkleRoot [] = Left "buildMerkleRoot: a block needs at least one transaction"
+buildMerkleRoot txs
+  | mutated = Left "buildMerkleRoot: duplicate transaction hashes (mutated tree)"
+  | otherwise = Right (V.head (last levels))
+  where
+    (levels, mutated) = merkleLevels (map (.get) txs)
 
 -- | Concatenate and compute double SHA256.
 hash2 :: Hash256 -> Hash256 -> Hash256
 hash2 a b = doubleSHA256 $ runPutS (serialize a) <> runPutS (serialize b)
 
--- | Computes the hash of a specific node in a Merkle tree.
+-- | Computes the hash of a specific node in a Merkle tree. Builds the whole
+-- tree, so use 'buildMerkleRoot' or 'buildPartialMerkle' for more than one
+-- node.
 calcHash ::
   -- | height of the node
   Int ->
@@ -163,14 +186,9 @@ calcHash ::
   Hash256
 calcHash height pos txs
   | height < 0 || pos < 0 = error "calcHash: Invalid parameters"
-  | height == 0 = (txs !! pos).get
-  | otherwise = hash2 left right
+  | otherwise = (levels !! height) V.! pos
   where
-    left = calcHash (height - 1) (pos * 2) txs
-    right
-      | pos * 2 + 1 < calcTreeWidth (length txs) (height - 1) =
-          calcHash (height - 1) (pos * 2 + 1) txs
-      | otherwise = left
+    (levels, _) = merkleLevels (map (.get) txs)
 
 -- | Build a partial Merkle tree. Provide a list of tuples with all transaction
 -- hashes in the block, and whether the transaction is to be included in the
@@ -181,61 +199,74 @@ buildPartialMerkle ::
   [(TxHash, Bool)] ->
   -- | flag bits and partial Merkle tree
   (FlagBits, PartialMerkleTree)
-buildPartialMerkle hs = traverseAndBuild (calcTreeHeight $ length hs) 0 hs
-
--- | Helper function to build partial Merkle tree. Used by 'buildPartialMerkle'
--- above.
-traverseAndBuild ::
-  Int -> Int -> [(TxHash, Bool)] -> (FlagBits, PartialMerkleTree)
-traverseAndBuild height pos txs
-  | height < 0 || pos < 0 = error "traverseAndBuild: Invalid parameters"
-  | height == 0 || not match = ([match], [calcHash height pos t])
-  | otherwise = (match : lb ++ rb, lh ++ rh)
+buildPartialMerkle [] = ([], [])
+buildPartialMerkle txs = traverseAndBuild levels matches (length levels - 1) 0
   where
-    t = map fst txs
-    s = pos `shiftL` height
-    e = min (length txs) $ (pos + 1) `shiftL` height
-    match = any snd $ take (e - s) $ drop s txs
-    (lb, lh) = traverseAndBuild (height - 1) (pos * 2) txs
-    (rb, rh)
-      | (pos * 2 + 1) < calcTreeWidth (length txs) (height - 1) =
-          traverseAndBuild (height - 1) (pos * 2 + 1) txs
+    (levels, _) = merkleLevels (map ((.get) . fst) txs)
+    matches = matchLevels (map snd txs)
+
+-- | For every level of the tree, whether each node has a matching transaction
+-- somewhere below it. Shaped like the levels of 'merkleLevels'.
+matchLevels :: [Bool] -> [V.Vector Bool]
+matchLevels leafMatches = go (V.fromList leafMatches) []
+  where
+    go level above
+      | V.length level <= 1 = reverse (level : above)
+      | otherwise = go (V.fromList parents) (level : above)
+      where
+        count = V.length level
+        parents = [level V.! i || level V.! min (i + 1) (count - 1) | i <- [0, 2 .. count - 1]]
+
+-- | Depth-first walk that records the partial Merkle tree, like
+-- @CPartialMerkleTree::TraverseAndBuild@ in Bitcoin Core. A node with no match
+-- below it is stored as a single hash. A node with a match is descended into.
+traverseAndBuild ::
+  MerkleLevels -> [V.Vector Bool] -> Int -> Int -> (FlagBits, PartialMerkleTree)
+traverseAndBuild levels matches height pos
+  | height == 0 || not match = ([match], [node])
+  | otherwise = (match : leftBits ++ rightBits, leftHashes ++ rightHashes)
+  where
+    match = (matches !! height) V.! pos
+    node = (levels !! height) V.! pos
+    (leftBits, leftHashes) = traverseAndBuild levels matches (height - 1) (pos * 2)
+    (rightBits, rightHashes)
+      | pos * 2 + 1 < V.length (levels !! (height - 1)) =
+          traverseAndBuild levels matches (height - 1) (pos * 2 + 1)
       | otherwise = ([], [])
 
--- | Helper function to extract transaction hashes from partial Merkle tree.
+-- | Depth-first walk that rebuilds a node of the partial Merkle tree, like
+-- @CPartialMerkleTree::TraverseAndExtract@ in Bitcoin Core. Returns the hash
+-- of the node, the matching transactions below it and the flags and hashes
+-- that are still unused.
 traverseAndExtract ::
   Int ->
   Int ->
   Int ->
   FlagBits ->
   PartialMerkleTree ->
-  Maybe (MerkleRoot, [TxHash], Int, Int)
-traverseAndExtract height pos ntx flags hashes
-  | null flags = Nothing
-  | height == 0 || not match = leafResult
-  | isNothing leftM = Nothing
-  | (pos * 2 + 1) >= calcTreeWidth ntx (height - 1) =
-      Just (hash2 lh lh, lm, lcf + 1, lch)
-  | isNothing rightM = Nothing
-  | otherwise =
-      Just (hash2 lh rh, lm ++ rm, lcf + rcf + 1, lch + rch)
-  where
-    leafResult
-      | null hashes = Nothing
-      | otherwise = Just (h, [TxHash h | height == 0 && match], 1, 1)
-    (match : fs) = flags
-    (h : _) = hashes
-    leftM = traverseAndExtract (height - 1) (pos * 2) ntx fs hashes
-    (lh, lm, lcf, lch) = fromMaybe e leftM
-    rightM =
-      traverseAndExtract
-        (height - 1)
-        (pos * 2 + 1)
-        ntx
-        (drop lcf fs)
-        (drop lch hashes)
-    (rh, rm, rcf, rch) = fromMaybe e rightM
-    e = error "traverseAndExtract: unexpected error extracting a Maybe value"
+  Either String (Hash256, [TxHash], FlagBits, PartialMerkleTree)
+traverseAndExtract height pos ntx flags hashes =
+  case flags of
+    [] -> Left "extractMatches: ran out of flag bits"
+    (parentOfMatch : flags')
+      | height == 0 || not parentOfMatch ->
+          -- a leaf, or a subtree without matches: its hash is stored as is
+          case hashes of
+            [] -> Left "extractMatches: ran out of hashes"
+            (h : hashes') ->
+              Right (h, [TxHash h | height == 0 && parentOfMatch], flags', hashes')
+      | otherwise -> do
+          (left, leftMatches, flags'', hashes'') <-
+            traverseAndExtract (height - 1) (pos * 2) ntx flags' hashes
+          if pos * 2 + 1 < calcTreeWidth ntx (height - 1)
+            then do
+              (right, rightMatches, flags''', hashes''') <-
+                traverseAndExtract (height - 1) (pos * 2 + 1) ntx flags'' hashes''
+              -- Two branches never hash the same set of distinct transactions.
+              when (left == right) $
+                Left "extractMatches: identical left and right branches (mutated tree)"
+              return (hash2 left right, leftMatches ++ rightMatches, flags''', hashes''')
+            else return (hash2 left left, leftMatches, flags'', hashes'')
 
 -- | Extracts the matching hashes from a partial merkle tree. This will return
 -- the list of transaction hashes that have been included (set to true) in
@@ -250,31 +281,23 @@ extractMatches ::
   Either String (MerkleRoot, [TxHash])
 extractMatches net flags hashes ntx
   | ntx == 0 =
-      Left
-        "extractMatches: number of transactions can not be 0"
+      Left "extractMatches: number of transactions can not be 0"
   | ntx > net.maxBlockSize `div` 60 =
-      Left
-        "extractMatches: number of transactions excessively high"
+      Left "extractMatches: number of transactions excessively high"
   | length hashes > ntx =
-      Left
-        "extractMatches: More hashes provided than the number of transactions"
+      Left "extractMatches: More hashes provided than the number of transactions"
   | length flags < length hashes =
-      Left
-        "extractMatches: At least one bit per node and one bit per hash"
-  | isNothing resM =
-      Left
-        "extractMatches: traverseAndExtract failed"
-  | (nBitsUsed + 7) `div` 8 /= (length flags + 7) `div` 8 =
-      Left
-        "extractMatches: All bits were not consumed"
-  | nHashUsed /= length hashes =
-      Left $
-        "extractMatches: All hashes were not consumed: " ++ show nHashUsed
-  | otherwise = return (merkRoot, matches)
-  where
-    resM = traverseAndExtract (calcTreeHeight ntx) 0 ntx flags hashes
-    (merkRoot, matches, nBitsUsed, nHashUsed) = fromMaybe e resM
-    e = error "extractMatches: unexpected error extracting a Maybe value"
+      Left "extractMatches: At least one bit per node and one bit per hash"
+  | otherwise = do
+      (root, matches, unusedFlags, unusedHashes) <-
+        traverseAndExtract (calcTreeHeight ntx) 0 ntx flags hashes
+      let bitsUsed = length flags - length unusedFlags
+      -- Only the padding of the last flag byte may stay unused.
+      when ((bitsUsed + 7) `div` 8 /= (length flags + 7) `div` 8) $
+        Left "extractMatches: All bits were not consumed"
+      when (not (null unusedHashes)) $
+        Left "extractMatches: All hashes were not consumed"
+      return (root, matches)
 
 -- | Helper function to split a list in chunks 'Int' length. Last chunk may be
 -- smaller.
