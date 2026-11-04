@@ -3,6 +3,8 @@
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE ImportQualifiedPost #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TupleSections #-}
@@ -44,7 +46,9 @@
 -- missing, bytes after the last map.
 --
 -- The fields the spec defines are read and written with the functions
--- below. The roles of the spec are here too: a creator ('psbtOf'), a
+-- below, with the Taproot fields of
+-- [BIP 371](https://github.com/bitcoin/bips/blob/master/bip-0371.mediawiki).
+-- The roles of the spec are here too: a creator ('psbtOf'), a
 -- constructor ('addInput', 'addOutput'), a combiner ('combinePsbt'), a
 -- signer ('signPsbt'), a finalizer ('finalizePsbt') and a transaction
 -- extractor ('psbtTransaction'). An updater is the functions that insert
@@ -112,6 +116,22 @@ module Haskoin.Transaction.Psbt
     finalScriptWitness,
     insertFinalScriptWitness,
 
+    -- * The Taproot fields of an input
+    tapKeySig,
+    insertTapKeySig,
+    tapScriptSigs,
+    insertTapScriptSig,
+    TapLeafScript (..),
+    tapLeafScripts,
+    insertTapLeafScript,
+    TapDerivation (..),
+    inputTapDerivations,
+    insertInputTapDerivation,
+    inputTapInternalKey,
+    insertInputTapInternalKey,
+    inputTapMerkleRoot,
+    insertInputTapMerkleRoot,
+
     -- * The fields of an output
     outputRedeemScript,
     insertOutputRedeemScript,
@@ -119,6 +139,12 @@ module Haskoin.Transaction.Psbt
     insertOutputWitnessScript,
     outputDerivations,
     insertOutputDerivation,
+    outputTapInternalKey,
+    insertOutputTapInternalKey,
+    outputTapTree,
+    insertOutputTapTree,
+    outputTapDerivations,
+    insertOutputTapDerivation,
 
     -- * Proprietary fields
     Proprietary (..),
@@ -128,7 +154,7 @@ module Haskoin.Transaction.Psbt
     insertProprietary,
 
     -- * Signing
-    Signer,
+    Signer (..),
     keySigner,
     xPrvSigner,
     signPsbt,
@@ -139,35 +165,38 @@ module Haskoin.Transaction.Psbt
   )
 where
 
-import Control.Applicative ((<|>))
 import Control.DeepSeq (NFData)
 import Control.Monad (ap, forM, forM_, guard, replicateM, unless, when, zipWithM)
-import Crypto.Secp256k1 (Ctx, SecKey, derivePubKey)
+import Crypto.Hash (Digest, SHA256, digestFromByteString)
+import Crypto.Secp256k1 (Ctx, PubKey, SecKey, derivePubKey, exportXOnlyPubKey, importXOnlyPubKey, signSchnorr, verifySchnorr)
 import Data.Bifunctor (first)
 import Data.Bits (shiftL, testBit, (.&.), (.|.))
+import Data.ByteArray qualified as BA
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as B
 import Data.Base64.Types (extractBase64)
 import Data.ByteString.Base64 (decodeBase64Untyped, encodeBase64')
 import Data.Char (toUpper)
-import Data.List (stripPrefix)
+import Data.List (find, nubBy, stripPrefix)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes, fromMaybe, isJust, listToMaybe, mapMaybe)
+import Data.Maybe (catMaybes, fromMaybe, isJust, listToMaybe, mapMaybe, maybeToList)
 import Data.Serialize qualified as S
 import Data.Word (Word32, Word64, Word8)
 import GHC.Generics (Generic)
-import Haskoin.Crypto.Hash (addressHash)
+import Haskoin.Crypto.Hash (Hash160, addressHash)
 import Haskoin.Crypto.Keys.Common
 import Haskoin.Crypto.Keys.Extended
+import Haskoin.Crypto.Signature (hashToMsg, verifyHashSig)
 import Haskoin.Network.Common (VarInt (..))
 import Haskoin.Network.Data
 import Haskoin.Script.Common
 import Haskoin.Script.SigHash
 import Haskoin.Script.Standard
-import Haskoin.Transaction.Builder.Sign (SigInput (..), makeSignature)
+import Haskoin.Transaction.Builder.Sign (SigInput (..), makeSigHash, makeSignature)
 import Haskoin.Transaction.Common
 import Haskoin.Transaction.Segwit (isSegwit)
+import Haskoin.Transaction.Taproot
 import Haskoin.Util
 import Numeric (showHex)
 
@@ -367,18 +396,20 @@ modifiableOf psbt = do
   unless (psbt.version == Version2) $ Left "A PSBT of version 0 takes no input or output: its transaction is fixed"
   fromMaybe noFlags <$> txModifiable psbt.globals
 
--- | Whether an input has a signature: one that is not final, or its final
--- script or witness
+-- | Whether an input has a signature: one that is not final, a Taproot
+-- one, or its final script or witness
 hasSignatures :: PsbtMap -> Bool
-hasSignatures m = hasPartialSignatures m || isFinal m
+hasSignatures m = hasPartialSignatures m || isFinal m || any ((`elem` [tapKeySigType, tapScriptSigType]) . (.keyType)) (Map.keys m)
 
 -- | The PSBT with the sequence of the input at the index set, as an
 -- updater of BIP 370 may set one. The sequences of a PSBT of version 0
--- are in its unsigned transaction, which is fixed.
+-- are in its unsigned transaction, which is fixed. An input that is
+-- signed keeps its sequence, since every signature commits to it.
 setInputSequence :: Int -> Word32 -> Psbt -> Either String Psbt
 setInputSequence i sequence' psbt = do
   unless (psbt.version == Version2) $ Left "The sequences of a PSBT of version 0 are in its unsigned transaction, which is fixed"
   unless (i >= 0 && i < length psbt.inputs) $ Left ("The PSBT has no input " <> show i)
+  when (hasSignatures (psbt.inputs !! i)) $ Left ("Input " <> show i <> " is signed already: its sequence may not change")
   let inputs = [if j == i then insertPlainField sequenceType (word32le sequence') m else m | (j, m) <- zip [0 ..] psbt.inputs]
   tx <- transactionOf psbt.globals inputs psbt.outputs
   return $ Psbt Version2 tx psbt.globals inputs psbt.outputs
@@ -425,7 +456,7 @@ outputCountType = 0x05
 txModifiableType = 0x06
 versionType = 0xfb
 
-nonWitnessUtxoType, witnessUtxoType, partialSigType, sigHashTypeType, inRedeemScriptType, inWitnessScriptType, inDerivationType, finalScriptSigType, finalScriptWitnessType :: Word8
+nonWitnessUtxoType, witnessUtxoType, partialSigType, sigHashTypeType, inRedeemScriptType, inWitnessScriptType, inDerivationType, finalScriptSigType, finalScriptWitnessType, tapKeySigType, tapScriptSigType, tapLeafScriptType, inTapDerivationType, inTapInternalKeyType, tapMerkleRootType :: Word8
 nonWitnessUtxoType = 0x00
 witnessUtxoType = 0x01
 partialSigType = 0x02
@@ -435,6 +466,12 @@ inWitnessScriptType = 0x05
 inDerivationType = 0x06
 finalScriptSigType = 0x07
 finalScriptWitnessType = 0x08
+tapKeySigType = 0x13
+tapScriptSigType = 0x14
+tapLeafScriptType = 0x15
+inTapDerivationType = 0x16
+inTapInternalKeyType = 0x17
+tapMerkleRootType = 0x18
 
 prevTxidType, outputIndexType, sequenceType, requiredTimeType, requiredHeightType :: Word8
 prevTxidType = 0x0e
@@ -443,12 +480,15 @@ sequenceType = 0x10
 requiredTimeType = 0x11
 requiredHeightType = 0x12
 
-outRedeemScriptType, outWitnessScriptType, outDerivationType, amountType, outScriptType :: Word8
+outRedeemScriptType, outWitnessScriptType, outDerivationType, amountType, outScriptType, outTapInternalKeyType, outTapTreeType, outTapDerivationType :: Word8
 outRedeemScriptType = 0x00
 outWitnessScriptType = 0x01
 outDerivationType = 0x02
 amountType = 0x03
 outScriptType = 0x04
+outTapInternalKeyType = 0x05
+outTapTreeType = 0x06
+outTapDerivationType = 0x07
 
 -- | The types of the fields of version 2, which version 0 excludes, by
 -- map
@@ -743,9 +783,10 @@ showKey key =
 
 {- The shapes of the spec -}
 
--- | The data of a key of the spec: none, a public key, or an extended
--- public key
-data KeyShape = NoData | PublicKeyData | XpubData
+-- | The data of a key of the spec: none, a public key, an extended public
+-- key, an x-only public key, an x-only public key with a leaf hash, or a
+-- control block
+data KeyShape = NoData | PublicKeyData | XpubData | XOnlyKeyData | KeyAndLeafData | ControlBlockData
 
 -- | A field the spec defines: the shape of its key, the versions of the
 -- PSBT that may hold it, and a check of its value given the data of the
@@ -789,6 +830,15 @@ checkShape shape key = case shape of
   NoData -> unless (B.null key.keyData) $ Left ("the key " <> showKey key <> " carries data")
   PublicKeyData -> unless (isPublicKeyBytes key.keyData) $ Left ("the key " <> showKey key <> " is not a public key")
   XpubData -> unless (B.length key.keyData == 78) $ Left ("the key " <> showKey key <> " is not an extended public key")
+  XOnlyKeyData -> unless (B.length key.keyData == 32) $ Left ("the key " <> showKey key <> " is not an x-only public key")
+  KeyAndLeafData -> unless (B.length key.keyData == 64) $ Left ("the key " <> showKey key <> " is not an x-only public key and a leaf hash")
+  ControlBlockData -> unless (isControlBlockLength (B.length key.keyData)) $ Left ("the key " <> showKey key <> " is not a control block")
+
+-- | Whether a control block may have the length: 33 bytes plus 32 per
+-- node, with at most 'maxControlBlockNodes' nodes
+isControlBlockLength :: Int -> Bool
+isControlBlockLength len =
+  len >= 33 && (len - 33) `mod` 32 == 0 && (len - 33) `div` 32 <= maxControlBlockNodes
 
 -- | Whether the bytes have the length and the first byte of a public key,
 -- compressed or not. Whether they are a point of the curve is checked
@@ -836,6 +886,12 @@ inputFields =
       (inDerivationType, Field PublicKeyData [Version0, Version2] (const derivationValue)),
       (finalScriptSigType, plain anyValue),
       (finalScriptWitnessType, plain witnessValue),
+      (tapKeySigType, plain tapSigValue),
+      (tapScriptSigType, Field KeyAndLeafData [Version0, Version2] (const tapSigValue)),
+      (tapLeafScriptType, Field ControlBlockData [Version0, Version2] (const leafScriptValue)),
+      (inTapDerivationType, Field XOnlyKeyData [Version0, Version2] (const tapDerivationValue)),
+      (inTapInternalKeyType, plain xOnlyKeyValue),
+      (tapMerkleRootType, plain hashValue),
       (prevTxidType, plain2 txHashValue),
       (outputIndexType, plain2 word32Value),
       (sequenceType, plain2 word32Value),
@@ -861,10 +917,31 @@ outputFields =
       (outWitnessScriptType, plain scriptValue),
       (outDerivationType, Field PublicKeyData [Version0, Version2] (const derivationValue)),
       (amountType, plain2 amountValue),
-      (outScriptType, plain2 anyValue)
+      (outScriptType, plain2 anyValue),
+      (outTapInternalKeyType, plain xOnlyKeyValue),
+      (outTapTreeType, plain tapTreeValue),
+      (outTapDerivationType, Field XOnlyKeyData [Version0, Version2] (const tapDerivationValue))
     ]
   where
     amountValue value = () <$ decodeWord64le value
+
+tapSigValue :: ByteString -> Either String ()
+tapSigValue value = () <$ first ("is not a Taproot signature: " <>) (decodeTaprootSig value)
+
+leafScriptValue :: ByteString -> Either String ()
+leafScriptValue value = when (B.null value) $ Left "has no leaf version"
+
+tapDerivationValue :: ByteString -> Either String ()
+tapDerivationValue value = () <$ decodeTapDerivation value
+
+xOnlyKeyValue :: ByteString -> Either String ()
+xOnlyKeyValue value = unless (B.length value == 32) $ Left "is not an x-only public key"
+
+hashValue :: ByteString -> Either String ()
+hashValue value = unless (B.length value == 32) $ Left "is not a 32-byte hash"
+
+tapTreeValue :: ByteString -> Either String ()
+tapTreeValue value = () <$ decodeTapTree value
 
 word32Value :: ByteString -> Either String ()
 word32Value value = () <$ decodeWord32le value
@@ -1099,6 +1176,169 @@ outputWitnessScript = scriptField outWitnessScriptType "The witness script"
 insertOutputWitnessScript :: Script -> PsbtMap -> PsbtMap
 insertOutputWitnessScript = insertScriptField outWitnessScriptType
 
+{- The Taproot fields of BIP 371 -}
+
+-- | The key path signature of a Taproot input: PSBT_IN_TAP_KEY_SIG
+tapKeySig :: PsbtMap -> Either String (Maybe TaprootSignature)
+tapKeySig = optionalField "The key path signature" tapKeySigType decodeTaprootSig
+
+insertTapKeySig :: TaprootSignature -> PsbtMap -> PsbtMap
+insertTapKeySig = insertPlainField tapKeySigType . encodeTaprootSig
+
+-- | The script path signatures of a Taproot input, each by the x-only key
+-- and the leaf hash it is for: PSBT_IN_TAP_SCRIPT_SIG
+tapScriptSigs :: Ctx -> PsbtMap -> Either String [((PubKey, Digest SHA256), TaprootSignature)]
+tapScriptSigs ctx m =
+  forM [(key, value) | (key, value) <- Map.toAscList m, key.keyType == tapScriptSigType] $ \(key, value) -> do
+    let (keyBytes, leafBytes) = B.splitAt 32 key.keyData
+    leafKey <- maybe (Left ("The key " <> showKey key <> " is not an x-only public key and a leaf hash")) Right $ importXOnlyPubKey ctx keyBytes
+    leaf <- maybe (Left ("The key " <> showKey key <> " is not an x-only public key and a leaf hash")) Right $ digestOf leafBytes
+    signature <- first (("The value of the key " <> showKey key <> " ") <>) (decodeTaprootSig value)
+    return ((leafKey, leaf), signature)
+
+insertTapScriptSig :: Ctx -> PubKey -> Digest SHA256 -> TaprootSignature -> PsbtMap -> PsbtMap
+insertTapScriptSig ctx leafKey leaf signature =
+  Map.insert (Key tapScriptSigType (exportXOnlyPubKey ctx leafKey <> BA.convert leaf)) (encodeTaprootSig signature)
+
+-- | A leaf script a Taproot input may be spent with, and the control
+-- block that commits it to the output key: PSBT_IN_TAP_LEAF_SCRIPT
+data TapLeafScript = TapLeafScript
+  { controlBlock :: !ByteString,
+    script :: !Script,
+    leafVersion :: !TapLeafVersion
+  }
+  deriving (Eq, Show, Read, Generic)
+  deriving anyclass (NFData)
+
+-- | The leaf scripts of a Taproot input, with their control blocks:
+-- PSBT_IN_TAP_LEAF_SCRIPT
+tapLeafScripts :: Ctx -> PsbtMap -> Either String [TapLeafScript]
+tapLeafScripts ctx m =
+  forM [(key, value) | (key, value) <- Map.toAscList m, key.keyType == tapLeafScriptType] $ \(key, value) -> do
+    _ <- first (const ("The key " <> showKey key <> " is not a control block")) (decodeControlBlock ctx key.keyData)
+    when (B.null value) $ Left ("The value of the key " <> showKey key <> " has no leaf version")
+    script <- first (("The value of the key " <> showKey key <> " ") <>) (decodeScript (B.init value))
+    return (TapLeafScript key.keyData script (B.last value))
+
+insertTapLeafScript :: TapLeafScript -> PsbtMap -> PsbtMap
+insertTapLeafScript leaf =
+  Map.insert (Key tapLeafScriptType leaf.controlBlock) (S.encode leaf.script <> B.singleton leaf.leafVersion)
+
+-- | How an x-only key of a Taproot input or output derives, and the
+-- leaves it appears in: the value of PSBT_IN_TAP_BIP32_DERIVATION and
+-- PSBT_OUT_TAP_BIP32_DERIVATION. The internal key has no leaf.
+data TapDerivation = TapDerivation
+  { leafHashes :: ![Digest SHA256],
+    derivation :: !Derivation
+  }
+  deriving (Eq, Show, Generic)
+
+encodeTapDerivation :: TapDerivation -> ByteString
+encodeTapDerivation d =
+  compactSize (fromIntegral (length d.leafHashes)) <> B.concat (BA.convert <$> d.leafHashes) <> encodeDerivation d.derivation
+
+-- | A Taproot derivation: the number of leaf hashes, the hashes, then the
+-- fingerprint and the path
+decodeTapDerivation :: ByteString -> Either String TapDerivation
+decodeTapDerivation = parseAll record "a Taproot derivation"
+  where
+    record = do
+      count <- lengthOf "a Taproot derivation"
+      hashes <- replicateM count (bytesOf 32 "a Taproot derivation")
+      leaves <- maybe (refuse "is not a Taproot derivation") return (mapM digestOf hashes)
+      rest <- restOf
+      derivation <- either refuse return (decodeDerivation rest)
+      return (TapDerivation leaves derivation)
+
+tapDerivationsOf :: Word8 -> Ctx -> PsbtMap -> Either String [(PubKey, TapDerivation)]
+tapDerivationsOf t ctx m =
+  forM [(key, value) | (key, value) <- Map.toAscList m, key.keyType == t] $ \(key, value) -> do
+    public <- maybe (Left ("The key " <> showKey key <> " is not an x-only public key")) Right (importXOnlyPubKey ctx key.keyData)
+    decoded <- first (("The value of the key " <> showKey key <> " ") <>) (decodeTapDerivation value)
+    return (public, decoded)
+
+insertTapDerivation :: Word8 -> Ctx -> PubKey -> TapDerivation -> PsbtMap -> PsbtMap
+insertTapDerivation t ctx public d = Map.insert (Key t (exportXOnlyPubKey ctx public)) (encodeTapDerivation d)
+
+-- | The derivations of the x-only keys of a Taproot input, each with the
+-- leaves it appears in: PSBT_IN_TAP_BIP32_DERIVATION. The key is the
+-- point of even y with that x coordinate.
+inputTapDerivations :: Ctx -> PsbtMap -> Either String [(PubKey, TapDerivation)]
+inputTapDerivations = tapDerivationsOf inTapDerivationType
+
+insertInputTapDerivation :: Ctx -> PubKey -> TapDerivation -> PsbtMap -> PsbtMap
+insertInputTapDerivation = insertTapDerivation inTapDerivationType
+
+-- | The derivations of the x-only keys of a Taproot output:
+-- PSBT_OUT_TAP_BIP32_DERIVATION
+outputTapDerivations :: Ctx -> PsbtMap -> Either String [(PubKey, TapDerivation)]
+outputTapDerivations = tapDerivationsOf outTapDerivationType
+
+insertOutputTapDerivation :: Ctx -> PubKey -> TapDerivation -> PsbtMap -> PsbtMap
+insertOutputTapDerivation = insertTapDerivation outTapDerivationType
+
+xOnlyKeyField :: Word8 -> String -> Ctx -> PsbtMap -> Either String (Maybe PubKey)
+xOnlyKeyField t what ctx = optionalField what t (maybe (Left "is not an x-only public key") Right . importXOnlyPubKey ctx)
+
+insertXOnlyKeyField :: Word8 -> Ctx -> PubKey -> PsbtMap -> PsbtMap
+insertXOnlyKeyField t ctx = insertPlainField t . exportXOnlyPubKey ctx
+
+-- | The internal key of the Taproot coin an input spends:
+-- PSBT_IN_TAP_INTERNAL_KEY. The key is the point of even y with that x
+-- coordinate.
+inputTapInternalKey :: Ctx -> PsbtMap -> Either String (Maybe PubKey)
+inputTapInternalKey = xOnlyKeyField inTapInternalKeyType "The internal key"
+
+insertInputTapInternalKey :: Ctx -> PubKey -> PsbtMap -> PsbtMap
+insertInputTapInternalKey = insertXOnlyKeyField inTapInternalKeyType
+
+-- | The root of the script tree of the Taproot coin an input spends:
+-- PSBT_IN_TAP_MERKLE_ROOT
+inputTapMerkleRoot :: PsbtMap -> Either String (Maybe (Digest SHA256))
+inputTapMerkleRoot = optionalField "The Merkle root" tapMerkleRootType (maybe (Left "is not a 32-byte hash") Right . digestOf)
+
+insertInputTapMerkleRoot :: Digest SHA256 -> PsbtMap -> PsbtMap
+insertInputTapMerkleRoot = insertPlainField tapMerkleRootType . BA.convert
+
+-- | The internal key of a Taproot output: PSBT_OUT_TAP_INTERNAL_KEY
+outputTapInternalKey :: Ctx -> PsbtMap -> Either String (Maybe PubKey)
+outputTapInternalKey = xOnlyKeyField outTapInternalKeyType "The internal key"
+
+insertOutputTapInternalKey :: Ctx -> PubKey -> PsbtMap -> PsbtMap
+insertOutputTapInternalKey = insertXOnlyKeyField outTapInternalKeyType
+
+-- | The script tree of a Taproot output, as its leaves depth first:
+-- PSBT_OUT_TAP_TREE. 'tapTreeFromLeaves' builds the tree.
+outputTapTree :: PsbtMap -> Either String (Maybe [TapLeaf])
+outputTapTree = optionalField "The script tree" outTapTreeType decodeTapTree
+
+insertOutputTapTree :: [TapLeaf] -> PsbtMap -> PsbtMap
+insertOutputTapTree leaves = insertPlainField outTapTreeType (B.concat (encodeLeaf <$> leaves))
+  where
+    encodeLeaf :: TapLeaf -> ByteString
+    encodeLeaf leaf = B.pack [leaf.depth, leaf.version] <> sized (S.encode leaf.script)
+
+-- | A script tree: for each leaf, its depth, its leaf version and its
+-- script after its length
+decodeTapTree :: ByteString -> Either String [TapLeaf]
+decodeTapTree = parseAll leaves "a script tree"
+  where
+    leaves = do
+      rest <- restOf
+      if B.null rest
+        then return []
+        else do
+          BytesParser (\_ -> Right ((), rest)) -- put the bytes back
+          depth <- B.head <$> bytesOf 1 "a script tree"
+          version <- B.head <$> bytesOf 1 "a script tree"
+          scriptBytes <- sizedBytes "a script tree"
+          script <- either refuse return (decodeScript scriptBytes)
+          (TapLeaf depth version script :) <$> leaves
+
+-- | A 32-byte hash as a digest
+digestOf :: ByteString -> Maybe (Digest SHA256)
+digestOf = digestFromByteString
+
 {- The fields of version 2 -}
 
 -- | The flags of PSBT_GLOBAL_TX_MODIFIABLE: whether inputs may be added,
@@ -1200,60 +1440,190 @@ insertProprietary identifier subtype = Map.insert (proprietaryKey (Proprietary i
 
 {- Signing -}
 
--- | Where a signer gets the private key of a public key that a derivation
--- record names, if it has it
-type Signer = PublicKey -> Derivation -> Maybe SecKey
+-- | Where a signer gets its private keys: by a derivation record naming a
+-- public key, or by the hash of a public key when the input has no record
+-- for it. A key that is not held is 'Nothing'.
+data Signer = Signer
+  { -- | the private key of the public key a derivation record names
+    keyOfRecord :: PublicKey -> Derivation -> Maybe SecKey,
+    -- | the private key whose public key, compressed or not, has the hash
+    keyOfHash :: Hash160 -> Maybe PrivateKey
+  }
 
 -- | A signer that holds one private key, for the records of its public
--- key
+-- key and for the hash of its public key in either form
 keySigner :: Ctx -> SecKey -> Signer
-keySigner ctx secret public _ = do
-  guard (public.point == derivePubKey ctx secret)
-  return secret
+keySigner ctx secret =
+  Signer
+    { keyOfRecord = \public _ -> do
+        guard (public.point == derivePubKey ctx secret)
+        return secret,
+      keyOfHash = \h -> find ((== h) . addressHash . marshal ctx . derivePublicKey ctx) [PrivateKey secret True, PrivateKey secret False]
+    }
 
 -- | A signer that derives from an extended private key. A record names a
 -- key it derives by the fingerprint of the extended key and the path from
 -- it, or, when the origin of the extended key is given, by the
 -- fingerprint of that origin and the path from it, which starts with the
--- path of the extended key.
+-- path of the extended key. It has no key for a hash, since it cannot
+-- know which path to derive.
 xPrvSigner :: Ctx -> XPrvKey -> Maybe Derivation -> Signer
-xPrvSigner ctx xprv originM public derivation = do
-  path <- relative
-  let secret = (derivePath ctx path xprv).key
-  guard (public.point == derivePubKey ctx secret)
-  return secret
+xPrvSigner ctx xprv originM =
+  Signer
+    { keyOfRecord = \public derivation -> do
+        path <- relative derivation
+        let secret = (derivePath ctx path xprv).key
+        guard (public.point == derivePubKey ctx secret)
+        return secret,
+      keyOfHash = const Nothing
+    }
   where
     own = xPubFP ctx (deriveXPubKey ctx xprv)
-    relative
+    relative :: Derivation -> Maybe DerivPath
+    relative derivation
       | derivation.fingerprint == own = Just derivation.path
       | Just origin <- originM, derivation.fingerprint == origin.fingerprint =
           listToPath <$> stripPrefix (pathToList origin.path) (pathToList derivation.path)
       | otherwise = Nothing
 
 -- | Sign every input the signer has keys for, as the signer of the spec
--- does: a signature goes in the input, with the public key, for every
--- derivation record whose key the signer has. An input is signed against
--- the coin it spends, from its witness output or its previous transaction,
--- with the sighash it asks for, SIGHASH_ALL when it asks for none. A P2SH
--- coin needs its redeem script in the input, and a P2WSH coin its witness
--- script. An input without its coin, or with a final script already, is
--- left as it is.
+-- does. An input is signed against the coin it spends, from its previous
+-- transaction, whose id must be the one the input spends, or from its
+-- witness output alone, which only a witness signature may use, as BIP
+-- 174 requires. The keys are those the derivation records of the input
+-- name, and those the coin, its redeem script or its witness script name,
+-- by hash. The sighash is the one the input asks for, SIGHASH_ALL when it
+-- asks for none; a type no node accepts is refused. A P2SH coin needs its
+-- redeem script in the input, and a P2WSH coin its witness script; a
+-- script that does not hash to the coin is refused.
+--
+-- A Taproot coin is signed by its key path when the input has its internal
+-- key, which with the Merkle root must give the output key, and by each of
+-- its leaf scripts that is a single key check (@<key> OP_CHECKSIG@), with
+-- 'sigHashDefault' when the input asks for no sighash. The BIP 341 digest
+-- commits to the output every input spends, so every input must have its
+-- coin then.
+--
+-- An input without its coin, with a coin whose script is not standard, or
+-- with a final script already, is left as it is.
 signPsbt :: Network -> Ctx -> Signer -> Psbt -> Either String Psbt
 signPsbt net ctx signer psbt = do
-  signed <- forM (zip3 [0 ..] psbt.unsignedTx.inputs psbt.inputs) $ \(i, input, m) -> do
-    coinM <- spentOutput input m
-    case coinM of
-      Just coin | not (isFinal m) -> do
-        sighash <- fromMaybe sigHashAll <$> sigHashType m
-        sigInput <- signingInput ctx input coin sighash m
-        records <- inputDerivations ctx m
-        let signature :: PublicKey -> SecKey -> Either String ByteString
-            signature public secret = encodeTxSig net ctx <$> makeSignature net ctx psbt.unsignedTx i sigInput (PrivateKey secret public.compress)
-            keys = [(public, secret) | (public, d) <- records, Just secret <- [signer public d]]
-        signatures <- forM keys $ \(public, secret) -> (,) public <$> signature public secret
-        return (foldr (\(public, sig) -> insertPartialSignature ctx public sig) m signatures, [sighash | not (null keys)])
+  coins <- spentOutputs psbt
+  let tx = psbt.unsignedTx
+      allCoins = mapM (fmap fst) coins
+  signed <- forM (zip3 [0 ..] (zip tx.inputs psbt.inputs) coins) $ \(i, (input, m), coinM) ->
+    first (("Input " <> show i <> ": ") <>) $ case coinM of
+      Just (coin, witnessOnly)
+        | not (isFinal m),
+          Right coinScript <- unmarshal ctx coin.script -> do
+            sighashM <- sigHashType m
+            if isTaprootCoin coinScript
+              then signTaproot i m coin coinScript sighashM allCoins
+              else signEcdsa i input m coin coinScript witnessOnly sighashM
       _ -> return (m, [])
-  return $ foldr afterSignature (Psbt psbt.version psbt.unsignedTx psbt.globals (fst <$> signed) psbt.outputs) (concatMap snd signed)
+  return $ foldr afterSignature (Psbt psbt.version tx psbt.globals (fst <$> signed) psbt.outputs) (concatMap snd signed)
+  where
+    tx = psbt.unsignedTx
+
+    -- A signature per key the signer has, for a coin signed with ECDSA
+    signEcdsa i input m coin coinScript witnessOnly sighashM = do
+      let sighash = fromMaybe sigHashAll sighashM
+      checkEcdsaSigHash net sighash
+      sigInput <- signingInput ctx input coin coinScript sighash m
+      when (witnessOnly && not (isSegwit sigInput.script)) $
+        Left "the coin is given as a witness output only, which may not be signed with a non-witness signature"
+      records <- inputDerivations ctx m
+      let recordKeys = [PrivateKey secret public.compress | (public, d) <- records, Just secret <- [signer.keyOfRecord public d]]
+          hashKeys = mapMaybe signer.keyOfHash (scriptKeyHashes ctx coinScript sigInput.redeem)
+          keys = nubBy (\a b -> derivePublicKey ctx a == derivePublicKey ctx b) (recordKeys <> hashKeys)
+      signatures <- forM keys $ \key -> do
+        signature <- makeSignature net ctx tx i sigInput key
+        return (derivePublicKey ctx key, encodeTxSig net ctx signature)
+      return (foldr (\(public, sig) -> insertPartialSignature ctx public sig) m signatures, [sighash | not (null keys)])
+
+    -- A key path signature, and one per leaf that is a single key check,
+    -- for a Taproot coin
+    signTaproot i m coin coinScript sighashM allCoins = do
+      let sighash = fromMaybe sigHashDefault sighashM
+      unless (isTaprootSigHash sighash) $
+        Left ("the sighash type " <> show (fromIntegral sighash :: Word32) <> " is not one a Taproot signature may use")
+      spent <- maybe (Left "a Taproot signature needs the output every input spends") Right allCoins
+      program <- taprootProgram coinScript
+      internalM <- inputTapInternalKey ctx m
+      rootM <- inputTapMerkleRoot m
+      records <- inputTapDerivations ctx m
+      leaves <- tapLeafScripts ctx m
+      let heldXOnly leaf public =
+            listToMaybe . catMaybes $
+              [signer.keyOfRecord (PublicKey candidate True) d.derivation | (recordKey, d) <- records, sameX recordKey public, leaf `elem` map Just d.leafHashes || (leaf == Nothing && null d.leafHashes), candidate <- bothParities public]
+                <> [(.key) <$> signer.keyOfHash (addressHash (marshal ctx (PublicKey candidate True))) | candidate <- bothParities public]
+      keySig <- case internalM of
+        Nothing -> return []
+        Just internal -> do
+          let expected = taprootOutputKey ctx (TaprootOutput internal (MASTCommitment <$> rootM))
+          unless (exportXOnlyPubKey ctx expected == program) $
+            Left "the internal key and the Merkle root do not give the output key of the coin"
+          case heldXOnly Nothing internal of
+            Nothing -> return []
+            Just secret -> do
+              tweaked <- maybe (Left "the key cannot be tweaked") Right (taprootOutputSecKey ctx secret (MASTCommitment <$> rootM))
+              h <- taprootSigHash tx spent i sighash Nothing Nothing
+              return [insertTapKeySig (TaprootSignature (signSchnorr ctx tweaked (hashToMsg h)) sighash)]
+      scriptSigs <- fmap concat . forM leaves $ \leaf -> case singleKeyLeaf ctx leaf of
+        Just leafKey
+          | Just secret <- heldXOnly (Just (leafHash leaf.leafVersion leaf.script)) leafKey -> do
+              let hashOfLeaf = leafHash leaf.leafVersion leaf.script
+              h <- taprootSigHash tx spent i sighash Nothing (Just (hashOfLeaf, 0xffffffff))
+              return [insertTapScriptSig ctx leafKey hashOfLeaf (TaprootSignature (signSchnorr ctx secret (hashToMsg h)) sighash)]
+        _ -> return []
+      let inserts = keySig <> scriptSigs
+      return (foldr ($) m inserts, [sighash | not (null inserts)])
+
+    sameX a b = exportXOnlyPubKey ctx a == exportXOnlyPubKey ctx b
+    -- The two points with the x coordinate of the key
+    bothParities public =
+      mapMaybe (\prefix -> (.point) <$> eitherToMaybe (unmarshal ctx (B.cons prefix (exportXOnlyPubKey ctx public)) :: Either String PublicKey)) [0x02, 0x03]
+
+-- | The hashes of the keys a coin is signed with, from the script that
+-- names them: the coin, or its redeem or witness script
+scriptKeyHashes :: Ctx -> ScriptOutput -> Maybe RedeemScript -> [Hash160]
+scriptKeyHashes ctx coinScript innerM = case fromMaybe coinScript innerM of
+  PayPK public -> [addressHash (marshal ctx public)]
+  PayPKHash h -> [h]
+  PayWitnessPKHash h -> [h]
+  PayMulSig publics _ -> map (addressHash . marshal ctx) publics
+  _ -> []
+
+-- | The leaf key of a leaf script that is a single key check, @<key>
+-- OP_CHECKSIG@ of leaf version 0xc0
+singleKeyLeaf :: Ctx -> TapLeafScript -> Maybe PubKey
+singleKeyLeaf ctx leaf = case leaf.script.ops of
+  [OP_PUSHDATA keyBytes OPCODE, OP_CHECKSIG]
+    | leaf.leafVersion == tapscriptLeafVersion -> importXOnlyPubKey ctx keyBytes
+  _ -> Nothing
+
+-- | A sighash type an ECDSA signature may carry on the network: one of
+-- ALL, NONE and SINGLE, with ANYONECANPAY or not, and the fork id flag
+-- exactly on the networks with a fork id
+checkEcdsaSigHash :: Network -> SigHash -> Either String ()
+checkEcdsaSigHash net sighash = do
+  when (isSigHashUnknown sighash) $
+    Left ("the sighash type " <> show (fromIntegral sighash :: Word32) <> " is not one a node accepts")
+  when (isJust net.sigHashForkId && not (hasForkIdFlag sighash)) $
+    Left "the sighash type lacks the fork id flag the network requires"
+  when (isNothing' net.sigHashForkId && hasForkIdFlag sighash) $
+    Left "the sighash type has a fork id flag the network does not use"
+  where
+    isNothing' = maybe True (const False)
+
+-- | Whether a coin is a Taproot output, and its program
+isTaprootCoin :: ScriptOutput -> Bool
+isTaprootCoin = either (const False) (const True) . taprootProgram
+
+taprootProgram :: ScriptOutput -> Either String ByteString
+taprootProgram = \case
+  PayWitness 1 program | B.length program == 32 -> Right program
+  _ -> Left "not a Taproot output"
 
 -- | The PSBT after a signature with the sighash was added, as the signer
 -- of BIP 370 leaves the flags of version 2: inputs may no longer be added
@@ -1280,42 +1650,68 @@ afterSignature sighash psbt = case psbt.version of
 isFinal :: PsbtMap -> Bool
 isFinal m = any (`Map.member` m) [Key finalScriptSigType B.empty, Key finalScriptWitnessType B.empty]
 
--- | The output an input spends, from the fields of the input: its witness
--- output, or the output of its previous transaction, which must be the
--- transaction the input spends from
-spentOutput :: TxIn -> PsbtMap -> Either String (Maybe TxOut)
+-- | The output every input spends, from the fields of each input, and
+-- whether it is known from the witness output alone
+spentOutputs :: Psbt -> Either String [Maybe (TxOut, Bool)]
+spentOutputs psbt =
+  forM (zip3 [0 :: Int ..] psbt.unsignedTx.inputs psbt.inputs) $ \(i, input, m) ->
+    first (("Input " <> show i <> ": ") <>) (spentOutput input m)
+
+-- | The output an input spends, from the fields of the input: the output
+-- of its previous transaction, which must be the transaction the input
+-- spends from, or else its witness output alone. With both, the witness
+-- output must be that output. The flag tells when the witness output
+-- alone is known, which only a witness signature may rely on.
+spentOutput :: TxIn -> PsbtMap -> Either String (Maybe (TxOut, Bool))
 spentOutput input m = do
   witnessM <- witnessUtxo m
   parentM <- nonWitnessUtxo m
-  case (witnessM, parentM) of
-    (Just coin, _) -> return (Just coin)
-    (Nothing, Just parent) -> do
+  case (parentM, witnessM) of
+    (Just parent, _) -> do
       unless (txHash parent == input.outpoint.hash) $
         Left "The previous transaction of the input is not the one it spends"
-      maybe (Left "The input spends an output its previous transaction does not have") (return . Just) $
-        listToMaybe (drop (fromIntegral input.outpoint.index) parent.outputs)
+      coin <-
+        maybe (Left "The input spends an output its previous transaction does not have") return $
+          listToMaybe (drop (fromIntegral input.outpoint.index) parent.outputs)
+      forM_ witnessM $ \witnessCoin ->
+        unless (witnessCoin == coin) $
+          Left "The witness output of the input is not the output of its previous transaction"
+      return (Just (coin, False))
+    (Nothing, Just coin) -> return (Just (coin, True))
     (Nothing, Nothing) -> return Nothing
 
 -- | What an input is signed against: the script of its coin, with the
 -- redeem script of a P2SH coin and the witness script of a P2WSH coin
--- from the input, as 'makeSignature' wants them
-signingInput :: Ctx -> TxIn -> TxOut -> SigHash -> PsbtMap -> Either String SigInput
-signingInput ctx input coin sighash m = do
-  coinScript <- first ("The script of the coin " <>) (unmarshal ctx coin.script)
+-- from the input, as 'makeSignature' wants them. A redeem script must
+-- hash to the coin, and a witness script to the witness program, as BIP
+-- 174 requires of a signer.
+signingInput :: Ctx -> TxIn -> TxOut -> ScriptOutput -> SigHash -> PsbtMap -> Either String SigInput
+signingInput ctx input coin coinScript sighash m = do
   redeemM <- traverse (decodeOutput ctx) =<< inputRedeemScript m
   witnessM <- traverse (decodeOutput ctx) =<< inputWitnessScript m
+  forM_ redeemM $ \redeem -> do
+    unless (isPayScriptHash coinScript) $ Left "the input has a redeem script, but its coin is not pay-to-script-hash"
+    redeemScript <- encodeOutput ctx redeem
+    unless (toP2SH redeemScript == coinScript) $ Left "the redeem script of the input does not hash to its coin"
   -- A SegWit coin, nested in P2SH or not, is signed against its witness
   -- program; any other against its own script
-  let script = case redeemM of
+  let program = case redeemM of
         Just redeem | not (isSegwit coinScript), isSegwit redeem -> redeem
         _ -> coinScript
+  forM_ witnessM $ \witness -> do
+    unless (isPayWitnessScriptHash program) $ Left "the input has a witness script, but its coin is not pay-to-witness-script-hash"
+    witnessScript <- encodeOutput ctx witness
+    unless (toP2WSH witnessScript == program) $ Left "the witness script of the input does not hash to its witness program"
   return
     SigInput
-      { script = script,
+      { script = program,
         value = coin.value,
         outpoint = input.outpoint,
         sighash = sighash,
-        redeem = witnessM <|> redeemM
+        redeem = case program of
+          PayWitnessScriptHash _ -> witnessM
+          PayScriptHash _ -> redeemM
+          _ -> Nothing
       }
 
 {- Finalizing -}
@@ -1323,44 +1719,63 @@ signingInput ctx input coin sighash m = do
 -- | Finalize every input whose signatures suffice for the coin it spends,
 -- as the finalizer of the spec does: the final script and witness go in
 -- the input, and its partial signatures, sighash type, redeem script,
--- witness script and derivation records go, as Bitcoin Core clears them.
--- Its coin and the keys the spec does not define stay. The coins
--- finalized are those of P2PK, P2PKH and multisig scripts, P2SH coins
--- with their redeem script, P2WPKH coins, and P2WSH coins with their
--- witness script, nested in P2SH or not. Any other input, or one without
--- enough signatures, stays as it is.
-finalizePsbt :: Ctx -> Psbt -> Either String Psbt
-finalizePsbt ctx psbt = do
-  inputs <- zipWithM finalized psbt.unsignedTx.inputs psbt.inputs
-  return $ Psbt psbt.version psbt.unsignedTx psbt.globals inputs psbt.outputs
+-- witness script, derivation records and Taproot fields go, as Bitcoin
+-- Core clears them. Its coin and the keys the spec does not define stay.
+-- Every signature used is verified first, against the digest of the coin
+-- and the sighash type of the input when it has one; a signature that
+-- does not verify, or whose sighash type is not the one of the input, is
+-- refused, as @PSBTInputSignedAndVerified@ refuses it in Bitcoin Core.
+-- The coins finalized are those of P2PK, P2PKH and multisig scripts, P2SH
+-- coins with their redeem script, P2WPKH coins, P2WSH coins with their
+-- witness script, nested in P2SH or not, and Taproot coins by their key
+-- path signature or by a leaf script that is a single key check. Any
+-- other input, or one without enough signatures, stays as it is.
+finalizePsbt :: Network -> Ctx -> Psbt -> Either String Psbt
+finalizePsbt net ctx psbt = do
+  coins <- spentOutputs psbt
+  let allCoins = mapM (fmap fst) coins
+  inputs <- forM (zip3 [0 ..] (zip tx.inputs psbt.inputs) coins) $ \(i, (input, m), coinM) ->
+    first (("Input " <> show i <> ": ") <>) $ case coinM of
+      Just (coin :: TxOut, _)
+        | not (isFinal m),
+          Right coinScript <- unmarshal ctx coin.script -> do
+            finals <-
+              if isTaprootCoin coinScript
+                then finalTaprootScripts ctx tx allCoins i m coinScript
+                else finalScripts net ctx tx i input coin coinScript m
+            return $ case finals of
+              Just (scriptSig, stack) ->
+                foldr ($) (cleared m) $
+                  [insertFinalScriptSig scriptSig | not (B.null scriptSig)]
+                    <> [insertFinalScriptWitness stack | not (null stack)]
+              Nothing -> m
+      _ -> return m
+  return $ Psbt psbt.version tx psbt.globals inputs psbt.outputs
   where
-    finalized input m = do
-      coinM <- spentOutput input m
-      case coinM of
-        Just coin | not (isFinal m) -> do
-          coinScript <- first ("The script of the coin " <>) (unmarshal ctx coin.script)
-          finals <- finalScripts ctx m coinScript
-          return $ case finals of
-            Just (scriptSig, stack) ->
-              foldr ($) (cleared m) $
-                [insertFinalScriptSig scriptSig | not (B.null scriptSig)]
-                  <> [insertFinalScriptWitness stack | not (null stack)]
-            Nothing -> m
-        _ -> return m
-    cleared =
-      deletePartialSignatures
-        . deleteSigHashType
-        . deletePlainField inRedeemScriptType
-        . deletePlainField inWitnessScriptType
-        . Map.filterWithKey (\key _ -> key.keyType /= inDerivationType)
+    tx = psbt.unsignedTx
+    cleared = Map.filterWithKey (\key _ -> key.keyType `notElem` clearedTypes)
+    clearedTypes =
+      [partialSigType, sigHashTypeType, inRedeemScriptType, inWitnessScriptType, inDerivationType, tapKeySigType, tapScriptSigType, tapLeafScriptType, inTapDerivationType, inTapInternalKeyType, tapMerkleRootType]
 
--- | The final script and witness of an input, from its partial signatures
--- and the script of its coin, when they suffice
-finalScripts :: Ctx -> PsbtMap -> ScriptOutput -> Either String (Maybe (ByteString, WitnessStack))
-finalScripts ctx m coinScript = do
+-- | The final script and witness of an input signed with ECDSA, from its
+-- partial signatures and the script of its coin, when they suffice. Every
+-- signature is verified first.
+finalScripts :: Network -> Ctx -> Tx -> Int -> TxIn -> TxOut -> ScriptOutput -> PsbtMap -> Either String (Maybe (ByteString, WitnessStack))
+finalScripts net ctx tx i input coin coinScript m = do
+  sighashM <- sigHashType m
   signatures <- partialSignatures ctx m
   redeemM <- inputRedeemScript m
   witnessM <- inputWitnessScript m
+  sigInput <- signingInput ctx input coin coinScript (fromMaybe sigHashAll sighashM) m
+  forM_ signatures $ \(public, bytes) -> do
+    (sig, sh) <- case decodeTxSig net ctx bytes of
+      Right (TxSignature sig sh) -> return (sig, sh)
+      _ -> Left ("the signature of the key " <> cs' (marshal ctx public) <> " is not a valid signature")
+    forM_ sighashM $ \asked ->
+      unless (sh == asked) $ Left ("the signature of the key " <> cs' (marshal ctx public) <> " does not use the sighash type of the input")
+    digest <- makeSigHash net ctx tx i sigInput.script coin.value sh sigInput.redeem
+    unless (verifyHashSig ctx digest sig public.point) $
+      Left ("the signature of the key " <> cs' (marshal ctx public) <> " does not verify")
   let signatureOf public = lookup public signatures
       signatureOfHash h = listToMaybe [(public, signature) | (public, signature) <- signatures, addressHash (marshal ctx public) == h]
       enough keys n = let found = mapMaybe signatureOf keys in if length found >= n then Just (take n found) else Nothing
@@ -1395,3 +1810,51 @@ finalScripts ctx m coinScript = do
     _
       | isSegwit coinScript -> (B.empty,) <$> witnessOf coinScript
       | otherwise -> (\found -> (scriptOf found, [])) <$> items coinScript
+  where
+    cs' = show . encodeHex
+
+-- | The final witness of a Taproot input: its key path signature, or the
+-- signature of the first leaf script that is a single key check with the
+-- script and its control block. Every signature is verified first,
+-- against the output key and the digest of its leaf.
+finalTaprootScripts :: Ctx -> Tx -> Maybe [TxOut] -> Int -> PsbtMap -> ScriptOutput -> Either String (Maybe (ByteString, WitnessStack))
+finalTaprootScripts ctx tx allCoins i m coinScript = do
+  program <- taprootProgram coinScript
+  outKey <- maybe (Left "the coin is not a Taproot output") Right (importXOnlyPubKey ctx program)
+  sighashM <- sigHashType m
+  keySigM <- tapKeySig m
+  scriptSigs <- tapScriptSigs ctx m
+  leaves <- tapLeafScripts ctx m
+  let sameType :: TaprootSignature -> Either String ()
+      sameType signature = forM_ sighashM $ \asked ->
+        unless (signature.hash == asked) $ Left "a Taproot signature does not use the sighash type of the input"
+  case keySigM of
+    Just signature -> do
+      sameType signature
+      spent <- maybe (Left "a Taproot signature needs the output every input spends") Right allCoins
+      digest <- taprootSigHash tx spent i signature.hash Nothing Nothing
+      unless (verifySchnorr ctx outKey signature.sig (hashToMsg digest)) $
+        Left "the key path signature does not verify"
+      return (Just (B.empty, [encodeTaprootSig signature]))
+    Nothing -> do
+      let candidates =
+            [ (leaf, leafKey, signature)
+            | leaf <- leaves,
+              Just leafKey <- [singleKeyLeaf ctx leaf],
+              Just signature <- [lookup (leafKey, leafHash leaf.leafVersion leaf.script) [((k, h), sig) | ((k, h), sig) <- scriptSigs, sameX k leafKey]]
+            ]
+      case candidates of
+        [] -> return Nothing
+        (leaf, leafKey, signature) : _ -> do
+          sameType signature
+          spent <- maybe (Left "a Taproot signature needs the output every input spends") Right allCoins
+          (v, internalKey, proof) <- decodeControlBlock ctx leaf.controlBlock
+          let spd = ScriptPathData Nothing [] leaf.script (odd v) (v .&. 0xfe) internalKey proof
+          unless (verifyScriptPathData ctx outKey spd) $
+            Left "the control block of the leaf does not commit it to the output key"
+          digest <- taprootSigHash tx spent i signature.hash Nothing (Just (leafHash leaf.leafVersion leaf.script, 0xffffffff))
+          unless (verifySchnorr ctx leafKey signature.sig (hashToMsg digest)) $
+            Left "the script path signature does not verify"
+          return (Just (B.empty, [encodeTaprootSig signature, S.encode leaf.script, leaf.controlBlock]))
+  where
+    sameX a b = exportXOnlyPubKey ctx a == exportXOnlyPubKey ctx b

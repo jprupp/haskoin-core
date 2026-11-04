@@ -201,7 +201,7 @@ testMarshal gen = do
   prop ("Marshal marshalPut/marshalGet identity for " <> name) $
     forAll gen $ \(s, a) -> do
       (unmarshal s . marshal s) a `shouldBe` Right a
-      (unmarshalLazy s . marshalLazy s) a `shouldBe` a
+      (unmarshalLazy s . marshalLazy s) a `shouldBe` Right a
   where
     name = show $ T.typeRep $ proxy gen
     proxy :: Gen (s, a) -> Proxy a

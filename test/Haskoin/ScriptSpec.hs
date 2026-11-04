@@ -860,7 +860,7 @@ scriptSpec net ctx =
               out = unmarshal ctx scriptPubKey
               sat = val * 100000000
               tx = spendTx scriptPubKey sat scriptSig
-              ver o = verifyStdInput net ctx tx 0 o sat
+              ver o = verifyStdInput net ctx tx [(o, sat, (head tx.inputs).outpoint)] 0
               valid = either (const False) ver out
           assertBool desc $ if res == "OK" then valid else not valid
 
@@ -886,7 +886,7 @@ forkIdScriptSpec net ctx =
             scriptPubKey = parseScript soStr
             out = unmarshal ctx scriptPubKey
             tx = spendTx scriptPubKey val scriptSig
-            ver o = verifyStdInput net ctx tx 0 o val
+            ver o = verifyStdInput net ctx tx [(o, val, (head tx.inputs).outpoint)] 0
             valid = either (const False) ver out
         case res of
           "OK" -> valid `shouldBe` True

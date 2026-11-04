@@ -25,6 +25,7 @@ module Haskoin.Transaction.Builder.Sign
     signTx,
     findInputIndex,
     signInput,
+    signTaprootInput,
     buildInput,
     sigKeys,
   )
@@ -35,6 +36,7 @@ import Control.Monad
 import Crypto.Secp256k1
 import Data.Aeson
 import Data.Aeson.Encoding
+import qualified Data.ByteString as B
 import Data.Bytes.Get
 import Data.Bytes.Put
 import Data.Bytes.Serial
@@ -52,12 +54,15 @@ import Haskoin.Network.Data
 import Haskoin.Script
 import Haskoin.Transaction.Common
 import Haskoin.Transaction.Segwit
+import Haskoin.Transaction.Taproot
 import Haskoin.Util
 
 -- | Data type used to specify the signing parameters of a transaction input.
 -- To sign an input, the previous output script, outpoint and sighash are
 -- required. When signing a pay to script hash output, an additional redeem
--- script is required.
+-- script is required. A Taproot output ('PayWitness' version 1) is signed
+-- by its key path, with 'sigHashDefault' or one of the hash types
+-- 'isTaprootSigHash' accepts.
 data SigInput = SigInput
   { -- | output script to spend
     script :: !ScriptOutput,
@@ -122,9 +127,59 @@ signTx net ctx otx sigis allKeys
   | otherwise = foldM go otx $ findInputIndex ((.outpoint) . fst) sigis ti
   where
     ti = otx.inputs
-    go tx (sigi@(SigInput so _ _ _ rdmM, _), i) = do
+    go tx (sigi@(SigInput so _ _ sh rdmM, _), i) = do
       keys <- sigKeys ctx so rdmM allKeys
-      foldM (\t k -> signInput net ctx t i sigi k) tx keys
+      if isTaprootOutput so
+        then do
+          spent <- spentOutputs
+          foldM (\t k -> signTaprootInput ctx t spent i sh k.key) tx keys
+        else foldM (\t k -> signInput net ctx t i sigi k) tx keys
+    -- The outputs every input spends, which a Taproot signature commits
+    -- to: a nested SegWit program is spent as its P2SH wrapper
+    spentOutputs =
+      forM ti $ \txin ->
+        case find ((== txin.outpoint) . (.outpoint) . fst) sigis of
+          Just (s, nested) -> (\so -> TxOut s.value (marshal ctx so)) <$> coinScript s nested
+          Nothing -> Left "signTx: a Taproot signature needs the output every input spends"
+    coinScript s nested
+      | nested && isSegwit s.script = toP2SH <$> encodeOutput ctx s.script
+      | otherwise = Right s.script
+
+-- | Whether the output is a Taproot output: a witness program of version 1
+-- that is 32 bytes long
+isTaprootOutput :: ScriptOutput -> Bool
+isTaprootOutput = \case
+  PayWitness 1 program -> B.length program == 32
+  _ -> False
+
+-- | Sign a Taproot input by its key path, as BIP 341 defines it: the
+-- Schnorr signature of the digest of 'taprootSigHash' goes in the witness
+-- of the input, with its hash type byte unless the type is
+-- 'sigHashDefault'. The secret key is the one of the output key, which
+-- 'taprootOutputSecKey' derives from the internal key. The outputs spent
+-- are those of every input, in order. Fails when the index is out of
+-- range, when the spent outputs do not match the inputs, or when the hash
+-- type is not one 'isTaprootSigHash' accepts.
+signTaprootInput ::
+  Ctx ->
+  Tx ->
+  -- | outputs spent, one per input
+  [TxOut] ->
+  -- | input index
+  Int ->
+  SigHash ->
+  -- | the secret key of the output key
+  SecKey ->
+  Either String Tx
+signTaprootInput ctx tx spent i sh secret = do
+  h <- taprootSigHash tx spent i sh Nothing Nothing
+  let signature = TaprootSignature (signSchnorr ctx secret (hashToMsg h)) sh
+      stacks
+        | null tx.witness = replicate (length tx.inputs) []
+        | otherwise = tx.witness
+  unless (length stacks == length tx.inputs) $
+    Left "signTaprootInput: Invalid number of witness stacks"
+  return tx {witness = updateIndex i stacks (const [encodeTaprootSig signature])}
 
 -- | Sign a single input in a transaction deterministically (RFC-6979).  The
 -- nesting flag only affects the behavior of segwit inputs.
@@ -138,6 +193,8 @@ signInput ::
   PrivateKey ->
   Either String Tx
 signInput net ctx tx i (sigIn@(SigInput so val _ _ rdmM), nest) key = do
+  when (isTaprootOutput so) $
+    Left "signInput: a Taproot input is signed with signTaprootInput"
   sig <- makeSignature net ctx tx i sigIn key
   si <- buildInput net ctx tx i so val rdmM sig $ derivePublicKey ctx key
   w <- updatedWitnessData net ctx tx i so si
@@ -191,7 +248,9 @@ findInputIndex getOutPoint as ti =
     g (Nothing, _) = Nothing
 
 -- | Find from the list of provided private keys which one is required to sign
--- the 'ScriptOutput'.
+-- the 'ScriptOutput'. For a Taproot output, the key returned is the secret
+-- key of the output key: a key whose x-only public key is the output key,
+-- or the tweak of a key without a script tree, as BIP 86 spends.
 sigKeys ::
   Ctx ->
   ScriptOutput ->
@@ -208,6 +267,9 @@ sigKeys ctx so rdmM keys =
     (PayScriptHash _, Just rdm) -> sigKeys ctx rdm Nothing keys
     (PayWitnessPKHash h, _) -> return $ keyByHash h
     (PayWitnessScriptHash _, Just rdm) -> sigKeys ctx rdm Nothing keys
+    (PayWitness 1 program, Nothing)
+      | B.length program == 32 ->
+          return [PrivateKey k True | Just k <- map (taprootKey program) keys]
     _ -> Left "sigKeys: Could not decode output script"
   where
     zipKeys =
@@ -219,6 +281,14 @@ sigKeys ctx so rdmM keys =
       ]
     keyByHash h = fmap fst . maybeToList . findKey h $ zipKeys
     findKey h = find $ (== Just h) . addressHash160 . pubKeyAddr ctx . snd
+    -- The secret key of a Taproot output key: the key itself when its
+    -- x-only public key is the output key, or its tweak without a tree
+    taprootKey program k
+      | exportXOnlyPubKey ctx (derivePubKey ctx k) == program = Just k
+      | Just tweaked <- taprootOutputSecKey ctx k Nothing,
+        exportXOnlyPubKey ctx (derivePubKey ctx tweaked) == program =
+          Just tweaked
+      | otherwise = Nothing
 
 -- | Construct an input for a transaction given a signature, public key and data
 -- about the previous output.
@@ -239,7 +309,8 @@ buildInput ::
   PublicKey ->
   Either String ScriptInput
 buildInput net ctx tx i so val rdmM sig pub = do
-  when (i >= length tx.inputs) $ Left "buildInput: Invalid input index"
+  when (i < 0 || i >= length tx.inputs) $ Left "buildInput: Invalid input index"
+  when (isTaprootOutput so) $ Left "buildInput: a Taproot input has no input script"
   case (so, rdmM) of
     (PayScriptHash _, Just rdm) ->
       buildScriptHashInput rdm
@@ -312,6 +383,8 @@ makeSigHash ::
   Maybe RedeemScript ->
   Either String Hash256
 makeSigHash net ctx tx i so val sh rdmM = do
+  when (isTaprootOutput so) $
+    Left "makeSigHash: the digest of a Taproot input is taprootSigHash"
   script <- encodeOutput ctx so'
   h net tx script val i sh
   where

@@ -27,6 +27,7 @@ module Haskoin.Script.SigHash
     sigHashAll,
     sigHashNone,
     sigHashSingle,
+    sigHashDefault,
     anyoneCanPay,
     hasForkIdFlag,
     setAnyoneCanPay,
@@ -125,6 +126,12 @@ instance FromJSON SigHash where
 instance ToJSON SigHash where
   toJSON = Number . fromIntegral
   toEncoding (SigHash n) = toEncoding n
+
+-- | SIGHASH_DEFAULT of BIP 341: the hash type 0, which a Taproot key path
+-- signature leaves out and which signs like 'sigHashAll'. It is only valid
+-- in Taproot signatures.
+sigHashDefault :: SigHash
+sigHashDefault = 0
 
 -- | SIGHASH_NONE as a byte.
 sigHashNone :: SigHash

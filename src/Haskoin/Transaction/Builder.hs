@@ -28,6 +28,7 @@ module Haskoin.Transaction.Builder
     makeSignature,
     signInput,
     signNestedInput,
+    signTaprootInput,
     verifyStdTx,
     mergeTxs,
     sigKeys,
@@ -39,31 +40,29 @@ module Haskoin.Transaction.Builder
     Coin (..),
     chooseCoins,
     chooseCoinsSink,
-    chooseMSCoins,
-    chooseMSCoinsSink,
     countMulSig,
     greedyAddSink,
-    guessTxFee,
-    guessMSTxFee,
+
+    -- * Size and fee estimation
+    InputKind (..),
+    OutputKind (..),
+    guessTxWeight,
     guessTxSize,
-    guessMSSize,
+    guessTxFee,
+    inputWeight,
+    outputSize,
   )
 where
 
-import Control.Applicative ((<|>))
-import Control.Arrow (first)
 import Control.Monad (foldM, unless)
 import Control.Monad.Identity (runIdentity)
 import Crypto.Secp256k1
 import Data.ByteString qualified as B
-import Data.Bytes.Get
-import Data.Bytes.Put
-import Data.Bytes.Serial
 import Data.Conduit (ConduitT, Void, await, runConduit, (.|))
 import Data.Conduit.List (sourceList)
 import Data.Either (fromRight, rights)
-import Data.List (nub)
-import Data.Maybe (catMaybes, fromJust, isJust)
+import Data.List (find, nub)
+import Data.Maybe (catMaybes, fromJust, isJust, mapMaybe)
 import Data.String.Conversions (cs)
 import Data.Text (Text)
 import Data.Word (Word64)
@@ -71,114 +70,68 @@ import Haskoin.Address
 import Haskoin.Crypto.Hash (Hash256, addressHash)
 import Haskoin.Crypto.Keys.Common
 import Haskoin.Crypto.Signature
-import Haskoin.Network.Common
 import Haskoin.Network.Data
 import Haskoin.Script
-import Haskoin.Transaction.Builder.Sign (SigInput, buildInput, makeSignature, sigKeys)
+import Haskoin.Transaction.Builder.Sign (SigInput, buildInput, makeSignature, sigKeys, signTaprootInput)
 import Haskoin.Transaction.Builder.Sign qualified as Sign
 import Haskoin.Transaction.Common
 import Haskoin.Transaction.Segwit
+import Haskoin.Transaction.Taproot
 import Haskoin.Util
 
--- | Any type can be used as a Coin if it can provide a value in Satoshi.
--- The value is used in coin selection algorithms.
+-- | Any type can be used as a Coin if it can provide a value in Satoshi and
+-- say how it is spent. The value and the kind of input are used in coin
+-- selection algorithms, to reach the amount and to estimate the fee.
 class Coin c where
   coinValue :: c -> Word64
+  coinInputKind :: c -> InputKind
 
--- | Coin selection algorithm for normal (non-multisig) transactions. This
--- function returns the selected coins together with the amount of change to
--- send back to yourself, taking the fee into account.
+-- | Coin selection algorithm. This function returns the selected coins
+-- together with the amount of change to send back to yourself, taking the
+-- fee into account. The fee is estimated from the kind of input each coin
+-- is spent with and the kinds of the outputs, with 'guessTxFee'.
 chooseCoins ::
   (Coin c) =>
   -- | value to send
   Word64 ->
-  -- | fee per byte
+  -- | fee per virtual byte
   Word64 ->
-  -- | number of outputs (including change)
-  Int ->
+  -- | outputs of the transaction, including the change
+  [OutputKind] ->
   -- | try to find better solutions
   Bool ->
   -- | list of ordered coins to choose from
   [c] ->
   -- | coin selection and change
   Either String ([c], Word64)
-chooseCoins target fee nOut continue coins =
+chooseCoins target fee outputs continue coins =
   runIdentity . runConduit $
-    sourceList coins .| chooseCoinsSink target fee nOut continue
+    sourceList coins .| chooseCoinsSink target fee outputs continue
 
--- | Coin selection algorithm for normal (non-multisig) transactions. This
--- function returns the selected coins together with the amount of change to
--- send back to yourself, taking the fee into account. This version uses a Sink
--- for conduit-based coin selection.
+-- | Coin selection algorithm. This function returns the selected coins
+-- together with the amount of change to send back to yourself, taking the
+-- fee into account. This version uses a Sink for conduit-based coin
+-- selection.
 chooseCoinsSink ::
   (Monad m, Coin c) =>
   -- | value to send
   Word64 ->
-  -- | fee per byte
+  -- | fee per virtual byte
   Word64 ->
-  -- | number of outputs (including change)
-  Int ->
+  -- | outputs of the transaction, including the change
+  [OutputKind] ->
   -- | try to find better solution
   Bool ->
   -- | coin selection and change
   ConduitT c Void m (Either String ([c], Word64))
-chooseCoinsSink target fee nOut continue
+chooseCoinsSink target fee outputs continue
   | target > 0 =
       maybeToEither err
-        <$> greedyAddSink target (guessTxFee fee nOut) continue
+        <$> greedyAddSink target feeOf continue
   | otherwise = return $ Left "chooseCoins: Target must be > 0"
   where
     err = "chooseCoins: No solution found"
-
--- | Coin selection algorithm for multisig transactions. This function returns
--- the selected coins together with the amount of change to send back to
--- yourself, taking the fee into account. This function assumes all the coins
--- are script hash outputs that send funds to a multisignature address.
-chooseMSCoins ::
-  (Coin c) =>
-  -- | value to send
-  Word64 ->
-  -- | fee per byte
-  Word64 ->
-  -- | m of n multisig
-  (Int, Int) ->
-  -- | number of outputs (including change)
-  Int ->
-  -- | try to find better solution
-  Bool ->
-  [c] ->
-  -- | coin selection change amount
-  Either String ([c], Word64)
-chooseMSCoins target fee ms nOut continue coins =
-  runIdentity . runConduit $
-    sourceList coins .| chooseMSCoinsSink target fee ms nOut continue
-
--- | Coin selection algorithm for multisig transactions. This function returns
--- the selected coins together with the amount of change to send back to
--- yourself, taking the fee into account. This function assumes all the coins
--- are script hash outputs that send funds to a multisignature address. This
--- version uses a Sink if you need conduit-based coin selection.
-chooseMSCoinsSink ::
-  (Monad m, Coin c) =>
-  -- | value to send
-  Word64 ->
-  -- | fee per byte
-  Word64 ->
-  -- | m of n multisig
-  (Int, Int) ->
-  -- | number of outputs (including change)
-  Int ->
-  -- | try to find better solution
-  Bool ->
-  -- | coin selection and change
-  ConduitT c Void m (Either String ([c], Word64))
-chooseMSCoinsSink target fee ms nOut continue
-  | target > 0 =
-      maybeToEither err
-        <$> greedyAddSink target (guessMSTxFee fee ms nOut) continue
-  | otherwise = return $ Left "chooseMSCoins: Target must be > 0"
-  where
-    err = "chooseMSCoins: No solution found"
+    feeOf coins = guessTxFee fee (map coinInputKind coins) outputs
 
 -- | Select coins greedily by starting from an empty solution. If the 'continue'
 -- flag is set, the algorithm will try to find a better solution in the stream
@@ -190,8 +143,8 @@ greedyAddSink ::
   (Monad m, Coin c) =>
   -- | value to send
   Word64 ->
-  -- | coin count to fee function
-  (Int -> Word64) ->
+  -- | fee of a transaction that spends the coins given
+  ([c] -> Word64) ->
   -- | try to find better solutions
   Bool ->
   -- | coin selection and change
@@ -200,15 +153,15 @@ greedyAddSink target guessFee continue =
   go [] 0 [] 0
   where
     -- The goal is the value we must reach (including the fee) for a certain
-    -- amount of selected coins.
-    goal c = target + guessFee c
+    -- selection of coins.
+    goal coins = target + guessFee coins
     go acc aTot ps pTot =
       await >>= \case
         -- A coin is available in the stream
         Just coin -> do
           let val = coinValue coin
           -- We have reached the goal using this coin
-          if val + aTot >= goal (length acc + 1)
+          if val + aTot >= goal (coin : acc)
             then -- If we want to continue searching for better solutions
               if continue
                 then -- This solution is the first one or
@@ -218,10 +171,10 @@ greedyAddSink target guessFee continue =
                       go [] 0 (coin : acc) (val + aTot)
                     else -- Otherwise, we stop here and return the previous
                     -- solution
-                      return $ Just (ps, pTot - goal (length ps))
+                      return $ Just (ps, pTot - goal ps)
                 else -- Otherwise, return this solution
                   return $
-                    Just (coin : acc, val + aTot - goal (length acc + 1))
+                    Just (coin : acc, val + aTot - goal (coin : acc))
             else -- We have not yet reached the goal. Add the coin to the
             -- accumulator
               go (coin : acc) (val + aTot) ps pTot
@@ -232,97 +185,122 @@ greedyAddSink target guessFee continue =
               then -- If no solution was found, return Nothing
                 Nothing
               else -- If we have a solution, return it
-                Just (ps, pTot - goal (length ps))
+                Just (ps, pTot - goal ps)
 
--- | Estimate tranasction fee to pay based on transaction size estimation.
-guessTxFee :: Word64 -> Int -> Int -> Word64
-guessTxFee byteFee nOut nIn =
-  byteFee * fromIntegral (guessTxSize nIn [] nOut 0)
+{- Size and fee estimation -}
 
--- | Same as 'guessTxFee' but for multisig transactions.
-guessMSTxFee :: Word64 -> (Int, Int) -> Int -> Int -> Word64
-guessMSTxFee byteFee ms nOut nIn =
-  byteFee * fromIntegral (guessTxSize 0 (replicate nIn ms) nOut 0)
+-- | The kind of input a coin is spent with. Keys are compressed, as every
+-- SegWit kind requires. A multisig kind is @m@ of @n@.
+data InputKind
+  = -- | pay-to-public-key-hash
+    InputPKHash
+  | -- | pay-to-script-hash multisig, @m@ of @n@
+    InputMulSig Int Int
+  | -- | pay-to-witness-public-key-hash
+    InputWitnessPKHash
+  | -- | pay-to-witness-script-hash multisig, @m@ of @n@
+    InputWitnessMulSig Int Int
+  | -- | pay-to-witness-public-key-hash nested in pay-to-script-hash
+    InputNestedWitnessPKHash
+  | -- | pay-to-witness-script-hash multisig nested in pay-to-script-hash
+    InputNestedWitnessMulSig Int Int
+  | -- | Taproot, spent by its key path
+    InputTaproot
+  deriving (Eq, Show, Read)
 
--- | Computes an upper bound on the size of a transaction based on some known
--- properties of the transaction.
-guessTxSize ::
-  -- | number of regular transaction inputs
-  Int ->
-  -- | multisig m of n for each input
-  [(Int, Int)] ->
-  -- | number of P2PKH outputs
-  Int ->
-  -- | number of P2SH outputs
-  Int ->
-  -- | upper bound on transaction size
-  Int
-guessTxSize pki msi pkout msout =
-  8 + inpLen + inp + outLen + out
+-- | The kind of an output, which decides its size
+data OutputKind
+  = OutputPKHash
+  | OutputScriptHash
+  | OutputWitnessPKHash
+  | OutputWitnessScriptHash
+  | OutputTaproot
+  deriving (Eq, Show, Read)
+
+-- | An upper bound on the weight, in weight units of BIP 141, of a signed
+-- transaction with the inputs and outputs given. A signature is counted as
+-- 72 bytes with its hash type, the most a low-S DER signature takes, and a
+-- Taproot signature as 65 bytes.
+guessTxWeight :: [InputKind] -> [OutputKind] -> Int
+guessTxWeight inputs outputs = 4 * base + witness
   where
-    inpLen =
-      B.length
-        . runPutS
-        . serialize
-        . VarInt
-        . fromIntegral
-        $ length msi + pki
-    outLen =
-      B.length
-        . runPutS
-        . serialize
-        . VarInt
-        . fromIntegral
-        $ pkout + msout
-    inp = pki * 148 + sum (map guessMSSize msi)
-    -- (20: hash160) + (5: opcodes) +
-    -- (1: script len) + (8: Word64)
-    out =
-      pkout * 34
-        +
-        -- (20: hash160) + (3: opcodes) +
-        -- (20: hash160) + (3: opcodes) +
-        -- (20: hash160) + (3: opcodes) +
-        -- (20: hash160) + (3: opcodes) +
-        -- (1: script len) + (8: Word64)
-        -- (1: script len) + (8: Word64)
-        -- (1: script len) + (8: Word64)
-        -- (1: script len) + (8: Word64)
+    base =
+      8 -- version and lock time
+        + varIntSize (length inputs)
+        + sum (map (fst . inputWeight) inputs)
+        + varIntSize (length outputs)
+        + sum (map outputSize outputs)
+    witnessBytes = sum (map (snd . inputWeight) inputs)
+    witness
+      | witnessBytes > 0 = 2 + witnessBytes -- the marker and the flag
+      | otherwise = 0
 
-        -- (20: hash160) + (3: opcodes) +
+-- | An upper bound on the virtual size, in virtual bytes of BIP 141, of a
+-- signed transaction with the inputs and outputs given: its weight divided
+-- by four, rounded up. Nodes charge fees by virtual byte.
+guessTxSize :: [InputKind] -> [OutputKind] -> Int
+guessTxSize inputs outputs = (guessTxWeight inputs outputs + 3) `div` 4
 
-        -- (20: hash160) + (3: opcodes) +
-        -- (1: script len) + (8: Word64)
-        -- (1: script len) + (8: Word64)
+-- | Estimate the fee to pay, from a fee rate per virtual byte and the
+-- inputs and outputs of the transaction.
+guessTxFee :: Word64 -> [InputKind] -> [OutputKind] -> Word64
+guessTxFee feeRate inputs outputs =
+  feeRate * fromIntegral (guessTxSize inputs outputs)
 
-        -- (20: hash160) + (3: opcodes) +
-        -- (20: hash160) + (3: opcodes) +
-        -- (1: script len) + (8: Word64)
-        -- (1: script len) + (8: Word64)
-
-        -- (20: hash160) + (3: opcodes) +
-        -- (1: script len) + (8: Word64)
-        msout * 32
-
--- | Size of a multisig P2SH input.
-guessMSSize :: (Int, Int) -> Int
-guessMSSize (m, n) =
-  -- OutPoint (36) + Sequence (4) + Script
-  40
-    + fromIntegral (B.length $ runPutS . serialize $ VarInt $ fromIntegral scp)
-    + scp
+-- | The bytes an input of the kind takes: in the transaction without its
+-- witness, and in the witness
+inputWeight :: InputKind -> (Int, Int)
+inputWeight = \case
+  InputPKHash -> (prefix + withSize (sigPush + keyPush), 0)
+  InputMulSig m n -> (prefix + withSize (1 + m * sigPush + push (multisig n)), 0)
+  InputWitnessPKHash -> (prefix + 1, pkhWitness)
+  InputWitnessMulSig m n -> (prefix + 1, multisigWitness m n)
+  InputNestedWitnessPKHash -> (prefix + withSize (push 22), pkhWitness)
+  InputNestedWitnessMulSig m n -> (prefix + withSize (push 34), multisigWitness m n)
+  InputTaproot -> (prefix + 1, 1 + withSize 65)
   where
-    -- OP_M + n*PubKey + OP_N + OP_CHECKMULTISIG
+    -- the outpoint and the sequence
+    prefix = 36 + 4
+    -- a signature with its hash type, pushed: 1 + 72
+    sigPush = push 72
+    -- a compressed key, pushed
+    keyPush = push 33
+    -- bytes after their count
+    withSize n = varIntSize n + n
+    -- OP_m, the keys, OP_n and OP_CHECKMULTISIG
+    multisig n = 3 + 34 * n
+    -- the number of items, the signature and the key
+    pkhWitness = 1 + withSize 72 + withSize 33
+    -- the number of items, the empty item, the signatures and the script
+    multisigWitness m n = 1 + 1 + m * withSize 72 + withSize (multisig n)
 
-    rdm =
-      fromIntegral $
-        B.length $
-          runPutS $
-            serialize $
-              opPushData $
-                B.replicate (n * 34 + 3) 0
-    -- Redeem + m*sig + OP_0
-    scp = rdm + m * 73 + 1
+-- | The bytes an output of the kind takes: its amount, and its script with
+-- its size
+outputSize :: OutputKind -> Int
+outputSize = \case
+  OutputPKHash -> 8 + withSize 25
+  OutputScriptHash -> 8 + withSize 23
+  OutputWitnessPKHash -> 8 + withSize 22
+  OutputWitnessScriptHash -> 8 + withSize 34
+  OutputTaproot -> 8 + withSize 34
+  where
+    withSize n = varIntSize n + n
+
+-- | The bytes of a push of that many bytes
+push :: Int -> Int
+push n
+  | n <= 75 = 1 + n
+  | n <= 0xff = 2 + n
+  | n <= 0xffff = 3 + n
+  | otherwise = 5 + n
+
+-- | The bytes of a count as a 'VarInt'
+varIntSize :: Int -> Int
+varIntSize n
+  | n < 0xfd = 1
+  | n <= 0xffff = 3
+  | n <= 0xffffffff = 5
+  | otherwise = 9
 
 {- Build a new Tx -}
 
@@ -351,15 +329,26 @@ buildTx ctx ops rcpts =
 -- list of private keys. The signature is computed deterministically as defined
 -- in RFC-6979.
 --
--- Example: P2SH-P2WKH
+-- A 'SigInput' whose script is 'PayWitnessPKHash' or 'PayWitnessScriptHash'
+-- is a native SegWit input: the signature goes in the witness and the input
+-- script stays empty. For a SegWit program nested in pay-to-script-hash, use
+-- 'signNestedWitnessTx'.
+--
+-- A 'SigInput' whose script is a Taproot output is signed by its key path,
+-- with a key whose x-only public key is the output key, or whose tweak
+-- without a script tree is the output key, as a wallet of BIP 86 spends. The
+-- BIP 341 digest commits to the output every input spends, so every input
+-- of the transaction must have a 'SigInput' then.
+--
+-- Example: P2WPKH
 --
 -- > sigIn = SigInput (PayWitnessPKHash h) 100000 op sigHashAll Nothing
--- > signedTx = signTx btc unsignedTx [sigIn] [key]
+-- > signedTx = signTx btc ctx unsignedTx [sigIn] [key]
 --
 -- Example: P2SH-P2WSH multisig
 --
 -- > sigIn = SigInput (PayWitnessScriptHash h) 100000 op sigHashAll (Just $ PayMulSig [p1,p2,p3] 2)
--- > signedTx = signTx btc unsignedTx [sigIn] [k1,k3]
+-- > signedTx = signNestedWitnessTx btc ctx unsignedTx [sigIn] [k1,k3]
 signTx ::
   Network ->
   Ctx ->
@@ -393,7 +382,9 @@ signNestedWitnessTx net ctx tx si = Sign.signTx net ctx tx $ nested <$> si
     -- NOTE: the nesting flag is ignored for non-segwit inputs
     nested s = (s, True)
 
--- | Sign a single input in a transaction deterministically (RFC-6979).
+-- | Sign a single input in a transaction deterministically (RFC-6979). A
+-- Taproot input is signed with 'signTaprootInput' instead, since its
+-- digest needs the output every input spends.
 signInput ::
   Network -> Ctx -> Tx -> Int -> SigInput -> PrivateKey -> Either String Tx
 signInput net ctx tx i si =
@@ -415,31 +406,35 @@ findSigInput = Sign.findInputIndex (.outpoint)
 
 -- | Merge partially-signed multisig transactions.  This function does not
 -- support segwit and P2SH-segwit inputs.  Use PSBTs to merge transactions with
--- segwit inputs.
+-- segwit inputs. An input that no transaction has signed stays unsigned.
 mergeTxs ::
   Network ->
   Ctx ->
   [Tx] ->
   [(ScriptOutput, Word64, OutPoint)] ->
   Either String Tx
-mergeTxs net ctx txs os
-  | null txs = Left "Transaction list is empty"
-  | length (nub emptyTxs) /= 1 = Left "Transactions do not match"
-  | length txs == 1 = return $ head txs
-  | otherwise = foldM (mergeTxInput net ctx txs) (head emptyTxs) outs
+mergeTxs net ctx txs os = case txs of
+  [] -> Left "Transaction list is empty"
+  [tx] -> return tx
+  tx : _
+    | length (nub emptyTxs) /= 1 -> Left "Transactions do not match"
+    | otherwise -> foldM (mergeTxInput net ctx txs) (clearAll tx) (outs tx)
   where
-    zipOp = zip (matchTemplate os (head txs).inputs f) [0 ..]
-    outs =
-      map (first $ (\(o, v, _) -> (o, v)) . fromJust) $
-        filter (isJust . fst) zipOp
+    zipOp tx = zip (matchTemplate os tx.inputs f) [0 ..]
+    outs tx =
+      [ ((o, v), i)
+      | (Just (o, v, _), i) <- zipOp tx
+      ]
     f (_, _, o) txin = o == txin.outpoint
-    emptyTxs = map (\tx -> foldl clearInput tx outs) txs
+    emptyTxs = map clearAll txs
+    clearAll tx = foldl clearInput tx (outs tx)
     ins is i = updateIndex i is (\TxIn {..} -> TxIn {script = B.empty, ..})
     clearInput tx (_, i) =
       Tx tx.version (ins tx.inputs i) tx.outputs [] tx.locktime
 
 -- | Merge input from partially-signed multisig transactions.  This function
--- does not support segwit and P2SH-segwit inputs.
+-- does not support segwit and P2SH-segwit inputs. When no transaction has a
+-- script for the input, the input is left as it is.
 mergeTxInput ::
   Network ->
   Ctx ->
@@ -451,11 +446,13 @@ mergeTxInput net ctx txs tx ((so, val), i) = do
   -- Ignore transactions with empty inputs
   let ins = map ((.script) . (!! i) . (.inputs)) txs
   sigRes <- mapM extractSigs $ filter (not . B.null) ins
-  let rdm = snd $ head sigRes
-  unless (all ((== rdm) . snd) sigRes) $ Left "Redeem scripts do not match"
-  si <- marshal (net, ctx) <$> go (nub $ concatMap fst sigRes) so rdm
-  let ins' = updateIndex i tx.inputs (\TxIn {..} -> TxIn {script = si, ..})
-  return $ Tx tx.version ins' tx.outputs [] tx.locktime
+  case sigRes of
+    [] -> return tx
+    (_, rdm) : _ -> do
+      unless (all ((== rdm) . snd) sigRes) $ Left "Redeem scripts do not match"
+      si <- marshal (net, ctx) <$> go (nub $ concatMap fst sigRes) so rdm
+      let ins' = updateIndex i tx.inputs (\TxIn {..} -> TxIn {script = si, ..})
+      return $ Tx tx.version ins' tx.outputs [] tx.locktime
   where
     go allSigs out rdmM =
       case out of
@@ -487,31 +484,50 @@ mergeTxInput net ctx txs tx ((so, val), i) = do
 
 {- Tx verification -}
 
--- | Verify if a transaction is valid and all of its inputs are standard.
+-- | Verify that every input of the transaction spends one of the coins
+-- given with a standard input that verifies ('verifyStdInput'), and that
+-- the outputs do not spend more than the coins hold. Other rules of
+-- @CheckTransaction@ in Bitcoin Core, such as the limits on sizes and
+-- amounts and the absence of duplicate inputs, are not checked.
 verifyStdTx ::
   Network -> Ctx -> Tx -> [(ScriptOutput, Word64, OutPoint)] -> Bool
-verifyStdTx net ctx tx xs =
-  not (null tx.inputs) && all go (zip (matchTemplate xs tx.inputs f) [0 ..])
+verifyStdTx net ctx tx coins =
+  not (null tx.inputs)
+    && all (verifyStdInput net ctx tx coins) [0 .. length tx.inputs - 1]
+    && spent <= available
   where
-    f (_, _, o) txin = o == txin.outpoint
-    go (Just (so, val, _), i) = verifyStdInput net ctx tx i so val
-    go _ = False
+    spent = sum (map (toInteger . (.value)) tx.outputs)
+    available = sum [toInteger v | (_, v, _) <- matched]
+    matched = catMaybes (matchTemplate coins tx.inputs (\(_, _, o) txin -> o == txin.outpoint))
 
--- | Verify if a transaction input is valid and standard.
-verifyStdInput :: Network -> Ctx -> Tx -> Int -> ScriptOutput -> Word64 -> Bool
-verifyStdInput net ctx tx i so0 val
+-- | Verify that an input spends one of the coins given with a standard
+-- input that verifies: a signature of the right key and digest for
+-- pay-to-public-key, pay-to-public-key-hash, multisig and pay-to-script-hash
+-- inputs, their SegWit forms, native or nested in pay-to-script-hash, and
+-- Taproot inputs spent by the key path or by a script path whose leaf is a
+-- single key check. An input that is not a witness program must have no
+-- witness, as @VerifyScript@ requires in Bitcoin Core. Other script path
+-- spends need script execution and are not verified: they are refused.
+verifyStdInput :: Network -> Ctx -> Tx -> [(ScriptOutput, Word64, OutPoint)] -> Int -> Bool
+verifyStdInput net ctx tx coins i
   | i < 0 || i >= length tx.inputs = False
-  | isSegwit so0 =
-      fromRight False $ (inp == mempty &&) . verifySegwitInput so0 <$> wp so0
-  | otherwise =
-      or $
-        rights
-          [ verifyLegacyInput so0 <$> unmarshal (net, ctx) inp,
-            nestedScriptOutput >>= \so -> verifyNestedInput so0 so <$> wp so
-          ]
+  | otherwise = case coinOf (tx.inputs !! i) of
+      Nothing -> False
+      Just (so0, val)
+        | isSegwit so0 ->
+            fromRight False $ (B.null inp &&) . verifySegwitInput so0 val <$> wp so0
+        | isTaproot so0 ->
+            B.null inp && verifyTaprootInput so0
+        | otherwise ->
+            or $
+              rights
+                [ (\si -> null ws && verifyLegacyInput so0 val si) <$> unmarshal (net, ctx) inp,
+                  nestedScriptOutput >>= \so -> verifyNestedInput so0 so val <$> wp so
+                ]
   where
     inp = (tx.inputs !! i).script
-    theTxSigHash so = Sign.makeSigHash net ctx tx i so val
+    coinOf txin = find (\(_, _, o) -> o == txin.outpoint) coins >>= \(so, val, _) -> Just (so, val)
+    theTxSigHash so val = Sign.makeSigHash net ctx tx i so val
 
     -- A signature verifies only when its digest could be computed.
     checkSig :: Either String Hash256 -> Sig -> PubKey -> Bool
@@ -530,23 +546,23 @@ verifyStdInput net ctx tx i so0 val
       Right (NestedWitnessInput so) -> Right so
       _ -> Left "nestedScriptOutput: not a nested output"
 
-    verifyLegacyInput :: ScriptOutput -> ScriptInput -> Bool
-    verifyLegacyInput so si = case (so, si) of
+    verifyLegacyInput :: ScriptOutput -> Word64 -> ScriptInput -> Bool
+    verifyLegacyInput so val si = case (so, si) of
       (PayPK pub, RegularInput (SpendPK (TxSignature sig sh))) ->
-        checkSig (theTxSigHash so sh Nothing) sig pub.point
+        checkSig (theTxSigHash so val sh Nothing) sig pub.point
       (PayPKHash h, RegularInput (SpendPKHash (TxSignature sig sh) pub)) ->
         pubKeyAddr ctx pub == p2pkhAddr h
-          && checkSig (theTxSigHash so sh Nothing) sig pub.point
+          && checkSig (theTxSigHash so val sh Nothing) sig pub.point
       (PayMulSig pubs r, RegularInput (SpendMulSig sigs)) ->
         either (const False) (\out -> countMulSig net ctx tx out val i ((.point) <$> pubs) sigs == r) $
           encodeOutput ctx so
       (PayScriptHash h, ScriptHashInput si' rdm) ->
-        payToScriptAddress ctx rdm == p2shAddr h && verifyLegacyInput rdm (RegularInput si')
+        payToScriptAddress ctx rdm == p2shAddr h && verifyLegacyInput rdm val (RegularInput si')
       _ -> False
 
     verifySegwitInput ::
-      ScriptOutput -> (Maybe ScriptOutput, SimpleInput) -> Bool
-    verifySegwitInput so (rdm, si) = case (so, rdm, si) of
+      ScriptOutput -> Word64 -> (Maybe ScriptOutput, SimpleInput) -> Bool
+    verifySegwitInput so val (rdm, si) = case (so, rdm, si) of
       ( PayWitnessPKHash h,
         Nothing,
         SpendPKHash (TxSignature sig sh) pub
@@ -554,7 +570,7 @@ verifyStdInput net ctx tx i so0 val
           -- Compare the key hash only. An uncompressed key is non-standard
           -- here but still valid by consensus, so verification accepts it.
           let keytest = pubKeyAddr ctx pub == p2pkhAddr h
-              sighash = theTxSigHash so sh Nothing
+              sighash = theTxSigHash so val sh Nothing
               pkpoint = pub.point
               verify = checkSig sighash sig pkpoint
            in keytest && verify
@@ -563,7 +579,7 @@ verifyStdInput net ctx tx i so0 val
         SpendPK (TxSignature sig sh)
         ) ->
           let keytest = payToWitnessScriptAddress ctx rdm' == p2wshAddr h
-              sighash = theTxSigHash so sh $ Just rdm'
+              sighash = theTxSigHash so val sh $ Just rdm'
               pkpoint = pub.point
               verify = checkSig sighash sig pkpoint
            in keytest && verify
@@ -574,7 +590,7 @@ verifyStdInput net ctx tx i so0 val
           let keytest = payToWitnessScriptAddress ctx rdm' == p2wshAddr h
               addrtest = addressHash (marshal ctx pub) == kh
               pkpoint = pub.point
-              sighash = theTxSigHash so sh $ Just rdm'
+              sighash = theTxSigHash so val sh $ Just rdm'
               verify = checkSig sighash sig pkpoint
            in keytest && addrtest && verify
       ( PayWitnessScriptHash h,
@@ -583,16 +599,51 @@ verifyStdInput net ctx tx i so0 val
         ) ->
           let keytest = payToWitnessScriptAddress ctx rdm' == p2wshAddr h
               pkpoints = (.point) <$> pubs
-              hashfun sh = theTxSigHash so sh $ Just rdm'
+              hashfun sh = theTxSigHash so val sh $ Just rdm'
               verify = countMulSig' ctx hashfun pkpoints sigs == r
            in keytest && verify
       _ -> False
 
     verifyNestedInput ::
-      ScriptOutput -> ScriptOutput -> (Maybe RedeemScript, SimpleInput) -> Bool
-    verifyNestedInput so so' x = case so of
-      PayScriptHash h -> payToScriptAddress ctx so' == p2shAddr h && verifySegwitInput so' x
+      ScriptOutput -> ScriptOutput -> Word64 -> (Maybe RedeemScript, SimpleInput) -> Bool
+    verifyNestedInput so so' val x = case so of
+      PayScriptHash h -> payToScriptAddress ctx so' == p2shAddr h && verifySegwitInput so' val x
       _ -> False
+
+    -- The outputs every input spends, in order, which the Taproot digest
+    -- commits to
+    spentOutputs :: Maybe [TxOut]
+    spentOutputs = mapM (fmap (\(so, val) -> TxOut val (marshal ctx so)) . coinOf) tx.inputs
+
+    verifyTaprootInput :: ScriptOutput -> Bool
+    verifyTaprootInput so = fromRight False $ do
+      outKey <- case so of
+        PayWitness 1 program -> maybe (Left "not an output key") Right (importXOnlyPubKey ctx program)
+        _ -> Left "not a Taproot output"
+      spent <- maybe (Left "a spent output is missing") Right spentOutputs
+      let schnorr sigBytes annex leaf = do
+            TaprootSignature sig sh <- decodeTaprootSig sigBytes
+            h <- taprootSigHash tx spent i sh annex leaf
+            return (sig, h)
+      case viewTaprootWitness ctx ws of
+        Just (KeyPathSpend sigBytes annex) -> do
+          (sig, h) <- schnorr sigBytes annex Nothing
+          return (verifySchnorr ctx outKey sig (hashToMsg h))
+        Just (ScriptPathSpend spd) -> case (spd.script.ops, spd.stack) of
+          ([OP_PUSHDATA keyBytes OPCODE, OP_CHECKSIG], [sigBytes])
+            | spd.leafVersion == tapscriptLeafVersion -> do
+                leafKey <- maybe (Left "not an x-only key") Right (importXOnlyPubKey ctx keyBytes)
+                (sig, h) <- schnorr sigBytes spd.annex (Just (leafHash spd.leafVersion spd.script, 0xffffffff))
+                return (verifyScriptPathData ctx outKey spd && verifySchnorr ctx leafKey sig (hashToMsg h))
+          _ -> Left "script path spends other than a single key check are not verified"
+        Nothing -> Left "not a Taproot witness"
+
+-- | Whether an output script is a Taproot output: a witness program of
+-- version 1 that is 32 bytes long
+isTaproot :: ScriptOutput -> Bool
+isTaproot = \case
+  PayWitness 1 program -> B.length program == 32
+  _ -> False
 
 -- | Count the number of valid signatures for a multi-signature transaction.
 countMulSig ::

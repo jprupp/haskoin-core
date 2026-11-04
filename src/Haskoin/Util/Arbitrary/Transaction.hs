@@ -15,7 +15,7 @@ import Control.Monad
 import Data.ByteString qualified as BS
 import Data.Either (fromRight)
 import Data.List (nub, nubBy, permutations)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isNothing)
 import Data.Map.Strict qualified as Map
 import Data.Word (Word32, Word64)
 import Haskoin.Address
@@ -32,20 +32,45 @@ import Haskoin.Util.Arbitrary.Script
 import Haskoin.Util.Arbitrary.Util
 import Test.QuickCheck
 
--- | Wrapped coin value for testing.
-newtype TestCoin = TestCoin {getTestCoin :: Word64}
+-- | A coin for testing: its value, and the kind of input it is spent with.
+data TestCoin = TestCoin
+  { getTestCoin :: Word64,
+    getTestCoinKind :: InputKind
+  }
   deriving (Eq, Show)
 
 instance Coin TestCoin where
-  coinValue = getTestCoin
+  coinValue = (.getTestCoin)
+  coinInputKind = (.getTestCoinKind)
 
 -- | Arbitrary transaction hash (for non-existent transaction).
 arbitraryTxHash :: Gen TxHash
 arbitraryTxHash = TxHash <$> arbitraryHash256
 
--- | Arbitrary amount of Satoshi as 'Word64' (Between 1 and 21e14)
+-- | Arbitrary amount of Satoshi as 'Word64' (Between 1 and 21e14), spent
+-- with an arbitrary kind of input
 arbitrarySatoshi :: Network -> Gen TestCoin
-arbitrarySatoshi net = TestCoin <$> choose (1, net.maxSatoshi)
+arbitrarySatoshi net = TestCoin <$> choose (1, net.maxSatoshi) <*> arbitraryInputKind
+
+-- | Arbitrary kind of input, with multisig parameters from
+-- 'arbitraryMSParam'
+arbitraryInputKind :: Gen InputKind
+arbitraryInputKind = do
+  (m, n) <- arbitraryMSParam
+  elements
+    [ InputPKHash,
+      InputMulSig m n,
+      InputWitnessPKHash,
+      InputWitnessMulSig m n,
+      InputNestedWitnessPKHash,
+      InputNestedWitnessMulSig m n,
+      InputTaproot
+    ]
+
+-- | Arbitrary kind of output
+arbitraryOutputKind :: Gen OutputKind
+arbitraryOutputKind =
+  elements [OutputPKHash, OutputScriptHash, OutputWitnessPKHash, OutputWitnessScriptHash, OutputTaproot]
 
 -- | Arbitrary 'OutPoint'.
 arbitraryOutPoint :: Gen OutPoint
@@ -75,7 +100,9 @@ arbitraryTx net ctx =
 arbitraryLegacyTx :: Network -> Ctx -> Gen Tx
 arbitraryLegacyTx net ctx = arbitraryWLTx net ctx False
 
--- | Arbitrary witness transaction (witness data is fake).
+-- | Arbitrary witness transaction (witness data is fake). At least one
+-- input has a witness item, since a transaction whose stacks are all
+-- empty has no witness.
 arbitraryWitnessTx :: Network -> Ctx -> Gen Tx
 arbitraryWitnessTx net ctx = arbitraryWLTx net ctx True
 
@@ -89,7 +116,7 @@ arbitraryWLTx net ctx wit = do
   let uniqueInps = nubBy (\a b -> a.outpoint == b.outpoint) inps
   w <-
     if wit
-      then vectorOf (length uniqueInps) (listOf arbitraryBS)
+      then (:) <$> listOf1 arbitraryBS <*> vectorOf (length uniqueInps - 1) (listOf arbitraryBS)
       else return []
   Tx <$> arbitrary <*> pure uniqueInps <*> pure outs <*> pure w <*> arbitrary
 
@@ -135,10 +162,11 @@ arbitraryAddrOnlyTxOut net ctx = do
   return $ TxOut v $ marshal ctx out
 
 -- | Arbitrary 'SigInput' with the corresponding private keys used
--- to generate the 'ScriptOutput' or 'RedeemScript'.
+-- to generate the 'ScriptOutput' or 'RedeemScript'. On a network without
+-- a fork id, it may be a Taproot output spent by its key path.
 arbitrarySigInput :: Network -> Ctx -> Gen (SigInput, [PrivateKey])
 arbitrarySigInput net ctx =
-  oneof
+  oneof $
     [ wrapKey <$> arbitraryPKSigInput net ctx,
       wrapKey <$> arbitraryPKHashSigInput net ctx,
       arbitraryMSSigInput net ctx,
@@ -146,6 +174,20 @@ arbitrarySigInput net ctx =
       wrapKey <$> arbitraryWPKHSigInput net ctx,
       arbitraryWSHSigInput net ctx
     ]
+      <> [wrapKey <$> arbitraryTaprootSigInput net ctx | isNothing net.sigHashForkId]
+
+-- | Arbitrary 'SigInput' of a Taproot output without a script tree, spent
+-- by its key path with the key of the internal key, as a wallet of BIP 86
+-- spends. The sighash is one a Taproot signature may use, other than
+-- SIGHASH_SINGLE, which needs an output at the index of the input.
+arbitraryTaprootSigInput :: Network -> Ctx -> Gen (SigInput, PrivateKey)
+arbitraryTaprootSigInput net ctx = do
+  (k, p) <- arbitraryKeyPair ctx
+  val <- getTestCoin <$> arbitrarySatoshi net
+  op <- arbitraryOutPoint
+  sh <- elements [sigHashDefault, sigHashAll, sigHashNone, setAnyoneCanPay sigHashAll, setAnyoneCanPay sigHashNone]
+  let out = taprootScriptOutput ctx (TaprootOutput p.point Nothing)
+  return (SigInput out val op sh Nothing, k)
 
 -- | Arbitrary 'SigInput' with a 'ScriptOutput' of type 'PayPK'.
 arbitraryPKSigInput :: Network -> Ctx -> Gen (SigInput, PrivateKey)
@@ -224,7 +266,8 @@ arbitraryWSHSigInput net ctx = do
   return (SigInput out val op sh $ Just rdm, ks)
 
 -- | Arbitrary 'Tx' (empty 'TxIn'), 'SigInputs' and private keys that can be
--- passed to 'signTx' or 'detSignTx' to fully sign the 'Tx'.
+-- passed to 'signTx' or 'detSignTx' to fully sign the 'Tx'. The outputs
+-- spend no more than the inputs hold.
 arbitrarySigningData :: Network -> Ctx -> Gen (Tx, [SigInput], [PrivateKey])
 arbitrarySigningData net ctx = do
   v <- arbitrary
@@ -233,12 +276,20 @@ arbitrarySigningData net ctx = do
   sigis <- vectorOf ni (arbitrarySigInput net ctx)
   let uSigis = nubBy (\(a, _) (b, _) -> a.outpoint == b.outpoint) sigis
   inps <- forM uSigis $ \(s, _) -> TxIn s.outpoint BS.empty <$> arbitrary
-  outs <- vectorOf no (arbitraryTxOut net ctx)
+  outs <- arbitraryOutputsWithin net ctx (sum (map ((.value) . fst) uSigis)) no
   l <- arbitrary
   perm <- choose (0, length inps - 1)
   let tx = Tx v (permutations inps !! perm) outs [] l
       keys = concatMap snd uSigis
   return (tx, map fst uSigis, keys)
+
+-- | Arbitrary outputs whose values add up to at most the amount given
+arbitraryOutputsWithin :: Network -> Ctx -> Word64 -> Int -> Gen [TxOut]
+arbitraryOutputsWithin net ctx total count =
+  vectorOf count $
+    TxOut
+      <$> choose (0, total `div` fromIntegral count)
+      <*> (marshal ctx <$> arbitraryScriptOutput net ctx)
 
 -- | Arbitrary transaction with empty inputs.
 arbitraryEmptyTx :: Network -> Ctx -> Gen Tx
@@ -252,14 +303,17 @@ arbitraryEmptyTx net ctx = do
   s <- arbitrary
   return $ Tx v (map (\op -> TxIn op BS.empty s) (nub ops)) outs [] t
 
--- | Arbitrary partially-signed transactions.
+-- | Arbitrary partially-signed transactions. The outputs spend no more
+-- than the coins hold.
 arbitraryPartialTxs ::
   Network -> Ctx -> Gen ([Tx], [(ScriptOutput, Word64, OutPoint, Int, Int)])
 arbitraryPartialTxs net ctx = do
-  tx <- arbitraryEmptyTx net ctx
+  empty <- arbitraryEmptyTx net ctx
+  coins <- forM (map (.outpoint) empty.inputs) $ \op -> (,) op <$> arbitraryData
+  outs <- arbitraryOutputsWithin net ctx (sum [val | (_, (_, val, _, _, _, _)) <- coins]) (length empty.outputs)
+  let tx = Tx empty.version empty.inputs outs [] empty.locktime
   res <-
-    forM (map (.outpoint) tx.inputs) $ \op -> do
-      (so, val, rdmM, prvs, m, n) <- arbitraryData
+    forM coins $ \(op, (so, val, rdmM, prvs, m, n)) -> do
       txs <- mapM (singleSig so val rdmM tx op . (.key)) prvs
       return (txs, (so, val, op, m, n))
   return (concatMap fst res, map snd res)
