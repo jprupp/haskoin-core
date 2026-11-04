@@ -780,8 +780,12 @@ nextAsertWorkRequired net anchor par bh
         if isGenesis anchor
           then return anchor.header.timestamp
           else (.header.timestamp) . fromMaybe e <$> getBlockHeader anchor.header.prev
-      let timeDiff = toInteger bh.timestamp - toInteger anchorParentTime
-          heightDiff = toInteger par.height + 1 - toInteger anchor.height
+      -- The formula is evaluated at the parent, as GetNextASERTWorkRequired
+      -- does: the time and the height are the parent's. A block's own
+      -- timestamp never changes its own difficulty. The minimum-difficulty
+      -- rule above is the only use of the new header.
+      let timeDiff = toInteger par.header.timestamp - toInteger anchorParentTime
+          heightDiff = toInteger par.height - toInteger anchor.height
       return $
         computeAsertBits net.powLimit net.asertHalfLife anchor.header.bits timeDiff heightDiff
   where
@@ -807,9 +811,9 @@ computeAsertBits ::
   Integer ->
   -- | bits of the anchor block
   Word32 ->
-  -- | seconds from the anchor's parent to the new block
+  -- | seconds from the anchor's parent to the parent of the new block
   Integer ->
-  -- | blocks from the anchor to the new block
+  -- | blocks from the anchor to the parent of the new block
   Integer ->
   Word32
 computeAsertBits powLimit halflife anchorBits timeDiff heightDiff

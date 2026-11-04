@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/)
 and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] - 2026-11-04
+
+### Fixed
+
+- `nextAsertWorkRequired` evaluates the aserti3-2d formula at the parent of the new block, with the parent's timestamp and height, as `GetNextASERTWorkRequired` does in Bitcoin Cash Node. It used the new block's own timestamp and height, so the bits it required were wrong for every block that did not come exactly ten minutes after its parent. The bits check that 1.5.0 added to `connectBlocks` turned this into a rejected block on Bitcoin Cash mainnet at height 975899.
+
 ## [1.5.0] - 2026-11-03
 
 ### Added
