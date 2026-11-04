@@ -36,6 +36,7 @@ module Haskoin.Transaction.Common
     txHashToHex,
     nosigTxHash,
     hasWitness,
+    parseLegacyTx,
     nullOutPoint,
   )
 where
@@ -46,7 +47,6 @@ import Control.Monad (forM_, guard, liftM2, mzero, replicateM, unless, when, (<=
 import Data.Aeson as A
 import Data.Aeson.Encoding qualified as E
 import Data.Binary (Binary (..))
-import Data.Bool (bool)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as B
 import Data.ByteString.Builder (char7)
@@ -60,7 +60,7 @@ import Data.Serialize (Serialize (..))
 import Data.String (IsString, fromString)
 import Data.String.Conversions (cs)
 import Data.Text (Text)
-import Data.Word (Word32, Word64)
+import Data.Word (Word32, Word64, Word8)
 import GHC.Generics (Generic)
 import Haskoin.Crypto.Hash
 import Haskoin.Network.Common
@@ -189,14 +189,27 @@ txVirtualSize tx = (txWeight tx + 3) `div` 4
 hasWitness :: Tx -> Bool
 hasWitness = any (not . null) . (.witness)
 
+-- | A transaction from its hex. The hex must hold the transaction and
+-- nothing else, as @DecodeHexTx@ requires in Bitcoin Core.
 instance IsString Tx where
   fromString =
-    fromMaybe e . (eitherToMaybe . runGetS deserialize <=< decodeHex) . cs
+    fromMaybe e . (eitherToMaybe . runGetS whole <=< decodeHex) . cs
     where
+      whole = do
+        tx <- deserialize
+        done <- isEmpty
+        unless done $ fail "Trailing bytes after transaction"
+        return tx
       e = error "Could not read transaction from hex string"
 
 instance Serial Tx where
-  deserialize = isWitnessTx >>= bool parseLegacyTx parseWitnessTx
+  deserialize = do
+    flags <- lookAhead witnessFlags
+    case flags of
+      Nothing -> parseLegacyTx
+      Just 0x00 -> parseLegacyTx
+      Just 0x01 -> parseWitnessTx
+      Just other -> fail $ "Unknown transaction optional data: flags " ++ show other
   serialize tx
     | hasWitness tx = putWitnessTx tx
     | otherwise = putLegacyTx tx
@@ -235,22 +248,32 @@ putWitnessTx tx = do
   where
     n = length tx.inputs
 
-isWitnessTx :: (MonadGet m) => m Bool
-isWitnessTx = lookAhead $ do
+-- | The flags byte of the extended format of BIP 144, when the transaction
+-- has one: the byte after an input count of zero, as @UnserializeTransaction@
+-- reads it in Bitcoin Core. A transaction whose input count is not zero has
+-- no flags. Only the flags 0x01, the witness, and 0x00, which Bitcoin Core
+-- reads as a transaction with no inputs and no outputs, are known; any other
+-- value fails the parse there with "Unknown transaction optional data".
+witnessFlags :: (MonadGet m) => m (Maybe Word8)
+witnessFlags = do
   _ <- getWord32le
-  m <- getWord8
-  f <- getWord8
-  return (m == 0x00 && f == 0x01)
+  marker <- getWord8
+  if marker == 0x00
+    then Just <$> getWord8
+    else return Nothing
 
--- | Non-SegWit transaction deserializer. Every count is bounded by
+-- | Non-SegWit transaction deserializer: the old format, without the
+-- marker, flags and witness of BIP 144. Use it where the bytes are known
+-- to be in that format, as the unsigned transaction of a PSBT is. There a
+-- transaction with no inputs reads as such, whereas 'deserialize' reads
+-- the byte after an empty input list as the flags of BIP 144, as Bitcoin
+-- Core does when it allows a witness. Every count is bounded by
 -- 'maxListSize', as @ReadCompactSize@ bounds it in Bitcoin Core.
 parseLegacyTx :: (MonadGet m) => m Tx
 parseLegacyTx = do
   version <- getWord32le
   inputs <- getVarIntList deserialize
   outputs <- getVarIntList deserialize
-  when (null inputs && length outputs == 0x01) $
-    fail "Witness transaction"
   locktime <- getWord32le
   return Tx {witness = [], ..}
 

@@ -10,7 +10,8 @@
 -- estimation, the SegWit witness helpers and the genesis coinbases.
 module Haskoin.TransactionSpec (spec) where
 
-import Control.Monad (forM_, unless)
+import Control.Exception (evaluate)
+import Control.Monad (forM_, guard, unless)
 import Data.Aeson (decode, eitherDecode)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as B
@@ -19,7 +20,7 @@ import Data.Bytes.Put
 import Data.Bytes.Serial
 import Data.Default (def)
 import Data.Either
-import Data.List (inits, isInfixOf)
+import Data.List (find, inits, isInfixOf)
 import Data.Maybe
 import Data.String (fromString)
 import Data.String.Conversions
@@ -85,6 +86,10 @@ spec = prepareContext $ \ctx -> do
     prop "the size guess is at least the virtual size of a signed legacy transaction, with little slack" $
       forAll arbitraryNetwork $ \net ->
         forAll (arbitraryAddrOnlyTxFull net ctx) (testGuessSize net ctx)
+    prop "the weight guess is at least the weight of a signed transaction whose inputs have a kind" $
+      forAll arbitraryNetwork $ \net -> testGuessWeight net ctx False
+    prop "the weight guess is at least the weight of a signed transaction with its SegWit inputs nested" $
+      forAll arbitraryNetwork $ \net -> testGuessWeight net ctx True
     prop "choose coins" $
       forAll arbitraryNetwork $ \net ->
         forAll (listOf (arbitrarySatoshi net)) $ \coins ->
@@ -272,6 +277,61 @@ testGuessSize net ctx tx =
     sigCount (ScriptHashInput (SpendMulSig sigs) _) = length sigs
     sigCount _ = 1
 
+-- The guess is an upper bound on the weight of the transaction once signed:
+-- by signTx, or by signNestedWitnessTx with its SegWit inputs nested. Only
+-- signing data whose inputs all have a kind is generated.
+testGuessWeight :: Network -> Ctx -> Bool -> Property
+testGuessWeight net ctx nested =
+  forAll (arbitrarySigningData net ctx `suchThat` allKnown) $ \(tx, sigis, keys) ->
+    let signed = either error id (sign net ctx tx sigis (map (.key) keys))
+        kinds = mapMaybe (sigInputKind ctx nested keys) sigis
+        guess = guessTxWeight kinds (map (txOutKind ctx) tx.outputs)
+     in counterexample ("weight " <> show (txWeight signed) <> ", guess " <> show guess) $
+          txWeight signed <= guess
+  where
+    sign = if nested then signNestedWitnessTx else signTx
+    allKnown (_, sigis, keys) = all (isJust . sigInputKind ctx nested keys) sigis
+
+-- The kind of input a SigInput is signed as, when the estimator has one.
+-- The key of a public key hash is found among the signing keys, to tell
+-- whether it is compressed. These are left out, since the estimator has no
+-- kind for them: bare multisig, pay-to-script-hash and
+-- pay-to-witness-script-hash of a single key, multisig with an uncompressed
+-- key, and pay-to-witness-public-key-hash with an uncompressed key, which
+-- the estimator counts as compressed.
+sigInputKind :: Ctx -> Bool -> [PrivateKey] -> SigInput -> Maybe InputKind
+sigInputKind ctx nested keys si = case (si.script, si.redeem) of
+  (PayPK _, Nothing) -> Just InputPK
+  (PayPKHash h, Nothing) -> do
+    k <- keyOfHash h
+    Just $ if k.compress then InputPKHash else InputUncompressedPKHash
+  (PayScriptHash _, Just (PayMulSig ps m)) -> compressedMultisig InputMulSig ps m
+  (PayWitnessPKHash h, Nothing) -> do
+    k <- keyOfHash h
+    guard k.compress
+    Just $ if nested then InputNestedWitnessPKHash else InputWitnessPKHash
+  (PayWitnessScriptHash _, Just (PayMulSig ps m)) ->
+    compressedMultisig (if nested then InputNestedWitnessMulSig else InputWitnessMulSig) ps m
+  (PayWitness 1 program, Nothing) | B.length program == 32 -> Just InputTaproot
+  _ -> Nothing
+  where
+    keyOfHash h = find (\k -> addressHash160 (pubKeyAddr ctx (derivePublicKey ctx k)) == Just h) keys
+    compressedMultisig kind ps m = do
+      guard (all (.compress) ps)
+      Just (kind m (length ps))
+
+-- The kind of an output, from its script. A script of no named kind is
+-- 'OutputScript' with its size.
+txOutKind :: Ctx -> TxOut -> OutputKind
+txOutKind ctx out = case unmarshal ctx out.script of
+  Right (PayPKHash _) -> OutputPKHash
+  Right (PayScriptHash _) -> OutputScriptHash
+  Right (PayScript32Hash _) -> OutputScript32Hash
+  Right (PayWitnessPKHash _) -> OutputWitnessPKHash
+  Right (PayWitnessScriptHash _) -> OutputWitnessScriptHash
+  Right (PayWitness 1 program) | B.length program == 32 -> OutputTaproot
+  _ -> OutputScript (B.length out.script)
+
 -- A selection covers the target, the fee of the coins chosen, and the
 -- change. When there is no selection, no prefix of the coins covers the
 -- target and its own fee, since the coins are taken in order.
@@ -420,6 +480,21 @@ bytesSpec ctx =
       parseTx ("01000000" <> "0001" <> "00" <> "01804a5d05000000001976a91424aa604689cc582292b97668bedd91dd5bf9374c88ac" <> "00000000")
         `shouldSatisfy` either ("Superfluous witness record" `isInfixOf`) (const False)
 
+    -- An input count of zero makes the next byte the flags of BIP 144
+    it "refuse a flags byte other than the witness bit after an empty input list, as Bitcoin Core does" $ do
+      parseTx ("01000000" <> "00" <> "02" <> "02e80300000000000000e8030000000000000000000000")
+        `shouldSatisfy` either ("Unknown transaction optional data" `isInfixOf`) (const False)
+      parseTx ("01000000" <> "00" <> "03" <> "01db494559df26b5cf3b121f05af26e0568708f5bd9ccceb41656f1654a1eb29eb0e00000000ffffffff01804a5d05000000001976a91424aa604689cc582292b97668bedd91dd5bf9374c88ac" <> "00" <> "00000000")
+        `shouldSatisfy` either ("Unknown transaction optional data" `isInfixOf`) (const False)
+
+    it "read an empty input list with a zero flags byte as a transaction with no inputs and no outputs, as Bitcoin Core does" $
+      parseTx ("01000000" <> "00" <> "00" <> "00000000") `shouldBe` Right (Tx 1 [] [] [] 0)
+
+    it "refuse a literal with bytes after the transaction" $ do
+      let legacy = "0100000001db494559df26b5cf3b121f05af26e0568708f5bd9ccceb41656f1654a1eb29eb0e00000000ffffffff01804a5d05000000001976a91424aa604689cc582292b97668bedd91dd5bf9374c88ac00000000"
+      length (fromString legacy :: Tx).inputs `shouldBe` 1
+      evaluate (fromString (legacy <> "00") :: Tx) `shouldThrow` errorCall "Could not read transaction from hex string"
+
     it "write a transaction whose witness stacks are all empty without the marker, and read it back without witness" $ do
       let legacy = "0100000001db494559df26b5cf3b121f05af26e0568708f5bd9ccceb41656f1654a1eb29eb0e00000000ffffffff01804a5d05000000001976a91424aa604689cc582292b97668bedd91dd5bf9374c88ac00000000"
       tx <- either fail return (parseTx legacy)
@@ -455,8 +530,12 @@ sizeSpec :: Ctx -> Spec
 sizeSpec ctx =
   describe "Size and fee estimation" $ do
     it "counts the bytes of each kind of input, without and with witness" $ do
+      -- outpoint 36, sequence 4, script length 1, signature push 73
+      inputWeight InputPK `shouldBe` (114, 0)
       -- outpoint 36, sequence 4, script length 1, signature push 73, key push 34
       inputWeight InputPKHash `shouldBe` (148, 0)
+      -- the same with a 65-byte key: push 66
+      inputWeight InputUncompressedPKHash `shouldBe` (180, 0)
       -- an empty script; the witness: count 1, signature 73, key 34
       inputWeight InputWitnessPKHash `shouldBe` (41, 108)
       -- the push of the 22-byte program: 23 bytes after their length
@@ -472,12 +551,34 @@ sizeSpec ctx =
       -- OP_0, one signature, the 37-byte script pushed directly (38): 112 bytes
       inputWeight (InputMulSig 1 1) `shouldBe` (153, 0)
 
+    it "counts two bytes for each count of a multisig script above 16" $ do
+      -- 17-of-20: OP_m 2, 20 keys of 34 (680), OP_n 2, OP_CHECKMULTISIG 1: a 685-byte script.
+      -- OP_0, 17 signatures of 73 (1241), the script pushed with OP_PUSHDATA2 (688): 1930 bytes after a 3-byte length, and 40
+      inputWeight (InputMulSig 17 20) `shouldBe` (1973, 0)
+      -- the witness: count 1, the empty item 1, 17 signatures of 73 (1241), the 685-byte script after its 3-byte length (688)
+      inputWeight (InputWitnessMulSig 17 20) `shouldBe` (41, 1931)
+      inputWeight (InputNestedWitnessMulSig 17 20) `shouldBe` (76, 1931)
+      -- 1-of-17: OP_1 1, 17 keys (578), a two-byte count, OP_CHECKMULTISIG: 582 bytes.
+      -- OP_0, one signature (73), OP_PUSHDATA2 (585): 659 bytes after a 3-byte length, and 40
+      inputWeight (InputMulSig 1 17) `shouldBe` (702, 0)
+      -- 16-of-16 keeps one-byte counts: 1 + 544 + 1 + 1 = 547 bytes.
+      -- OP_0, 16 signatures (1168), OP_PUSHDATA2 (550): 1719 bytes after a 3-byte length, and 40
+      inputWeight (InputMulSig 16 16) `shouldBe` (1762, 0)
+
     it "counts the bytes of each kind of output" $ do
       outputSize OutputPKHash `shouldBe` 34
       outputSize OutputScriptHash `shouldBe` 32
+      -- amount 8, length 1, OP_HASH256, a 32-byte push, OP_EQUAL: 35
+      outputSize OutputScript32Hash `shouldBe` 44
       outputSize OutputWitnessPKHash `shouldBe` 31
       outputSize OutputWitnessScriptHash `shouldBe` 43
       outputSize OutputTaproot `shouldBe` 43
+      -- a bare 1-of-1 multisig script, OP_1, a 33-byte key push, OP_1, OP_CHECKMULTISIG: 37 bytes after a 1-byte length
+      outputSize (OutputScript 37) `shouldBe` 46
+      -- an empty script is its 1-byte length
+      outputSize (OutputScript 0) `shouldBe` 9
+      -- a 1000-byte script after its 3-byte length
+      outputSize (OutputScript 1000) `shouldBe` 1011
 
     it "gives the weight and virtual size of a transaction of each shape" $ do
       -- 8 + 1 + 148 + 1 + 34 = 192 bytes, no witness
@@ -496,8 +597,18 @@ sizeSpec ctx =
       guessTxSize [InputWitnessMulSig 2 3] [OutputWitnessScriptHash] `shouldBe` 158
       -- 8 + 1 + 76 + 1 + 34 = 120 bytes, 256 of witness: 736 units
       guessTxSize [InputNestedWitnessMulSig 2 3] [OutputPKHash] `shouldBe` 184
-      -- 8 + 1 + 148 + 41 + 1 + 34 = 233 bytes, 110 of witness: 1042 units, 260.5 rounded up
+      -- 8 + 1 + 148 + 41 + 1 + 34 = 233 bytes; the witness: 2, the empty stack of the legacy input 1, 108: 1043 units, 260.75 rounded up
       guessTxSize [InputPKHash, InputWitnessPKHash] [OutputPKHash] `shouldBe` 261
+
+    it "counts the empty witness stack of each input without a witness when another has one" $ do
+      -- 4 + 1 + 3 × 148 + 41 + 1 + 34 + 4 = 529 bytes; the witness: 2 + 1 + 1 + 1 + 108 = 113; 3 × 529 + 642 = 2229 units, 557.25 rounded up
+      guessTxWeight [InputPKHash, InputPKHash, InputPKHash, InputWitnessPKHash] [OutputPKHash] `shouldBe` 2229
+      guessTxSize [InputPKHash, InputPKHash, InputPKHash, InputWitnessPKHash] [OutputPKHash] `shouldBe` 558
+      -- 8 + 1 + 114 + 41 + 1 + 44 = 209 bytes; the witness: 2 + 1 + 67 = 70: 906 units, 226.5 rounded up
+      guessTxWeight [InputPK, InputTaproot] [OutputScript32Hash] `shouldBe` 906
+      guessTxSize [InputPK, InputTaproot] [OutputScript32Hash] `shouldBe` 227
+      -- without a witness, no stack is counted: 4 × (8 + 1 + 296 + 1 + 34)
+      guessTxWeight [InputPKHash, InputPKHash] [OutputPKHash] `shouldBe` 1360
 
     it "charges the fee rate per virtual byte" $ do
       guessTxFee 10 [InputPKHash] [OutputPKHash] `shouldBe` 1920
@@ -591,6 +702,37 @@ verificationSpec ctx =
       verifyStdTx btc ctx (buildTx ctx [] [(PayPKHash h, 1)]) [] `shouldBe` False
       -- The same coins hold less than the outputs spend
       verifyStdTx btc ctx signed [(PayPKHash h, 70000, op) | op <- ops] `shouldBe` False
+
+    it "signs SIGHASH_SINGLE on a legacy input with an output at its index and on a SegWit input, but refuses it on a legacy input without one" $ do
+      (k, p) <- generate (arbitraryKeyPair ctx)
+      let h = fromJust (addressHash160 (pubKeyAddr ctx p))
+          ops = [coinOf 0, coinOf 1]
+          -- one output, so input 1 has none at its index
+          tx = buildTx ctx ops [(PayPKHash h, 150000)]
+          legacy op = SigInput (PayPKHash h) 100000 op sigHashSingle Nothing
+          segwit op = SigInput (PayWitnessPKHash h) 100000 op sigHashSingle Nothing
+      signedFirst <- either fail return (signTx btc ctx tx [legacy (coinOf 0)] [k.key])
+      verifyStdInput btc ctx signedFirst [(PayPKHash h, 100000, coinOf 0)] 0 `shouldBe` True
+      signTx btc ctx tx [legacy (coinOf 1)] [k.key] `shouldBe` Left "makeSignature: SIGHASH_SINGLE without an output at the input index"
+      -- The BIP 143 digest commits to the coin even without an output
+      signedWitness <- either fail return (signTx btc ctx tx [segwit (coinOf 1)] [k.key])
+      verifyStdInput btc ctx signedWitness [(PayWitnessPKHash h, 100000, coinOf 1)] 1 `shouldBe` True
+
+    -- A node accepts the signature over the constant digest 1 that a
+    -- legacy SIGHASH_SINGLE input without an output has, so the verifier
+    -- must too, although the signer refuses to make one
+    it "accepts a legacy SIGHASH_SINGLE signature over the constant digest 1, as a node does" $ do
+      (k, p) <- generate (arbitraryKeyPair ctx)
+      let h = fromJust (addressHash160 (pubKeyAddr ctx p))
+          ops = [coinOf 0, coinOf 1]
+          tx = buildTx ctx ops [(PayPKHash h, 150000)]
+          one = "0100000000000000000000000000000000000000000000000000000000000000" :: Hash256
+          overOne = marshal (btc, ctx) (RegularInput (SpendPKHash (TxSignature (signHash ctx k.key one) sigHashSingle) p))
+          spent = Tx tx.version [TxIn (coinOf 0) "" 0xffffffff, TxIn (coinOf 1) overOne 0xffffffff] tx.outputs [] tx.locktime
+          spentFirst = Tx tx.version [TxIn (coinOf 0) overOne 0xffffffff, TxIn (coinOf 1) "" 0xffffffff] tx.outputs [] tx.locktime
+      verifyStdInput btc ctx spent [(PayPKHash h, 100000, coinOf 1)] 1 `shouldBe` True
+      -- The same signature on input 0, which has an output, does not verify
+      verifyStdInput btc ctx spentFirst [(PayPKHash h, 100000, coinOf 0)] 0 `shouldBe` False
 
     it "refuses a SegWit input with a non-empty input script and a wrong amount" $ do
       (k, p) <- generate (arbitraryKeyPair ctx)

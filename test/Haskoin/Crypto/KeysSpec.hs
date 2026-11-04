@@ -38,7 +38,6 @@ identityTests ctx =
   def
     { readTests =
         [ ReadBox (arbitrary :: Gen SecKey),
-          ReadBox arbitraryPrivateKey,
           ReadBox (arbitraryPublicKey ctx)
         ],
       marshalJsonTests =
@@ -59,9 +58,9 @@ spec = prepareContext $ \ctx -> do
     testIdentity $ identityTests ctx
     prop "Public key is canonical" $
       forAll (arbitraryKeyPair ctx) (isCanonicalPubKey ctx . snd)
-    prop "Key pair key show . read identity" $
-      forAll (arbitraryKeyPair ctx) $ \x ->
-        (read . show) x == x
+    prop "Public key show . read identity" $
+      forAll (arbitraryKeyPair ctx) $ \(_, pub) ->
+        (read . show) pub == pub
     prop "Public key binary serialization" $ do
       forAll (arbitraryKeyPair ctx) $ \(sec, pub) ->
         (unmarshal ctx . marshal ctx) pub == Right pub
@@ -179,6 +178,14 @@ spec = prepareContext $ \ctx -> do
   describe "Binary private key" $
     it "refuses a serialized zero key" $
       (runGetS deserialize (B.replicate 33 0) :: Either String PrivateKey) `shouldSatisfy` isLeft
+  describe "Showing a private key" $ do
+    -- The secret of key 1 must not appear in the text
+    it "does not reveal the secret" $
+      show (PrivateKey "0000000000000000000000000000000000000000000000000000000000000001" True)
+        `shouldBe` "PrivateKey {key = <redacted>, compress = True}"
+    it "nests in parentheses like a derived instance" $
+      show (Just (PrivateKey "0000000000000000000000000000000000000000000000000000000000000001" False))
+        `shouldBe` "Just (PrivateKey {key = <redacted>, compress = False})"
   describe "key_io_valid.json vectors" $ do
     vectors <- runIO (readTestFile "key_io_valid.json" :: IO [(Text, Text, A.Value)])
     it "Passes the key_io_valid.json vectors" $

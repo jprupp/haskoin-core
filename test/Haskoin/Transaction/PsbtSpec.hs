@@ -698,7 +698,8 @@ keysSigner :: Ctx -> [PrivateKey] -> Signer
 keysSigner ctx keys =
   Signer
     { keyOfRecord = \public derivation -> listToMaybe (mapMaybe (\key -> (keySigner ctx key.key).keyOfRecord public derivation) keys),
-      keyOfHash = \h -> listToMaybe (mapMaybe (\key -> (keySigner ctx key.key).keyOfHash h) keys)
+      keyOfHash = \h -> listToMaybe (mapMaybe (\key -> (keySigner ctx key.key).keyOfHash h) keys),
+      acceptedSigHashes = defaultSigHashes
     }
 
 -- | Whether the transaction of the PSBT, once signed with the keys and
@@ -763,13 +764,17 @@ signingSpec ctx =
            in signsAndVerifies btc ctx (fst <$> take m pairs) (nativeWithFields, nativeCoins) === Right True
                 .&&. signsAndVerifies btc ctx (fst <$> take m pairs) (nestedWithFields, nestedCoins) === Right True
 
-    it "signs with the sighash the input asks for, SIGHASH_ALL when it asks for none" $ do
+    it "signs with the sighash the input asks for when the signer accepts it, SIGHASH_ALL when it asks for none" $ do
       (secret, public) <- generate (arbitraryKeyPair ctx)
       let (psbt, _) = spendingPsbt ctx (PayPKHash (addressHash (marshal ctx public)))
           asking sh = withInputs ((recordOf ctx public . maybe id insertSigHashType sh) <$> psbt.inputs) psbt
           sighashOf signed = map (B.last . snd) <$> partialSignatures ctx (inputAt 0 signed)
+          acceptingNone = (keySigner ctx secret.key) {acceptedSigHashes = sigHashNone : defaultSigHashes}
       (sighashOf =<< signPsbt btc ctx (keySigner ctx secret.key) (asking Nothing)) `shouldBe` Right [0x01]
-      (sighashOf =<< signPsbt btc ctx (keySigner ctx secret.key) (asking (Just sigHashNone))) `shouldBe` Right [0x02]
+      (sighashOf =<< signPsbt btc ctx (keySigner ctx secret.key) (asking (Just sigHashAll))) `shouldBe` Right [0x01]
+      -- SIGHASH_NONE leaves the outputs unsigned, so the signer must agree to it
+      signPsbt btc ctx (keySigner ctx secret.key) (asking (Just sigHashNone)) `shouldBe` Left "Input 0: the sighash type 2 is not one the signer accepts"
+      (sighashOf =<< signPsbt btc ctx acceptingNone (asking (Just sigHashNone))) `shouldBe` Right [0x02]
 
     it "leaves an input without its coin, or signed already, as it is" $ do
       (secret, public) <- generate (arbitraryKeyPair ctx)
@@ -783,7 +788,7 @@ signingSpec ctx =
       (_, public) <- generate (arbitraryKeyPair ctx)
       let (psbt, _) = spendingPsbt ctx (PayPKHash (addressHash (marshal ctx public)))
           wrong = withInputs [insertNonWitnessUtxo emptyTx Map.empty] psbt
-      signPsbt btc ctx (Signer (\_ _ -> Nothing) (const Nothing)) wrong `shouldBe` Left "Input 0: The previous transaction of the input is not the one it spends"
+      signPsbt btc ctx (Signer (\_ _ -> Nothing) (const Nothing) defaultSigHashes) wrong `shouldBe` Left "Input 0: The previous transaction of the input is not the one it spends"
 
     -- The derivation records name keys by the master key, b4a6ba67 with
     -- the full path, or by the extended key given, with the path from it
@@ -928,6 +933,28 @@ signerChecksSpec ctx =
         `shouldBe` Left "Input 0: the sighash type lacks the fork id flag the network requires"
       -- With the flag, the Bitcoin Cash digest signs
       (signatureCount =<< signPsbt bch ctx signer (withInput (recordOf ctx public (insertSigHashType (setForkIdFlag sigHashAll) (insertNonWitnessUtxo parent Map.empty))))) `shouldBe` Right 1
+
+    it "refuses a sighash type the signer does not accept, and signs with it once the signer lists it" $ do
+      let acceptingSingle = signer {acceptedSigHashes = [sigHashSingle]}
+          askingSingle = insertSigHashType sigHashSingle (insertNonWitnessUtxo parent Map.empty)
+      signed askingSingle `shouldBe` Left "Input 0: the sighash type 3 is not one the signer accepts"
+      (signatureCount =<< signPsbt btc ctx acceptingSingle (withInput (recordOf ctx public askingSingle))) `shouldBe` Right 1
+      -- ANYONECANPAY makes another type: 0x81 is not 0x01
+      signed (insertSigHashType (setAnyoneCanPay sigHashAll) (insertNonWitnessUtxo parent Map.empty)) `shouldBe` Left "Input 0: the sighash type 129 is not one the signer accepts"
+
+    -- Two coins of the same script, spent by one transaction with one
+    -- output: input 1 has no output at its index
+    it "refuses SIGHASH_SINGLE on a legacy coin whose input has no output at its index, and signs it on a SegWit coin" $ do
+      let witnessCoin = TxOut 200000000 (marshal ctx (PayWitnessPKHash (addressHash (marshal ctx public))))
+          parentOf c = Tx 1 [TxIn (OutPoint "e567952fb6cc33857f392efa3a46c995a28f69cca4bb1b37e0204dab1ec7a389" 1) "" 0xffffffff] [c, c] [] 0
+          spendingBoth p = Tx 2 [TxIn (OutPoint (txHash p) 0) "" 0xfffffffe, TxIn (OutPoint (txHash p) 1) "" 0xfffffffe] [TxOut 399999000 (hexBytes "76a914d0c59903c5bac2868760e90fd521a4665aa7652088ac")] [] 0
+          askingSingle p = recordOf ctx public (insertSigHashType sigHashSingle (insertNonWitnessUtxo p Map.empty))
+          psbtOf p = Psbt Version0 (spendingBoth p) Map.empty [askingSingle p, askingSingle p] [Map.empty]
+          acceptingSingle = signer {acceptedSigHashes = [sigHashSingle]}
+      signPsbt btc ctx acceptingSingle (psbtOf (parentOf coin)) `shouldBe` Left "Input 1: makeSignature: SIGHASH_SINGLE without an output at the input index"
+      -- The BIP 143 digest commits to the coin, so the SegWit signature is fine
+      (signatureCount =<< signPsbt btc ctx acceptingSingle (psbtOf (parentOf witnessCoin))) `shouldBe` Right 1
+      (fmap length . partialSignatures ctx . inputAt 1 =<< signPsbt btc ctx acceptingSingle (psbtOf (parentOf witnessCoin))) `shouldBe` Right 1
 
     it "refuses a redeem script that does not hash to the coin, and one on a coin that is not pay-to-script-hash" $ do
       let ms = PayMulSig [public, otherPublic] 1

@@ -40,8 +40,7 @@ identityTests :: Ctx -> IdentityTests
 identityTests ctx =
   def
     { readTests =
-        [ ReadBox arbitraryXPrvKey,
-          ReadBox (arbitraryXPubKey ctx),
+        [ ReadBox (arbitraryXPubKey ctx),
           ReadBox arbitraryDerivPath,
           ReadBox arbitraryHardPath,
           ReadBox arbitrarySoftPath,
@@ -134,10 +133,19 @@ spec = prepareContext $ \ctx -> do
       m.depth `shouldBe` 0
       m.parent `shouldBe` "00000000"
       m.index `shouldBe` 0
+  describe "Showing an extended private key" $
+    -- The master key of vector 1 has fingerprint 3442193e; its hardened
+    -- child 7 has index 2^31 + 7 = 2147483655
+    it "shows the depth, parent and index but not the chain code or the key" $ do
+      let m = makeXPrvKey (fromJust (decodeHex m1))
+      show m `shouldBe` "XPrvKey {depth = 0, parent = \"00000000\", index = 0, chain = <redacted>, key = <redacted>}"
+      show (hardSubKey ctx m 7) `shouldBe` "XPrvKey {depth = 1, parent = \"3442193e\", index = 2147483655, chain = <redacted>, key = <redacted>}"
+      show (Just m) `shouldBe` "Just (XPrvKey {depth = 0, parent = \"00000000\", index = 0, chain = <redacted>, key = <redacted>})"
   describe "Derivation depth" $ do
     let m = makeXPrvKey (fromJust (decodeHex m1))
         atDepth255 = XPrvKey 255 m.parent m.index m.chain m.key
         tooDeep = DerivationException "Maximum derivation depth exceeded"
+        hardIndex = DerivationException "Invalid child derivation index"
     it "a child is one level deeper than its parent" $ do
       (prvSubKey ctx m 0).depth `shouldBe` 1
       (hardSubKey ctx m 0).depth `shouldBe` 1
@@ -147,10 +155,10 @@ spec = prepareContext $ \ctx -> do
       evaluate (prvSubKey ctx atDepth255 0) `shouldThrow` (== tooDeep)
       evaluate (hardSubKey ctx atDepth255 0) `shouldThrow` (== tooDeep)
       evaluate (pubSubKey ctx (deriveXPubKey ctx atDepth255) 0) `shouldThrow` (== tooDeep)
-    it "refuses a child index with the hard bit set" $ do
-      evaluate (prvSubKey ctx m 0x80000000) `shouldThrow` anyErrorCall
-      evaluate (hardSubKey ctx m 0x80000000) `shouldThrow` anyErrorCall
-      evaluate (pubSubKey ctx (deriveXPubKey ctx m) 0x80000000) `shouldThrow` anyErrorCall
+    it "refuses a child index with the hard bit set with a DerivationException" $ do
+      evaluate (prvSubKey ctx m 0x80000000) `shouldThrow` (== hardIndex)
+      evaluate (hardSubKey ctx m 0x80000000) `shouldThrow` (== hardIndex)
+      evaluate (pubSubKey ctx (deriveXPubKey ctx m) 0x80000000) `shouldThrow` (== hardIndex)
   describe "Child index" $ do
     let m = makeXPrvKey (fromJust (decodeHex m1))
     it "a hardened child stores its index with the hard bit set" $ do
@@ -209,7 +217,7 @@ spec = prepareContext $ \ctx -> do
     it "cycleIndex runs through the soft indices from the start and wraps around" $ do
       take 3 (cycleIndex 0x7ffffffe) `shouldBe` [0x7ffffffe, 0x7fffffff, 0]
       take 2 (cycleIndex 0) `shouldBe` [0, 1]
-      evaluate (cycleIndex 0x80000000) `shouldThrow` anyErrorCall
+      evaluate (cycleIndex 0x80000000) `shouldThrow` (== DerivationException "cycleIndex: invalid index 2147483648")
   describe "Multisig derivation" $ do
     -- 2-of-2 of child 0 of vectors 1 and 2; sorted keys 027c4b09… then 02fc9e5a…
     it "deriveMSAddr gives the P2SH address of the sorted multisig script" $ do

@@ -199,7 +199,22 @@ data XPrvKey = XPrvKey
     -- | private key of this node
     key :: !SecKey
   }
-  deriving (Generic, Eq, Show, Read, NFData, Hashable)
+  deriving (Generic, Eq, NFData, Hashable)
+
+-- | The chain code and the key are not shown. Together they give every key
+-- below this one, so a value that ends up in a log or an error message
+-- must not reveal them. There is no 'Read' instance for the same reason:
+-- use 'xPrvExport' and 'xPrvImport' to write a key out and read it back.
+instance Show XPrvKey where
+  showsPrec d k =
+    showParen (d > 10) $
+      showString "XPrvKey {depth = "
+        . shows k.depth
+        . showString ", parent = "
+        . shows k.parent
+        . showString ", index = "
+        . shows k.index
+        . showString ", chain = <redacted>, key = <redacted>}"
 
 instance Marshal Network XPrvKey where
   marshalGet net = do
@@ -324,7 +339,7 @@ prvSubKey ::
 prvSubKey ctx xkey child
   | child < 0x80000000 =
       XPrvKey (nextDepth xkey.depth) (xPrvFP ctx xkey) child c k
-  | otherwise = error "Invalid child derivation index"
+  | otherwise = throw hardIndexException
   where
     pK = (deriveXPubKey ctx xkey).key
     m = B.append (exportPubKey ctx True pK) (runPutS (serialize child))
@@ -345,7 +360,7 @@ pubSubKey ::
 pubSubKey ctx xKey child
   | child < 0x80000000 =
       XPubKey (nextDepth xKey.depth) (xPubFP ctx xKey) child c pK
-  | otherwise = error "Invalid child derivation index"
+  | otherwise = throw hardIndexException
   where
     m = B.append (exportPubKey ctx True xKey.key) (runPutS $ serialize child)
     (a, c) = split512 $ hmac512 (runPutS $ serialize xKey.chain) m
@@ -369,13 +384,20 @@ hardSubKey ::
 hardSubKey ctx xkey child
   | child < 0x80000000 =
       XPrvKey (nextDepth xkey.depth) (xPrvFP ctx xkey) i c k
-  | otherwise = error "Invalid child derivation index"
+  | otherwise = throw hardIndexException
   where
     i = setBit child 31
     m = B.append (bsPadPrvKey xkey.key) (runPutS $ serialize i)
     (a, c) = split512 $ hmac512 (runPutS $ serialize xkey.chain) m
     k = fromMaybe err $ tweakSecKey ctx xkey.key a
     err = throw $ DerivationException "Invalid hardSubKey derivation"
+
+-- | The exception for a child index with the hard bit set. The derivation
+-- functions take the index without the bit, below 2^31, and 'hardSubKey'
+-- sets the bit itself. Every failure of a derivation throws
+-- 'DerivationException', so that a caller can catch them all at once.
+hardIndexException :: DerivationException
+hardIndexException = DerivationException "Invalid child derivation index"
 
 -- | Depth of a child key. BIP32 stores the depth in one byte, so a key at
 -- depth 255 can have no children. Bitcoin Core wraps around to 0 here, which
@@ -600,12 +622,13 @@ deriveMSAddrs ctx keys m = map f . cycleIndex
       let (a, rdm) = deriveMSAddr ctx keys m i
        in (a, rdm, i)
 
--- | Helper function to go through derivation indices.
+-- | Helper function to go through derivation indices. Throws
+-- 'DerivationException' for an index with the hard bit set.
 cycleIndex :: KeyIndex -> [KeyIndex]
 cycleIndex i
   | i == 0 = cycle [0 .. 0x7fffffff]
   | i < 0x80000000 = cycle $ [i .. 0x7fffffff] ++ [0 .. (i - 1)]
-  | otherwise = error $ "cycleIndex: invalid index " ++ show i
+  | otherwise = throw $ DerivationException $ "cycleIndex: invalid index " ++ show i
 
 {- Derivation Paths -}
 
@@ -1029,7 +1052,7 @@ data XKey
       { xpub :: !XPubKey,
         net :: !Network
       }
-  deriving (Show, Read, Eq, Generic, NFData)
+  deriving (Show, Eq, Generic, NFData)
 
 -- | Apply a parsed path to an extended key to derive the new key defined in the
 -- path. If the path starts with /m/, a private key will be returned and if the

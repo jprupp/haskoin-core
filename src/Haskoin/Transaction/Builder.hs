@@ -189,11 +189,22 @@ greedyAddSink target guessFee continue =
 
 {- Size and fee estimation -}
 
--- | The kind of input a coin is spent with. Keys are compressed, as every
--- SegWit kind requires. A multisig kind is @m@ of @n@.
+-- | The kind of input a coin is spent with, which decides the bytes it
+-- takes once signed. Keys are compressed, as every SegWit kind requires,
+-- unless the kind says otherwise. A multisig kind is @m@ of @n@, with @n@
+-- up to 'maxMultisigKeys'.
+--
+-- Some inputs the library signs have no kind: bare multisig,
+-- pay-to-script-hash or pay-to-witness-script-hash of a single key,
+-- multisig with an uncompressed key, and Taproot spent by a script path.
 data InputKind
-  = -- | pay-to-public-key-hash
+  = -- | pay-to-public-key. Its input is the signature alone, so the
+    -- compression of the key does not matter.
+    InputPK
+  | -- | pay-to-public-key-hash
     InputPKHash
+  | -- | pay-to-public-key-hash with an uncompressed, 65-byte key
+    InputUncompressedPKHash
   | -- | pay-to-script-hash multisig, @m@ of @n@
     InputMulSig Int Int
   | -- | pay-to-witness-public-key-hash
@@ -208,13 +219,25 @@ data InputKind
     InputTaproot
   deriving (Eq, Show, Read)
 
--- | The kind of an output, which decides its size
+-- | The kind of an output, which decides its size. An output of any other
+-- script is 'OutputScript' with the size of the script, so every output
+-- has a kind.
 data OutputKind
-  = OutputPKHash
-  | OutputScriptHash
-  | OutputWitnessPKHash
-  | OutputWitnessScriptHash
-  | OutputTaproot
+  = -- | pay-to-public-key-hash
+    OutputPKHash
+  | -- | pay-to-script-hash
+    OutputScriptHash
+  | -- | pay-to-script-hash of a 256-bit hash, the P2SH32 of Bitcoin Cash
+    OutputScript32Hash
+  | -- | pay-to-witness-public-key-hash
+    OutputWitnessPKHash
+  | -- | pay-to-witness-script-hash
+    OutputWitnessScriptHash
+  | -- | Taproot
+    OutputTaproot
+  | -- | any other script, of that many bytes: bare multisig, a data
+    -- carrier, or a witness program of another version
+    OutputScript Int
   deriving (Eq, Show, Read)
 
 -- | An upper bound on the weight, in weight units of BIP 141, of a signed
@@ -230,9 +253,12 @@ guessTxWeight inputs outputs = 4 * base + witness
         + sum (map (fst . inputWeight) inputs)
         + varIntSize (length outputs)
         + sum (map outputSize outputs)
-    witnessBytes = sum (map (snd . inputWeight) inputs)
+    witnessBytes = map (snd . inputWeight) inputs
+    -- A transaction with a witness has the marker and the flag, and a
+    -- witness stack for every input. The stack of an input without a
+    -- witness is one byte, its count of zero.
     witness
-      | witnessBytes > 0 = 2 + witnessBytes -- the marker and the flag
+      | any (> 0) witnessBytes = 2 + sum (map (max 1) witnessBytes)
       | otherwise = 0
 
 -- | An upper bound on the virtual size, in virtual bytes of BIP 141, of a
@@ -248,11 +274,15 @@ guessTxFee feeRate inputs outputs =
   feeRate * fromIntegral (guessTxSize inputs outputs)
 
 -- | The bytes an input of the kind takes: in the transaction without its
--- witness, and in the witness
+-- witness, and in the witness. A kind without a witness counts no witness
+-- bytes. Its empty stack takes one byte when another input has a witness,
+-- which 'guessTxWeight' counts.
 inputWeight :: InputKind -> (Int, Int)
 inputWeight = \case
+  InputPK -> (prefix + withSize sigPush, 0)
   InputPKHash -> (prefix + withSize (sigPush + keyPush), 0)
-  InputMulSig m n -> (prefix + withSize (1 + m * sigPush + push (multisig n)), 0)
+  InputUncompressedPKHash -> (prefix + withSize (sigPush + uncompressedKeyPush), 0)
+  InputMulSig m n -> (prefix + withSize (1 + m * sigPush + push (multisig m n)), 0)
   InputWitnessPKHash -> (prefix + 1, pkhWitness)
   InputWitnessMulSig m n -> (prefix + 1, multisigWitness m n)
   InputNestedWitnessPKHash -> (prefix + withSize (push 22), pkhWitness)
@@ -265,14 +295,21 @@ inputWeight = \case
     sigPush = push 72
     -- a compressed key, pushed
     keyPush = push 33
+    -- an uncompressed key, pushed
+    uncompressedKeyPush = push 65
     -- bytes after their count
     withSize n = varIntSize n + n
-    -- OP_m, the keys, OP_n and OP_CHECKMULTISIG
-    multisig n = 3 + 34 * n
+    -- OP_m, the compressed keys pushed, OP_n and OP_CHECKMULTISIG
+    multisig m n = count m + 34 * n + count n + 1
+    -- a count of a multisig script: OP_1 to OP_16, or a one-byte push of
+    -- one byte from 17 to 'maxMultisigKeys'
+    count c
+      | c <= 16 = 1
+      | otherwise = 2
     -- the number of items, the signature and the key
     pkhWitness = 1 + withSize 72 + withSize 33
     -- the number of items, the empty item, the signatures and the script
-    multisigWitness m n = 1 + 1 + m * withSize 72 + withSize (multisig n)
+    multisigWitness m n = 1 + 1 + m * withSize 72 + withSize (multisig m n)
 
 -- | The bytes an output of the kind takes: its amount, and its script with
 -- its size
@@ -280,9 +317,11 @@ outputSize :: OutputKind -> Int
 outputSize = \case
   OutputPKHash -> 8 + withSize 25
   OutputScriptHash -> 8 + withSize 23
+  OutputScript32Hash -> 8 + withSize 35
   OutputWitnessPKHash -> 8 + withSize 22
   OutputWitnessScriptHash -> 8 + withSize 34
   OutputTaproot -> 8 + withSize 34
+  OutputScript n -> 8 + withSize n
   where
     withSize n = varIntSize n + n
 
