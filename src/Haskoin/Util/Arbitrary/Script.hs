@@ -33,12 +33,29 @@ import Test.QuickCheck
 arbitraryScript :: Gen Script
 arbitraryScript = Script <$> listOf arbitraryScriptOp
 
+-- | Arbitrary push of random data. Most pushes are minimal, see
+-- 'opPushData'. Some use a longer 'PushDataType' than the data needs, and the
+-- lengths reach every 'PushDataType', so that every encoding is exercised.
+arbitraryPushOp :: Gen ScriptOp
+arbitraryPushOp = do
+  len <- frequency [(6, choose (0, 75)), (2, choose (76, 255)), (1, choose (256, 300))]
+  bs <- arbitraryBSn len
+  let -- An empty payload with OPCODE is the byte of OP_0, so it is not kept.
+      types =
+        [OPCODE | len >= 1, len <= 75]
+          ++ [OPDATA1 | len <= 255]
+          ++ [OPDATA2, OPDATA4]
+  frequency
+    [ (3, return $ opPushData bs),
+      (1, OP_PUSHDATA bs <$> elements types)
+    ]
+
 -- | Arbitrary 'ScriptOp' (push operations have random data).
 arbitraryScriptOp :: Gen ScriptOp
 arbitraryScriptOp =
   oneof
     -- Pushing Data
-    [ opPushData <$> arbitraryBS1,
+    [ arbitraryPushOp,
       return OP_0,
       return OP_1NEGATE,
       return OP_RESERVED,
@@ -195,15 +212,15 @@ arbitraryPushDataType = elements [OPCODE, OPDATA1, OPDATA2, OPDATA4]
 arbitrarySigHash :: Gen SigHash
 arbitrarySigHash = fromIntegral <$> (arbitrary :: Gen Word32)
 
--- | Arbitrary valid 'SigHash'.
+-- | Arbitrary valid 'SigHash'. On a network with a fork id, the
+-- 'SIGHASH_FORKID' flag is always set, since every signature there must
+-- carry it.
 arbitraryValidSigHash :: Network -> Gen SigHash
 arbitraryValidSigHash net = do
   sh <- elements [sigHashAll, sigHashNone, sigHashSingle]
-  f1 <-
-    elements $
-      if isJust net.sigHashForkId
-        then [id, setForkIdFlag]
-        else [id]
+  let f1
+        | isJust net.sigHashForkId = setForkIdFlag
+        | otherwise = id
   f2 <- elements [id, setAnyoneCanPay]
   return $ f1 $ f2 sh
 
@@ -231,6 +248,7 @@ arbitraryTxSignature net ctx = do
       not $
         isSigHashUnknown sh
           || isNothing net.sigHashForkId && hasForkIdFlag sh
+          || isJust net.sigHashForkId && not (hasForkIdFlag sh)
 
 -- | Arbitrary transaction signature that could also be empty.
 arbitraryTxSignatureEmpty :: Network -> Ctx -> Gen TxSignature
@@ -240,11 +258,11 @@ arbitraryTxSignatureEmpty net ctx =
       (10, lst3 <$> arbitraryTxSignature net ctx)
     ]
 
--- | Arbitrary m of n parameters.
+-- | Arbitrary m of n parameters, with n up to 'maxMultisigKeys'.
 arbitraryMSParam :: Gen (Int, Int)
 arbitraryMSParam = do
-  m <- choose (1, 16)
-  n <- choose (m, 16)
+  m <- choose (1, maxMultisigKeys)
+  n <- choose (m, maxMultisigKeys)
   return (m, n)
 
 -- | Arbitrary 'ScriptOutput' (Can by any valid type).
@@ -323,9 +341,10 @@ arbitrarySHOutput = do
     Just h -> return $ PayScriptHash h
     Nothing -> error "Could not get Hash160 from address"
 
--- | Arbitrary 'ScriptOutput' of type 'DataCarrier'.
+-- | Arbitrary 'ScriptOutput' of type 'DataCarrier', with any number of
+-- pushes, including none and empty ones.
 arbitraryDCOutput :: Gen ScriptOutput
-arbitraryDCOutput = DataCarrier <$> arbitraryBS1
+arbitraryDCOutput = DataCarrier <$> listOf arbitraryBS
 
 -- | Arbitrary 'ScriptInput'.
 arbitraryScriptInput :: Network -> Ctx -> Gen ScriptInput
@@ -334,8 +353,15 @@ arbitraryScriptInput net ctx =
     [ arbitraryPKInput net ctx,
       arbitraryPKHashInput net ctx,
       arbitraryMSInput net ctx,
-      arbitrarySHInput net ctx
+      arbitrarySHInput net ctx,
+      arbitraryNestedWitnessInput
     ]
+
+-- | Arbitrary 'ScriptInput' of type 'NestedWitnessInput', wrapping a
+-- 'PayWitnessPKHash' or a 'PayWitnessScriptHash'.
+arbitraryNestedWitnessInput :: Gen ScriptInput
+arbitraryNestedWitnessInput =
+  NestedWitnessInput <$> oneof [arbitraryWPKHashOutput, arbitraryWSHOutput]
 
 -- | Arbitrary 'ScriptInput' of type 'SpendPK', 'SpendPKHash' or 'SpendMulSig'
 -- (not 'ScriptHashInput')
@@ -379,11 +405,21 @@ arbitraryMSInput net ctx = do
   sigs <- vectorOf m (arbitraryTxSignatureEmpty net ctx)
   return $ RegularInput $ SpendMulSig sigs
 
--- | Arbitrary 'ScriptInput' of type 'ScriptHashInput'.
+-- | Arbitrary 'ScriptInput' of type 'ScriptHashInput', whose input fits its
+-- redeem script: a 'SpendPK' for a 'PayPK', a 'SpendPKHash' for a
+-- 'PayPKHash', a 'SpendMulSig' for a 'PayMulSig'.
 arbitrarySHInput :: Network -> Ctx -> Gen ScriptInput
-arbitrarySHInput net ctx = do
-  i <- arbitrarySimpleInput net ctx
-  ScriptHashInput i.get <$> arbitrarySimpleOutput ctx
+arbitrarySHInput net ctx =
+  oneof
+    [ do
+        sig <- arbitraryTxSignatureEmpty net ctx
+        ScriptHashInput (SpendPK sig) <$> arbitraryPKOutput ctx,
+      do
+        sig <- arbitraryTxSignatureEmpty net ctx
+        key <- snd <$> arbitraryKeyPair ctx
+        ScriptHashInput (SpendPKHash sig key) <$> arbitraryPKHashOutput,
+      arbitraryMulSigSHInput net ctx
+    ]
 
 -- | Arbitrary 'ScriptInput' of type 'ScriptHashInput' containing a
 -- 'RedeemScript' of type 'PayMulSig' and an input of type 'SpendMulSig'.

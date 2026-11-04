@@ -481,11 +481,8 @@ mergeTxInput net ctx txs tx ((so, val), i) = do
           Right (sigs, Just rdm)
         _ -> Left "Invalid script input type"
     f out (TxSignature x sh) p =
-      verifyHashSig
-        ctx
-        (txSigHash net tx (encodeOutput ctx out) val i sh)
-        x
-        p.point
+      either (const False) (\h -> verifyHashSig ctx h x p.point) $
+        encodeOutput ctx out >>= \s -> txSigHash net tx s val i sh
     f _ TxSignatureEmpty _ = False
 
 {- Tx verification -}
@@ -503,6 +500,7 @@ verifyStdTx net ctx tx xs =
 -- | Verify if a transaction input is valid and standard.
 verifyStdInput :: Network -> Ctx -> Tx -> Int -> ScriptOutput -> Word64 -> Bool
 verifyStdInput net ctx tx i so0 val
+  | i < 0 || i >= length tx.inputs = False
   | isSegwit so0 =
       fromRight False $ (inp == mempty &&) . verifySegwitInput so0 <$> wp so0
   | otherwise =
@@ -515,6 +513,10 @@ verifyStdInput net ctx tx i so0 val
     inp = (tx.inputs !! i).script
     theTxSigHash so = Sign.makeSigHash net ctx tx i so val
 
+    -- A signature verifies only when its digest could be computed.
+    checkSig :: Either String Hash256 -> Sig -> PubKey -> Bool
+    checkSig h sig pub = either (const False) (\m -> verifyHashSig ctx m sig pub) h
+
     ws :: WitnessStack
     ws
       | length tx.witness > i = tx.witness !! i
@@ -524,28 +526,23 @@ verifyStdInput net ctx tx i so0 val
     wp so = decodeWitnessInput net ctx =<< viewWitnessProgram net ctx so ws
 
     nestedScriptOutput :: Either String ScriptOutput
-    nestedScriptOutput =
-      runGetS deserialize inp >>= dec . ops
-      where
-        ops (Script ops') = ops'
-        dec = \case
-          [OP_PUSHDATA bs _] -> unmarshal ctx bs
-          _ -> Left "nestedScriptOutput: not a nested output"
+    nestedScriptOutput = case unmarshal (net, ctx) inp of
+      Right (NestedWitnessInput so) -> Right so
+      _ -> Left "nestedScriptOutput: not a nested output"
 
     verifyLegacyInput :: ScriptOutput -> ScriptInput -> Bool
     verifyLegacyInput so si = case (so, si) of
       (PayPK pub, RegularInput (SpendPK (TxSignature sig sh))) ->
-        verifyHashSig ctx (theTxSigHash so sh Nothing) sig pub.point
+        checkSig (theTxSigHash so sh Nothing) sig pub.point
       (PayPKHash h, RegularInput (SpendPKHash (TxSignature sig sh) pub)) ->
         pubKeyAddr ctx pub == p2pkhAddr h
-          && verifyHashSig ctx (theTxSigHash so sh Nothing) sig pub.point
+          && checkSig (theTxSigHash so sh Nothing) sig pub.point
       (PayMulSig pubs r, RegularInput (SpendMulSig sigs)) ->
-        countMulSig net ctx tx out val i ((.point) <$> pubs) sigs == r
+        either (const False) (\out -> countMulSig net ctx tx out val i ((.point) <$> pubs) sigs == r) $
+          encodeOutput ctx so
       (PayScriptHash h, ScriptHashInput si' rdm) ->
         payToScriptAddress ctx rdm == p2shAddr h && verifyLegacyInput rdm (RegularInput si')
       _ -> False
-      where
-        out = encodeOutput ctx so
 
     verifySegwitInput ::
       ScriptOutput -> (Maybe ScriptOutput, SimpleInput) -> Bool
@@ -559,7 +556,7 @@ verifyStdInput net ctx tx i so0 val
           let keytest = pubKeyAddr ctx pub == p2pkhAddr h
               sighash = theTxSigHash so sh Nothing
               pkpoint = pub.point
-              verify = verifyHashSig ctx sighash sig pkpoint
+              verify = checkSig sighash sig pkpoint
            in keytest && verify
       ( PayWitnessScriptHash h,
         Just rdm'@(PayPK pub),
@@ -568,7 +565,7 @@ verifyStdInput net ctx tx i so0 val
           let keytest = payToWitnessScriptAddress ctx rdm' == p2wshAddr h
               sighash = theTxSigHash so sh $ Just rdm'
               pkpoint = pub.point
-              verify = verifyHashSig ctx sighash sig pkpoint
+              verify = checkSig sighash sig pkpoint
            in keytest && verify
       ( PayWitnessScriptHash h,
         Just rdm'@(PayPKHash kh),
@@ -578,7 +575,7 @@ verifyStdInput net ctx tx i so0 val
               addrtest = addressHash (marshal ctx pub) == kh
               pkpoint = pub.point
               sighash = theTxSigHash so sh $ Just rdm'
-              verify = verifyHashSig ctx sighash sig pkpoint
+              verify = checkSig sighash sig pkpoint
            in keytest && addrtest && verify
       ( PayWitnessScriptHash h,
         Just rdm'@(PayMulSig pubs r),
@@ -613,11 +610,12 @@ countMulSig net ctx tx out val i =
   where
     h = txSigHash net tx out val i
 
-countMulSig' :: Ctx -> (SigHash -> Hash256) -> [PubKey] -> [TxSignature] -> Int
+countMulSig' :: Ctx -> (SigHash -> Either String Hash256) -> [PubKey] -> [TxSignature] -> Int
 countMulSig' _ _ [] _ = 0
 countMulSig' _ _ _ [] = 0
 countMulSig' ctx h (_ : pubs) (TxSignatureEmpty : sigs) =
   countMulSig' ctx h pubs sigs
 countMulSig' ctx h (pub : pubs) sigs@(TxSignature sig sh : sigs')
-  | verifyHashSig ctx (h sh) sig pub = 1 + countMulSig' ctx h pubs sigs'
+  | either (const False) (\m -> verifyHashSig ctx m sig pub) (h sh) =
+      1 + countMulSig' ctx h pubs sigs'
   | otherwise = countMulSig' ctx h pubs sigs

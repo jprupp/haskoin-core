@@ -570,7 +570,7 @@ payToWitnessScriptAddress ctx = p2wshAddr . sha256 . marshal ctx
 -- | Compute a backwards-compatible SegWit P2SH-P2WSH address.
 payToNestedScriptAddress :: Ctx -> ScriptOutput -> Address
 payToNestedScriptAddress ctx =
-  p2shAddr . addressHash . marshal ctx . toP2WSH . encodeOutput ctx
+  p2shAddr . addressHash . marshal ctx . PayWitnessScriptHash . sha256 . marshal ctx
 
 -- | Get the output script that locks coins sent to an address. Token-aware
 -- CashAddr addresses use the same script as their plain counterparts. Other
@@ -598,7 +598,8 @@ cashAddressOutput v b
 
 -- | Get output script AST for an 'Address'.
 addressToScript :: Ctx -> Address -> Maybe Script
-addressToScript ctx addr = encodeOutput ctx <$> addressToOutput addr
+addressToScript ctx addr =
+  addressToOutput addr >>= eitherToMaybe . encodeOutput ctx
 
 -- | Encode address as output script in 'ByteString' form.
 addressToScriptBS :: Ctx -> Address -> Maybe ByteString
@@ -638,4 +639,5 @@ inputAddress ctx =
   \case
     (RegularInput (SpendPKHash _ key)) -> Just $ pubKeyAddr ctx key
     (ScriptHashInput _ rdm) -> Just $ payToScriptAddress ctx rdm
+    (NestedWitnessInput rdm) -> Just $ payToScriptAddress ctx rdm
     _ -> Nothing

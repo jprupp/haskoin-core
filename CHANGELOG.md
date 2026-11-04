@@ -27,6 +27,12 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 - `scriptPushData` lists the data elements a script pushes, as `GetOp` does in Bitcoin Core.
 - `getVarIntBytes` and `putVarIntBytes` read and write bytes with their count, under the same limit as lists.
 - Tests with fixed wire bytes for every message type, the sample `version`, `verack` and `addr` messages of the protocol documentation, and every function of the `Haskoin.Network` modules.
+- `pushOpData` gives the data that a push opcode puts on the stack, and `isMinimalPush` tells whether a push is in its shortest encoding, the rule of `CheckMinimalPush` in Bitcoin Core.
+- `OP_CHECKSIGADD` is a pattern synonym for opcode 0xba, which `OP_CHECKDATASIG` also names, so a Tapscript can be written with the name of BIP 342.
+- `NestedWitnessInput` is the input script of a P2SH-P2WPKH or P2SH-P2WSH output: a push of the witness output script. `decodeInput`, `encodeInput`, `inputAddress` and the signer use it, and `isNestedWitnessInput` tests for it. Such an input used to fail to decode.
+- `maxMultisigKeys` is 20, the `MAX_PUBKEYS_PER_MULTISIG` of Bitcoin Core. `decodeOutput` reads a multisig output with 17 to 20 keys, whose counts are one-byte pushes, and `encodeOutput` writes one. Only 16 keys used to be supported.
+- `decodePubKey` in `Haskoin.Crypto.Keys.Common` reads a public key from bytes that must hold the key and nothing else.
+- Tests for every function of the `Haskoin.Script` modules, with literal vectors from BIP 67, BIP 143, BIP 173 and BIP 341.
 
 ### Changed
 
@@ -67,6 +73,16 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 - Parsing a derivation path reads each index as an unbounded integer and accepts decimal digits only. `m/4294967296` used to wrap around to `m/0`, and hex, parenthesised and signed numbers were accepted.
 - The JSON form of `Sig` is decoded with `decodeStrictSig`, like the binary form, so a high-S signature is refused by both.
 - The `Read` instances of `Hash160`, `Hash256` and `Hash512`, and `textToFingerprint`, refuse hex of the wrong length, as the string literal instances already did. A two-byte hash could be read and then crash `signHash`.
+- `encodeOutput` returns `Either String Script`. It fails for a `PayMulSig` whose required count is not between 1 and its number of keys or that has more than 20 keys, and for a `PayWitness` whose version is 0 or above 16 or whose program is not 2 to 40 bytes long. Those values used to crash with an `error` call. `marshalPut` still fails with an `error` call for them, since it cannot report a failure.
+- `txSigHash` and `txSigHashForkId` return `Either String Hash256`. They fail for an input index the transaction does not have. With `SIGHASH_ALL`, `txSigHash` used to return a digest over the transaction without any script code for such an index, and crash for the other hash types. `makeSignature` and `makeSigHash` return `Either` too.
+- On a network with a fork id, `txSigHash` requires the `SIGHASH_FORKID` flag and `decodeTxSig` rejects a signature without it. `makeSignature` sets the flag, so `signTx bch` with a plain `sigHashAll` produces a signature the network accepts. It used to sign the legacy digest, which Bitcoin Cash has rejected since 2017.
+- `isSigHashUnknown` is the test of `IsDefinedHashtypeSignature` in Bitcoin Core: after masking the `SIGHASH_ANYONECANPAY` and `SIGHASH_FORKID` bits, the hash type byte must be 1, 2 or 3. A byte such as 0x21 used to pass and be signed, although every node rejects it under `STRICTENC`.
+- `opPushData` gives the minimal encoding of BIP 62: `OP_0` for the empty string, `OP_1` to `OP_16` for one byte from 1 to 16 and `OP_1NEGATE` for the byte 0x81. The empty push used to be an `OP_PUSHDATA` that serialized to the byte of `OP_0` but was not equal to it.
+- `DataCarrier` holds the data of every push after `OP_RETURN`, as a list, since `TxoutType::NULL_DATA` of Bitcoin Core is `OP_RETURN` followed by any pushes. A bare `OP_RETURN`, several pushes and an empty push used to be "Non-standard output".
+- `intToScriptOp` returns `Either String ScriptOp` instead of crashing outside 1 to 16. `scriptOpToInt` no longer serializes its argument, so it cannot crash on an `OP_PUSHDATA` whose payload does not fit its type.
+- `sortMulSig` returns any output that is not a multisig unchanged instead of crashing.
+- `decodeInput` reads the input of a pay-to-script-hash output as its redeem script requires. A multisig template with the redeem script and no signature yet, `OP_0 <redeem>`, is a `SpendMulSig []`, which `mergeTxs` used to reject. An input that does not fit its redeem script fails.
+- The generators of `Haskoin.Util.Arbitrary.Script` produce pushes of every `PushDataType`, pushes that are not minimal, multisig outputs of up to 20 keys, data carriers with any number of pushes, nested witness inputs, and, on networks with a fork id, only hash types with the flag.
 
 ### Fixed
 
@@ -88,6 +104,9 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 - The P2WSH test generator produced P2WPKH addresses.
 - `fromWif` threw an exception on a Base58Check string with an empty payload, such as `3QJmnh`, also through the JSON parser of `PrivateKey`. It returns `Nothing` now.
 - The JSON parser of `PublicKey` accepted bytes after the key.
+- `decodeOutput` matches the output templates on their exact bytes, as Bitcoin Core does. A script that wrote the hash of a P2PKH, P2SH, P2SH32 or witness output with `OP_PUSHDATA1` or a longer push used to decode as that output and give its address. By consensus such a script is not a P2SH or witness output at all, and anyone can spend it, so a wallet could credit a payment to its address that was not one.
+- A public key pushed in a script or a witness must fill its push. A 65-byte item that starts with 0x02 or 0x03 used to parse as the 33-byte key it starts with, so `decodeOutput`, `decodeInput` and the witness decoders reported a key the script did not hold, and `verifyStdTx` accepted a P2PKH or P2WPKH spend whose key item carried 32 extra bytes, which no node accepts.
+- `verifyStdInput` returns `False` for an input index the transaction does not have, and `parseExistingSigs` reads no witness signatures when the witness list is shorter than the input index. Both used to crash.
 
 ## [1.4.0] - 2026-10-31
 

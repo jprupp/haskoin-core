@@ -1247,10 +1247,11 @@ signPsbt net ctx signer psbt = do
         sighash <- fromMaybe sigHashAll <$> sigHashType m
         sigInput <- signingInput ctx input coin sighash m
         records <- inputDerivations ctx m
-        let signature :: PublicKey -> SecKey -> ByteString
-            signature public secret = encodeTxSig net ctx (makeSignature net ctx psbt.unsignedTx i sigInput (PrivateKey secret public.compress))
+        let signature :: PublicKey -> SecKey -> Either String ByteString
+            signature public secret = encodeTxSig net ctx <$> makeSignature net ctx psbt.unsignedTx i sigInput (PrivateKey secret public.compress)
             keys = [(public, secret) | (public, d) <- records, Just secret <- [signer public d]]
-        return (foldr (\(public, secret) -> insertPartialSignature ctx public (signature public secret)) m keys, [sighash | not (null keys)])
+        signatures <- forM keys $ \(public, secret) -> (,) public <$> signature public secret
+        return (foldr (\(public, sig) -> insertPartialSignature ctx public sig) m signatures, [sighash | not (null keys)])
       _ -> return (m, [])
   return $ foldr afterSignature (Psbt psbt.version psbt.unsignedTx psbt.globals (fst <$> signed) psbt.outputs) (concatMap snd signed)
 

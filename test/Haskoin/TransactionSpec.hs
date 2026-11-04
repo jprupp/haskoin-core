@@ -317,7 +317,7 @@ testDetSignNestedTx net ctx (tx, sigis, prv) =
         signNestedWitnessTx net ctx txSigP sigis [(head prv).key]
     verData = handleSegwit <$> sigis
     handleSegwit (SigInput s v o _ _)
-      | isSegwit s = (toP2SH (encodeOutput ctx s), v, o)
+      | isSegwit s = (toP2SH (either error id (encodeOutput ctx s)), v, o)
       | otherwise = (s, v, o)
 
 testMergeTx :: Network -> Ctx -> ([Tx], [(ScriptOutput, Word64, OutPoint, Int, Int)]) -> Bool

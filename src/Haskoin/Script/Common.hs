@@ -4,6 +4,7 @@
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE NoFieldSelectors #-}
 
 -- |
@@ -18,9 +19,12 @@
 module Haskoin.Script.Common
   ( -- * Scripts
     ScriptOp (..),
+    pattern OP_CHECKSIGADD,
     Script (..),
     PushDataType (..),
     isPushOp,
+    pushOpData,
+    isMinimalPush,
     opPushData,
     intToScriptOp,
     scriptOpToInt,
@@ -38,8 +42,8 @@ import Data.ByteString.Builder (char7)
 import Data.Bytes.Get
 import Data.Bytes.Put
 import Data.Bytes.Serial
-import Data.Either (fromRight)
 import Data.Hashable
+import Data.Maybe (isJust)
 import Data.Serialize (Serialize (..))
 import Data.Word (Word8)
 import GHC.Generics (Generic)
@@ -104,6 +108,12 @@ data PushDataType
   deriving (Show, Read, Eq, Generic, Hashable, NFData)
 
 -- | Data type representing an operator allowed inside a 'Script'.
+--
+-- An 'OP_PUSHDATA' must carry a payload that fits its 'PushDataType': at most
+-- 75 bytes for 'OPCODE', 255 for 'OPDATA1', 65535 for 'OPDATA2'. Serializing
+-- a push that breaks this invariant fails with an 'error' call, because no
+-- byte sequence can represent it. Build pushes with 'opPushData' to get the
+-- minimal encoding.
 data ScriptOp
   = -- Pushing Data
     OP_PUSHDATA
@@ -224,7 +234,8 @@ data ScriptOp
   | OP_NOP8
   | OP_NOP9
   | OP_NOP10
-  | -- Bitcoin Cash Nov 2018 hard fork
+  | -- Bitcoin Cash Nov 2018 hard fork. Opcode 0xba is 'OP_CHECKSIGADD' in
+    -- Tapscript (BIP 342), see the pattern synonym of that name.
     OP_CHECKDATASIG
   | OP_CHECKDATASIGVERIFY
   | -- Bitcoin Cash May 2020 hard fork
@@ -234,6 +245,13 @@ data ScriptOp
   | OP_PUBKEY
   | OP_INVALIDOPCODE !Word8
   deriving (Show, Read, Eq, Generic, Hashable, NFData)
+
+-- | Opcode 0xba as Tapscript (BIP 342) names it. It is the same opcode as
+-- 'OP_CHECKDATASIG' of Bitcoin Cash, so a value built with either name is
+-- equal to the other and serializes to the same byte. 'Show' prints the
+-- Bitcoin Cash name.
+pattern OP_CHECKSIGADD :: ScriptOp
+pattern OP_CHECKSIGADD = OP_CHECKDATASIG
 
 instance Serial ScriptOp where
   deserialize = go . fromIntegral =<< getWord8
@@ -398,7 +416,7 @@ instance Serial ScriptOp where
           putWord8 0x4d
           putWord16le $ fromIntegral len
         OPDATA4 -> do
-          unless (len <= 0x7fffffff) $
+          unless (len <= 0xffffffff) $
             error "OP_PUSHDATA OPDATA4: Payload size too big"
           putWord8 0x4e
           putWord32le $ fromIntegral len
@@ -539,33 +557,38 @@ instance Serialize ScriptOp where
   put = serialize
   get = deserialize
 
--- | Check whether opcode is only data.
+-- | Check whether opcode is only data: 'OP_PUSHDATA', 'OP_0', 'OP_1NEGATE' or
+-- one of 'OP_1' to 'OP_16'.
 isPushOp :: ScriptOp -> Bool
-isPushOp op = case op of
-  OP_PUSHDATA _ _ -> True
-  OP_0 -> True
-  OP_1NEGATE -> True
-  OP_1 -> True
-  OP_2 -> True
-  OP_3 -> True
-  OP_4 -> True
-  OP_5 -> True
-  OP_6 -> True
-  OP_7 -> True
-  OP_8 -> True
-  OP_9 -> True
-  OP_10 -> True
-  OP_11 -> True
-  OP_12 -> True
-  OP_13 -> True
-  OP_14 -> True
-  OP_15 -> True
-  OP_16 -> True
-  _ -> False
+isPushOp = isJust . pushOpData
 
--- | Optimally encode data using one of the 4 types of data pushing opcodes.
+-- | The data that a push opcode puts on the stack. 'OP_0' pushes the empty
+-- string, 'OP_1' to 'OP_16' push one byte with that value, 'OP_1NEGATE'
+-- pushes the byte 0x81, and 'OP_PUSHDATA' pushes its payload. Other opcodes
+-- push nothing and give 'Nothing'.
+pushOpData :: ScriptOp -> Maybe ByteString
+pushOpData op = case op of
+  OP_PUSHDATA bs _ -> Just bs
+  OP_0 -> Just B.empty
+  OP_1NEGATE -> Just (B.singleton 0x81)
+  _ -> B.singleton . fromIntegral <$> either (const Nothing) Just (scriptOpToInt op)
+
+-- | Is the opcode a push in its shortest encoding? This is the rule of
+-- @CheckMinimalPush@ in Bitcoin Core, which the @MINIMALDATA@ policy flag
+-- enforces: the empty string is 'OP_0', one byte from 1 to 16 is the matching
+-- 'OP_1' to 'OP_16', the byte 0x81 is 'OP_1NEGATE', and other data uses the
+-- smallest 'PushDataType' that holds it. An opcode that pushes nothing is not
+-- a minimal push.
+isMinimalPush :: ScriptOp -> Bool
+isMinimalPush op = maybe False (\bs -> opPushData bs == op) (pushOpData op)
+
+-- | Encode data as the push opcode of its minimal encoding, see
+-- 'isMinimalPush'.
 opPushData :: ByteString -> ScriptOp
 opPushData bs
+  | len == 0 = OP_0
+  | len == 1, Right op <- intToScriptOp (fromIntegral (B.head bs)) = op
+  | bs == B.singleton 0x81 = OP_1NEGATE
   | len <= 0x4b = OP_PUSHDATA bs OPCODE
   | len <= 0xff = OP_PUSHDATA bs OPDATA1
   | len <= 0xffff = OP_PUSHDATA bs OPDATA2
@@ -574,25 +597,46 @@ opPushData bs
   where
     len = B.length bs
 
--- | Transforms integers @[1 .. 16]@ to 'ScriptOp' @[OP_1 .. OP_16]@.
-intToScriptOp :: Int -> ScriptOp
-intToScriptOp i
-  | i `elem` [1 .. 16] = op
-  | otherwise = err
-  where
-    op =
-      fromRight err
-        . runGetS deserialize
-        . B.singleton
-        . fromIntegral
-        $ i + 0x50
-    err = error $ "intToScriptOp: Invalid integer " ++ show i
+-- | Transforms integers @[1 .. 16]@ to 'ScriptOp' @[OP_1 .. OP_16]@. Other
+-- integers give a 'Left'.
+intToScriptOp :: Int -> Either String ScriptOp
+intToScriptOp i = case i of
+  1 -> Right OP_1
+  2 -> Right OP_2
+  3 -> Right OP_3
+  4 -> Right OP_4
+  5 -> Right OP_5
+  6 -> Right OP_6
+  7 -> Right OP_7
+  8 -> Right OP_8
+  9 -> Right OP_9
+  10 -> Right OP_10
+  11 -> Right OP_11
+  12 -> Right OP_12
+  13 -> Right OP_13
+  14 -> Right OP_14
+  15 -> Right OP_15
+  16 -> Right OP_16
+  _ -> Left $ "intToScriptOp: invalid integer " ++ show i
 
--- | Decode 'ScriptOp' @[OP_1 .. OP_16]@ to integers @[1 .. 16]@. This functions
--- fails for other values of 'ScriptOp'
+-- | Decode 'ScriptOp' @[OP_1 .. OP_16]@ to integers @[1 .. 16]@. Other
+-- opcodes give a 'Left'.
 scriptOpToInt :: ScriptOp -> Either String Int
-scriptOpToInt s
-  | res `elem` [1 .. 16] = return res
-  | otherwise = Left $ "scriptOpToInt: invalid opcode " ++ show s
-  where
-    res = fromIntegral (B.head $ runPutS $ serialize s) - 0x50
+scriptOpToInt op = case op of
+  OP_1 -> Right 1
+  OP_2 -> Right 2
+  OP_3 -> Right 3
+  OP_4 -> Right 4
+  OP_5 -> Right 5
+  OP_6 -> Right 6
+  OP_7 -> Right 7
+  OP_8 -> Right 8
+  OP_9 -> Right 9
+  OP_10 -> Right 10
+  OP_11 -> Right 11
+  OP_12 -> Right 12
+  OP_13 -> Right 13
+  OP_14 -> Right 14
+  OP_15 -> Right 15
+  OP_16 -> Right 16
+  _ -> Left $ "scriptOpToInt: invalid opcode " ++ show op
