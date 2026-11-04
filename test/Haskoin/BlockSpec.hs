@@ -856,6 +856,7 @@ asertSpec = describe "asert" $ do
   let t0 = asertNet.genesisHeader.timestamp
       halfLife = 2 * 24 * 60 * 60
       regtestLimit = 0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+      mainnetLimit = 0x00000000ffff0000000000000000000000000000000000000000000000000000
       -- thirty blocks ten minutes apart; block 15 is the first whose median
       -- time past reaches the activation time
       steady = evenlySpaced asertNet 600 30 0x1f400000
@@ -868,13 +869,30 @@ asertSpec = describe "asert" $ do
     requiredOn asertNet (take 15 steady) (t0 + 600 * 16) `shouldBe` 0x1f400000
   it "keeps the target later on the schedule" $
     requiredOn asertNet steady (t0 + 600 * 31) `shouldBe` 0x1f400000
-  it "doubles the target when the chain is a half-life behind" $
-    -- 2^246 * 2 = 2^247 = 0x80 * 2^240, whose sign bit moves the mantissa down one byte
-    requiredOn asertNet (take 15 steady) (t0 + 600 * 16 + halfLife) `shouldBe` 0x20008000
-  it "halves the target when the chain is a half-life ahead" $
-    requiredOn asertNet (take 15 steady) (t0 + 600 * 16 - halfLife) `shouldBe` 0x1f200000
-  it "ignores the gap to the parent on mainnet" $
-    requiredOn asertNet steady (t0 + 600 * 31 + halfLife) `shouldBe` 0x20008000
+  it "ignores the timestamp of the block itself" $ do
+    -- The chain up to the parent is on schedule. A block that is a half-life
+    -- late or early still carries the unchanged bits; only its children see
+    -- the delay.
+    requiredOn asertNet steady (t0 + 600 * 31 + halfLife) `shouldBe` 0x1f400000
+    requiredOn asertNet steady (t0 + 600 * 31 - halfLife) `shouldBe` 0x1f400000
+  it "connects a block that is not exactly ten minutes after its parent" $
+    -- Block 31 comes 428 seconds after block 30, as mainnet block 975899
+    -- came after its parent, with the unchanged bits of the chain.
+    withChain asertNet (storeChain steady >>= connectLate) `shouldBe` Right 31
+  it "doubles the target after a parent that is a half-life late" $
+    -- Block 16 is 172800 seconds late. From the anchor's parent, block 14,
+    -- to block 16 the chain took 1200 + 172800 seconds for two blocks, one
+    -- half-life behind schedule. 2^246 * 2 = 2^247 = 0x80 * 2^240, whose sign
+    -- bit moves the mantissa down one byte.
+    let late = (t0 + 600 * 16 + halfLife, 0x1f400000)
+     in requiredOn asertNet (take 15 steady ++ [late]) (t0 + 600 * 17 + halfLife) `shouldBe` 0x20008000
+  it "halves the target after a chain that is a half-life ahead" $
+    -- 300 blocks 24 seconds apart follow the anchor, block 15. From the
+    -- anchor's parent to block 315 the chain took 600 + 300 * 24 = 7800
+    -- seconds for 301 blocks instead of 301 * 600 = 180600, which is one
+    -- half-life (172800 seconds) ahead of schedule.
+    let fast = [(t0 + 600 * 15 + 24 * i, 0x1f400000) | i <- [1 .. 300]]
+     in requiredOn asertNet (take 15 steady ++ fast) (t0 + 600 * 15 + 24 * 301) `shouldBe` 0x1f200000
   it "allows the minimum difficulty after twice the target spacing on test networks" $
     let testNet = (asertNet :: Network) {minDiffBlocks = True}
      in requiredOn testNet steady (t0 + 600 * 31 + halfLife) `shouldBe` 0x207fffff
@@ -892,6 +910,12 @@ asertSpec = describe "asert" $ do
   it "does not lower the target below one" $
     -- a target of one halved ten times
     computeAsertBits regtestLimit 172800 0x01010000 (1200 - 10 * 172800) 1 `shouldBe` 0x01010000
+  it "computes the bits of Bitcoin Cash mainnet block 975899" $
+    -- The anchor is block 661647 with bits 0x1804dafe and its parent is dated
+    -- 1605447844. Block 975898, the parent of 975899, is dated 1793800487:
+    -- 1793800487 - 1605447844 = 188352643 seconds and 975898 - 661647 =
+    -- 314251 blocks after the anchor.
+    computeAsertBits mainnetLimit 172800 0x1804dafe 188352643 314251 `shouldBe` 0x1802308e
   describe "aserti3-2d test vectors" $
     mapM_
       ( \x ->
@@ -900,6 +924,13 @@ asertSpec = describe "asert" $ do
       )
       [(1 :: Int) .. 12]
   where
+    -- Mine block 31 with the chain's bits 428 seconds after block 30 and
+    -- connect it with every rule checked.
+    connectLate :: [BlockNode] -> State HeaderMemory (Either String BlockHeight)
+    connectLate nodes =
+      let parent = (last nodes).header
+          t0 = asertNet.genesisHeader.timestamp
+       in connectHeight asertNet myTime (mineOn asertNet parent (t0 + 600 * 30 + 428) 0x1f400000)
     anchorHeights = withChain asertNet $ do
       nodes <- storeChain (evenlySpaced asertNet 600 30 0x1f400000)
       forM [nodes !! 13, nodes !! 14, nodes !! 19, last nodes] $ \n ->
