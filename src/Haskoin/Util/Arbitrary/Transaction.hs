@@ -59,7 +59,9 @@ arbitraryInputKind :: Gen InputKind
 arbitraryInputKind = do
   (m, n) <- arbitraryMSParam
   elements
-    [ InputPKHash,
+    [ InputPK,
+      InputPKHash,
+      InputUncompressedPKHash,
       InputMulSig m n,
       InputWitnessPKHash,
       InputWitnessMulSig m n,
@@ -68,10 +70,21 @@ arbitraryInputKind = do
       InputTaproot
     ]
 
--- | Arbitrary kind of output
+-- | Arbitrary kind of output. An 'OutputScript' is up to 10000 bytes, the
+-- most a script may have.
 arbitraryOutputKind :: Gen OutputKind
 arbitraryOutputKind =
-  elements [OutputPKHash, OutputScriptHash, OutputWitnessPKHash, OutputWitnessScriptHash, OutputTaproot]
+  oneof
+    [ elements
+        [ OutputPKHash,
+          OutputScriptHash,
+          OutputScript32Hash,
+          OutputWitnessPKHash,
+          OutputWitnessScriptHash,
+          OutputTaproot
+        ],
+      OutputScript <$> choose (0, 10000)
+    ]
 
 -- | Arbitrary 'OutPoint'.
 arbitraryOutPoint :: Gen OutPoint
