@@ -12,16 +12,12 @@ packages:
   original:
     hackage: base16-2.0
 - completed:
-    commit: 29e7ca97790254a4f1b4608733fd92473ff0bf27
-    git: https://github.com/jprupp/secp256k1-haskell.git
-    name: secp256k1-haskell
+    hackage: secp256k1-haskell-2.0.0@sha256:3ab1622f95127f9545b6a5c28acd7d57c9744c53d71a6d42a4777b79ca54c4c0,2690
     pantry-tree:
-      sha256: bc73509de07e42f6a850519484c155ada6ba2d3c42e95e940bad38f4a66b3bc3
-      size: 1702
-    version: 2.0.0
+      sha256: d6d47aa4e8544987e89be742f9e455dd1392bdd1906dd6ff63d9cddf20408556
+      size: 1340
   original:
-    commit: 29e7ca97790254a4f1b4608733fd92473ff0bf27
-    git: https://github.com/jprupp/secp256k1-haskell.git
+    hackage: secp256k1-haskell-2.0.0
 snapshots:
 - completed:
     sha256: 5a365a790387c6fee9c1158c97f3701fdb34e523ba85730c8f0e45e1c4c30a7b

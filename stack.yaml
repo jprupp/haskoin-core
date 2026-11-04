@@ -1,8 +1,7 @@
 resolver: nightly-2026-10-28
 extra-deps:
   - base16-2.0
-  - git: https://github.com/jprupp/secp256k1-haskell.git
-    commit: 29e7ca97790254a4f1b4608733fd92473ff0bf27
+  - secp256k1-haskell-2.0.0
 nix:
   packages:
     - secp256k1
