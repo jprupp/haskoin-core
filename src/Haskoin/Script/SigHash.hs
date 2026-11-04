@@ -174,10 +174,17 @@ isSigHashNone = (== sigHashNone) . (.&. 0x1f)
 isSigHashSingle :: SigHash -> Bool
 isSigHashSingle = (== sigHashSingle) . (.&. 0x1f)
 
--- | Returns 'True' if the 'SigHash' has the value 'SIGHASH_UNKNOWN'.
+-- | Is the hash type byte one that no node accepts in a signature? This is
+-- the test of @IsDefinedHashtypeSignature@ in Bitcoin Core, which the
+-- @STRICTENC@ flag enforces: after masking the 'SIGHASH_ANYONECANPAY' and
+-- 'SIGHASH_FORKID' bits, the byte must be 'SIGHASH_ALL', 'SIGHASH_NONE' or
+-- 'SIGHASH_SINGLE'. Whether the 'SIGHASH_FORKID' bit itself is allowed
+-- depends on the network, see 'decodeTxSig'. Only the low byte is looked at,
+-- since a fork id may sit in the upper bytes.
 isSigHashUnknown :: SigHash -> Bool
-isSigHashUnknown =
-  (`notElem` [sigHashAll, sigHashNone, sigHashSingle]) . (.&. 0x1f)
+isSigHashUnknown sh = base < sigHashAll || base > sigHashSingle
+  where
+    base = (sh .&. 0xff) .&. complement (sigHashAnyoneCanPay .|. sigHashForkId)
 
 -- | Add a fork id to a 'SigHash'.
 sigHashAddForkId :: SigHash -> Word32 -> SigHash
@@ -192,7 +199,23 @@ sigHashAddNetworkId net =
 sigHashGetForkId :: SigHash -> Word32
 sigHashGetForkId (SigHash n) = fromIntegral $ n `shiftR` 8
 
--- | Computes the hash that will be used for signing a transaction.
+-- | Computes the hash that will be used for signing a transaction input that
+-- is not a SegWit input.
+--
+-- The script is the @scriptCode@ of the input: the output script being spent,
+-- or the redeem script for a pay-to-script-hash output. If that script
+-- contains 'OP_CODESEPARATOR', the caller must pass the part after the last
+-- 'OP_CODESEPARATOR' executed before the signature check, as consensus
+-- defines it. Any 'OP_CODESEPARATOR' left in that part is removed here, as
+-- @FindAndDelete@ does in Bitcoin Core.
+--
+-- On a network with a fork id, such as Bitcoin Cash, every signature must use
+-- the fork id digest of 'txSigHashForkId', so the 'SigHash' must carry the
+-- 'SIGHASH_FORKID' flag and the digest is computed by that function. A
+-- 'SigHash' without the flag fails, instead of producing a digest no node
+-- accepts.
+--
+-- Fails when the input index is not an index of the transaction.
 txSigHash ::
   Network ->
   -- | transaction to sign
@@ -206,14 +229,18 @@ txSigHash ::
   -- | what to sign
   SigHash ->
   -- | hash to be signed
-  Hash256
+  Either String Hash256
 txSigHash net tx out v i sh
-  | hasForkIdFlag sh && isJust net.sigHashForkId =
+  | i < 0 || i >= length tx.inputs =
+      Left "txSigHash: input index out of range"
+  | isJust net.sigHashForkId && not (hasForkIdFlag sh) =
+      Left "txSigHash: SIGHASH_FORKID is required on this network"
+  | isJust net.sigHashForkId =
       txSigHashForkId net tx out v i sh
   | otherwise = do
       let newIn = buildInputs tx.inputs fout i sh
       -- When SigSingle and input index > outputs, then sign integer 1
-      fromMaybe one $ do
+      return . fromMaybe one $ do
         newOut <- buildOutputs tx.outputs i sh
         let newTx = Tx tx.version newIn newOut [] tx.locktime
         return . doubleSHA256 . runPutS $ do
@@ -223,12 +250,16 @@ txSigHash net tx out v i sh
     fout = Script $ filter (/= OP_CODESEPARATOR) out.ops
     one = "0100000000000000000000000000000000000000000000000000000000000000"
 
--- | Build transaction inputs for computing sighashes.
+-- | Build transaction inputs for computing sighashes. With
+-- 'SIGHASH_ANYONECANPAY' only the signed input remains. With 'SIGHASH_NONE'
+-- or 'SIGHASH_SINGLE' the sequence numbers of the other inputs are zero. Any
+-- other base type, including the undefined ones, behaves as 'SIGHASH_ALL',
+-- as in Bitcoin Core.
 buildInputs :: [TxIn] -> Script -> Int -> SigHash -> [TxIn]
 buildInputs txins out i sh
   | anyoneCanPay sh = [serialOut (txins !! i)]
-  | isSigHashAll sh || isSigHashUnknown sh = single
-  | otherwise = zipWith noSeq single [0 ..]
+  | isSigHashNone sh || isSigHashSingle sh = zipWith noSeq single [0 ..]
+  | otherwise = single
   where
     serialOut TxIn {..} = TxIn {script = runPutS $ serialize out, ..}
     emptyIn TxIn {..} = TxIn {script = B.empty, ..}
@@ -236,18 +267,31 @@ buildInputs txins out i sh
     single = updateIndex i emptyIns serialOut
     noSeq TxIn {..} j = TxIn {sequence = if i == j then sequence else 0, ..}
 
--- | Build transaction outputs for computing sighashes.
+-- | Build transaction outputs for computing sighashes. 'SIGHASH_NONE' signs
+-- no output. 'SIGHASH_SINGLE' signs the output at the input index, with the
+-- outputs before it blanked, and gives 'Nothing' when there is no such
+-- output. Any other base type signs every output.
 buildOutputs :: [TxOut] -> Int -> SigHash -> Maybe [TxOut]
 buildOutputs txos i sh
-  | isSigHashAll sh || isSigHashUnknown sh = return txos
   | isSigHashNone sh = return []
+  | not (isSigHashSingle sh) = return txos
   | i >= length txos = Nothing
   | otherwise = return $ buffer ++ [txos !! i]
   where
     buffer = replicate i $ TxOut maxBound B.empty
 
--- | Compute the hash that will be used for signing a transaction. This
--- function is used when the 'SIGHASH_FORKID' flag is set.
+-- | Compute the digest of BIP 143, used for SegWit version 0 inputs on
+-- Bitcoin and, with the fork id of the network, for every input on Bitcoin
+-- Cash.
+--
+-- The script is the @scriptCode@ of BIP 143: the pay-to-public-key-hash
+-- script of the key for a pay-to-witness-public-key-hash input, or the
+-- witness script for a pay-to-witness-script-hash input. If it contains
+-- 'OP_CODESEPARATOR', the caller must pass the part after the last one
+-- executed before the signature check. Unlike 'txSigHash', nothing is removed
+-- from that part, as BIP 143 specifies.
+--
+-- Fails when the input index is not an index of the transaction.
 txSigHashForkId ::
   Network ->
   -- | transaction to sign
@@ -261,9 +305,11 @@ txSigHashForkId ::
   -- | what to sign
   SigHash ->
   -- | hash to be signed
-  Hash256
-txSigHashForkId net tx out v i sh =
-  doubleSHA256 . runPutS $ do
+  Either String Hash256
+txSigHashForkId net tx out v i sh
+  | i < 0 || i >= length tx.inputs =
+      Left "txSigHashForkId: input index out of range"
+  | otherwise = Right . doubleSHA256 . runPutS $ do
     putWord32le tx.version
     serialize hashPrevouts
     serialize hashSequence
@@ -299,6 +345,14 @@ txSigHashForkId net tx out v i sh =
 -- | Data type representing a signature together with a 'SigHash'. The 'SigHash'
 -- is serialized as one byte at the end of an ECDSA 'Sig'. All signatures in
 -- transaction inputs are of type 'TxSignature'.
+--
+-- The binary form is as strict as the @DERSIG@, @LOW_S@ and @STRICTENC@ flags
+-- of Bitcoin Core: strict DER, a low S value, non-zero components, a defined
+-- hash type byte ('isSigHashUnknown'), the 'SIGHASH_FORKID' flag exactly on
+-- the networks that have a fork id, and nothing after the hash type byte.
+-- These are the policy rules every node applies to new transactions. Inputs
+-- mined before BIP 66 and the low-S rule may hold signatures that this form
+-- rejects, so it is not a parser for the whole chain history.
 data TxSignature
   = TxSignature
       { sig :: !Sig,
@@ -324,6 +378,8 @@ instance Marshal (Network, Ctx) TxSignature where
           fail "Non-canonical signature: unknown hashtype byte"
         when (isNothing net.sigHashForkId && hasForkIdFlag sh) $
           fail "Non-canonical signature: invalid network for forkId"
+        when (isJust net.sigHashForkId && not (hasForkIdFlag sh)) $
+          fail "Non-canonical signature: SIGHASH_FORKID is required on this network"
         return $ TxSignature sig sh
 
 instance MarshalJSON (Network, Ctx) TxSignature where
@@ -337,9 +393,13 @@ instance MarshalJSON (Network, Ctx) TxSignature where
           Left e -> fail e
           Right s -> return s
 
+-- | Serialize a signature with its hash type byte. 'TxSignatureEmpty' is the
+-- empty string.
 encodeTxSig :: Network -> Ctx -> TxSignature -> ByteString
 encodeTxSig net ctx = runPutS . marshalPut (net, ctx)
 
+-- | Parse a signature with its hash type byte, under the rules listed at
+-- 'TxSignature'. The empty string is 'TxSignatureEmpty'.
 decodeTxSig :: Network -> Ctx -> ByteString -> Either String TxSignature
 decodeTxSig net ctx =
   runGetS $ do

@@ -103,7 +103,7 @@ viewWitnessProgram ::
 viewWitnessProgram net ctx so witness = case so of
   PayWitnessPKHash _ | length witness == 2 -> do
     sig <- decodeTxSig net ctx (head witness)
-    pubkey <- unmarshal ctx $ witness !! 1
+    pubkey <- decodePubKey ctx $ witness !! 1
     return . P2WPKH $ WitnessProgramPKH sig pubkey
   PayWitnessScriptHash _ | not (null witness) -> do
     redeemScript <- runGetS deserialize $ last witness
@@ -130,7 +130,7 @@ decodeWitnessInput net ctx = \case
       (PayPKHash _, [sigBS, keyBS]) ->
         SpendPKHash
           <$> decodeTxSig net ctx sigBS
-          <*> unmarshal ctx keyBS
+          <*> decodePubKey ctx keyBS
       (PayMulSig _ _, "" : sigsBS) ->
         SpendMulSig
           <$> traverse (decodeTxSig net ctx) sigsBS
@@ -152,15 +152,15 @@ calcWitnessProgram net ctx so si = case (so, si) of
   (PayScriptHash {}, RegularInput (SpendPKHash sig pk)) ->
     Right $ p2wpkh sig pk
   (PayWitnessScriptHash {}, ScriptHashInput i o) ->
-    Right $ p2wsh i o
+    p2wsh i o
   (PayScriptHash {}, ScriptHashInput i o) ->
-    Right $ p2wsh i o
+    p2wsh i o
   _ -> Left "calcWitnessProgram: Invalid segwit SigInput"
   where
     p2wpkh sig =
       P2WPKH . WitnessProgramPKH sig
-    p2wsh i =
-      P2WSH . WitnessProgramSH (simpleInputStack net ctx i) . encodeOutput ctx
+    p2wsh i o =
+      P2WSH . WitnessProgramSH (simpleInputStack net ctx i) <$> encodeOutput ctx o
 
 -- | Create the witness stack required to spend a standard P2WSH input
 --

@@ -419,7 +419,7 @@ testP2WSHMulsig ctx =
     rdm = PayMulSig (toPubKey ctx <$> keys) 2
     sigIn =
       SigInput
-        (toP2WSH $ encodeOutput ctx rdm)
+        (toP2WSH $ either error id $ encodeOutput ctx rdm)
         100000000
         op0
         sigHashAll
@@ -510,7 +510,7 @@ testBip143p2shp2wpkhMulsig ctx =
       ]
     Just keys = traverse secHexKey rawKeys
     rdm = PayMulSig (toPubKey ctx <$> keys) 6
-    sigIn sh = SigInput (toP2WSH $ encodeOutput ctx rdm) 987654321 op0 sh (Just rdm)
+    sigIn sh = SigInput (toP2WSH $ either error id $ encodeOutput ctx rdm) 987654321 op0 sh (Just rdm)
     sigHashesA = [sigHashAll, sigHashNone, sigHashSingle]
     sigHashesB = setAnyoneCanPay <$> sigHashesA
     sigIns = sigIn <$> (sigHashesA <> sigHashesB)

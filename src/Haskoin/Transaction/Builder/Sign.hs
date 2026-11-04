@@ -138,14 +138,13 @@ signInput ::
   PrivateKey ->
   Either String Tx
 signInput net ctx tx i (sigIn@(SigInput so val _ _ rdmM), nest) key = do
-  let sig = makeSignature net ctx tx i sigIn key
+  sig <- makeSignature net ctx tx i sigIn key
   si <- buildInput net ctx tx i so val rdmM sig $ derivePublicKey ctx key
   w <- updatedWitnessData net ctx tx i so si
   return tx {inputs = nextTxIn so si, witness = w}
   where
     f si TxIn {..} = TxIn {script = marshal (net, ctx) si, ..}
-    g so' TxIn {..} = TxIn {script = pkScript so', ..}
-    pkScript so' = runPutS . serialize . opPushData $ marshal ctx so'
+    g so' = f (NestedWitnessInput so')
     nextTxIn so' si
       | isSegwit so' && nest = updateIndex i tx.inputs (g so')
       | isSegwit so' = tx.inputs
@@ -264,11 +263,8 @@ buildInput net ctx tx i so val rdmM sig pub = do
       inp <- buildRegularInput rdm
       return $ ScriptHashInput inp.get rdm
     f (TxSignature x sh) p =
-      verifyHashSig
-        ctx
-        (makeSigHash net ctx tx i so val sh rdmM)
-        x
-        p.point
+      either (const False) (\m -> verifyHashSig ctx m x p.point) $
+        makeSigHash net ctx tx i so val sh rdmM
     f TxSignatureEmpty _ = False
 
 -- | Apply heuristics to extract the signatures for a particular input that are
@@ -285,15 +281,22 @@ parseExistingSigs net ctx tx so i = insSigs <> witSigs
     scp = (tx.inputs !! i).script
     witSigs
       | not $ isSegwit so = []
-      | null tx.witness = []
+      | length tx.witness <= i = []
       | otherwise = rights $ decodeTxSig net ctx <$> (tx.witness !! i)
 
--- | Produce a structured representation of a deterministic (RFC-6979) signature over an input.
-makeSignature :: Network -> Ctx -> Tx -> Int -> SigInput -> PrivateKey -> TxSignature
-makeSignature net ctx tx i (SigInput so val _ sh rdmM) key =
-  TxSignature (signHash ctx key.key m) sh
+-- | Produce a structured representation of a deterministic (RFC-6979)
+-- signature over an input. On a network with a fork id, such as Bitcoin
+-- Cash, the 'SIGHASH_FORKID' flag is added to the 'SigHash' of the
+-- 'SigInput', since every signature there must carry it. Fails when the
+-- input index is out of range or the output script cannot be encoded.
+makeSignature :: Network -> Ctx -> Tx -> Int -> SigInput -> PrivateKey -> Either String TxSignature
+makeSignature net ctx tx i (SigInput so val _ sh rdmM) key = do
+  m <- makeSigHash net ctx tx i so val sh' rdmM
+  return $ TxSignature (signHash ctx key.key m) sh'
   where
-    m = makeSigHash net ctx tx i so val sh rdmM
+    sh'
+      | isJust net.sigHashForkId = setForkIdFlag sh
+      | otherwise = sh
 
 -- | A function which selects the digest algorithm and parameters as appropriate
 --
@@ -307,8 +310,10 @@ makeSigHash ::
   Word64 ->
   SigHash ->
   Maybe RedeemScript ->
-  Hash256
-makeSigHash net ctx tx i so val sh rdmM = h net tx (encodeOutput ctx so') val i sh
+  Either String Hash256
+makeSigHash net ctx tx i so val sh rdmM = do
+  script <- encodeOutput ctx so'
+  h net tx script val i sh
   where
     so' = case so of
       PayWitnessPKHash h' -> PayPKHash h'

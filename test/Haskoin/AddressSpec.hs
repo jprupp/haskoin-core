@@ -329,6 +329,11 @@ spec = prepareContext $ \ctx -> do
     it "gives the P2SH address of the redeem script in a script hash input" $
       (addrToText btc =<< inputAddress ctx (ScriptHashInput (SpendMulSig [TxSignatureEmpty]) (multisig ctx)))
         `shouldBe` Just "38fEX6RbBBMmpu3nbbuULku1xyrrzqqqnE"
+    it "gives the P2SH address of the wrapped program in a nested witness input" $
+      -- The P2SH-P2WPKH example of BIP 143: redeem script 0014 79091972…,
+      -- script hash 4733f37cf4db86fbc2efed2500b4f4e49f312023.
+      (addrToText btc =<< inputAddress ctx (NestedWitnessInput (PayWitnessPKHash "79091972186c449eb1ded22b78e40d009bdf0089")))
+        `shouldBe` Just "38BW8nqpHSWpkf5sXrQd2xYwvnPJwP59ic"
     it "has no address for a pay-to-public-key input" $
       inputAddress ctx (RegularInput (SpendPK TxSignatureEmpty)) `shouldBe` Nothing
     it "has no address for a bare multisig input" $

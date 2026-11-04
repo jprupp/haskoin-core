@@ -25,6 +25,7 @@ module Haskoin.Crypto.Keys.Common
     PublicKey (..),
     PrivateKey (..),
     wrapPubKey,
+    decodePubKey,
     derivePublicKey,
     wrapSecKey,
     decodeSecKey,
@@ -87,14 +88,7 @@ instance MarshalJSON Ctx PublicKey where
   unmarshalValue ctx =
     withText "PublicKey" $ \t -> do
       bs <- maybe (fail "Expected hex public key") return $ decodeHex t
-      either fail return $ runGetS getWholeKey bs
-    where
-      -- The hex string must hold the key and nothing else.
-      getWholeKey = do
-        k <- marshalGet ctx
-        done <- isEmpty
-        unless done $ fail "Trailing bytes after public key"
-        return k
+      either fail return $ decodePubKey ctx bs
 
 instance Marshal Ctx PublicKey where
   marshalGet ctx = do
@@ -116,6 +110,18 @@ instance Marshal Ctx PublicKey where
 -- | Wrap a public key from secp256k1 library adding information about compression.
 wrapPubKey :: Bool -> PubKey -> PublicKey
 wrapPubKey c p = PublicKey p c
+
+-- | Decode a public key from bytes that must hold the key and nothing else:
+-- 33 bytes starting with 0x02 or 0x03, or 65 bytes starting with 0x04. The
+-- 'Marshal' instance reads a key from a longer stream and leaves the rest, so
+-- it would accept trailing bytes here. A key pushed in a script, a witness or
+-- a PSBT record is the whole item, so use this function for those.
+decodePubKey :: Ctx -> ByteString -> Either String PublicKey
+decodePubKey ctx = runGetS $ do
+  k <- marshalGet ctx
+  done <- isEmpty
+  unless done $ fail "Trailing bytes after public key"
+  return k
 
 -- | Derives a public key from a private key. This function will preserve
 -- compression flag.

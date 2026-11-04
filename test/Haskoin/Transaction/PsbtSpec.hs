@@ -724,7 +724,7 @@ signingSpec ctx =
     prop "a P2SH multisig coin, signed with enough of its keys and finalized, verifies" $
       forAll ((,) <$> arbitraryMSParam <*> arbitraryKeyPair ctx) $ \((m, n), _) ->
         forAll (vectorOf n (arbitraryKeyPair ctx)) $ \pairs ->
-          let redeem = encodeOutput ctx (PayMulSig (snd <$> pairs) m)
+          let redeem = either error id $ encodeOutput ctx (PayMulSig (snd <$> pairs) m)
               (psbt, coins) = spendingPsbt ctx (toP2SH redeem)
               withFields = withInputs ((insertInputRedeemScript redeem . foldr (\(_, public) f -> recordOf ctx public . f) id pairs) <$> psbt.inputs) psbt
            in signsAndVerifies btc ctx (fst <$> take m pairs) (withFields, coins) === Right True
@@ -733,7 +733,7 @@ signingSpec ctx =
       forAll (arbitraryKeyPair ctx) $ \(secret, public) ->
         let program = PayWitnessPKHash (addressHash (marshal ctx public))
             (native, nativeCoins) = spendingPsbt ctx program
-            redeem = encodeOutput ctx program
+            redeem = either error id $ encodeOutput ctx program
             (nested, nestedCoins) = spendingPsbt ctx (toP2SH redeem)
             nativeWithRecord = withInputs (recordOf ctx public <$> native.inputs) native
             nestedWithFields = withInputs ((insertInputRedeemScript redeem . recordOf ctx public) <$> nested.inputs) nested
@@ -743,13 +743,14 @@ signingSpec ctx =
     prop "a P2WSH multisig coin with its witness script, nested in P2SH or not, signed and finalized, verifies" $
       forAll arbitraryMSParam $ \(m, n) ->
         forAll (vectorOf n (arbitraryKeyPair ctx)) $ \pairs ->
-          let witness = encodeOutput ctx (PayMulSig (snd <$> pairs) m)
+          let witness = either error id $ encodeOutput ctx (PayMulSig (snd <$> pairs) m)
               program = toP2WSH witness
               records = foldr (\(_, public) f -> recordOf ctx public . f) id pairs
               (native, nativeCoins) = spendingPsbt ctx program
-              (nested, nestedCoins) = spendingPsbt ctx (toP2SH (encodeOutput ctx program))
+              (nested, nestedCoins) = spendingPsbt ctx (toP2SH programScript)
               nativeWithFields = withInputs ((insertInputWitnessScript witness . records) <$> native.inputs) native
-              nestedWithFields = withInputs ((insertInputRedeemScript (encodeOutput ctx program) . insertInputWitnessScript witness . records) <$> nested.inputs) nested
+              nestedWithFields = withInputs ((insertInputRedeemScript programScript . insertInputWitnessScript witness . records) <$> nested.inputs) nested
+              programScript = either error id $ encodeOutput ctx program
            in signsAndVerifies btc ctx (fst <$> take m pairs) (nativeWithFields, nativeCoins) === Right True
                 .&&. signsAndVerifies btc ctx (fst <$> take m pairs) (nestedWithFields, nestedCoins) === Right True
 
