@@ -14,7 +14,7 @@ module Haskoin.Util.Arbitrary.Transaction where
 import Control.Monad
 import Data.ByteString qualified as BS
 import Data.Either (fromRight)
-import Data.List (nub, nubBy, permutations)
+import Data.List (findIndex, nub, nubBy, permutations)
 import Data.Maybe (fromMaybe, isNothing)
 import Data.Map.Strict qualified as Map
 import Data.Word (Word32, Word64)
@@ -25,6 +25,7 @@ import Haskoin.Network.Constants
 import Haskoin.Network.Data
 import Haskoin.Script
 import Haskoin.Transaction
+import Haskoin.Transaction.Segwit (isSegwit)
 import Haskoin.Util
 import Haskoin.Util.Arbitrary.Crypto
 import Haskoin.Util.Arbitrary.Keys
@@ -272,9 +273,11 @@ arbitrarySigningData :: Network -> Ctx -> Gen (Tx, [SigInput], [PrivateKey])
 arbitrarySigningData net ctx = do
   v <- arbitrary
   ni <- choose (1, 5)
-  no <- choose (1, 5)
   sigis <- vectorOf ni (arbitrarySigInput net ctx)
   let uSigis = nubBy (\(a, _) (b, _) -> a.outpoint == b.outpoint) sigis
+  -- The signer refuses SIGHASH_SINGLE on a legacy input without an output
+  -- at its index, so every input gets an output when one asks for it
+  no <- choose (if any (legacySingle net . fst) uSigis then length uSigis else 1, 5)
   inps <- forM uSigis $ \(s, _) -> TxIn s.outpoint BS.empty <$> arbitrary
   outs <- arbitraryOutputsWithin net ctx (sum (map ((.value) . fst) uSigis)) no
   l <- arbitrary
@@ -282,6 +285,13 @@ arbitrarySigningData net ctx = do
   let tx = Tx v (permutations inps !! perm) outs [] l
       keys = concatMap snd uSigis
   return (tx, map fst uSigis, keys)
+
+-- | Whether the input is to be signed with SIGHASH_SINGLE over the legacy
+-- digest, which is the constant 1 when the input has no output at its
+-- index. 'makeSignature' refuses to sign that.
+legacySingle :: Network -> SigInput -> Bool
+legacySingle net si =
+  isSigHashSingle si.sighash && not (isSegwit si.script) && isNothing net.sigHashForkId
 
 -- | Arbitrary outputs whose values add up to at most the amount given
 arbitraryOutputsWithin :: Network -> Ctx -> Word64 -> Int -> Gen [TxOut]
@@ -319,7 +329,11 @@ arbitraryPartialTxs net ctx = do
   return (concatMap fst res, map snd res)
   where
     singleSig so val rdmM tx op prv = do
-      sh <- arbitraryValidSigHash net
+      -- The signer refuses SIGHASH_SINGLE on a legacy input without an
+      -- output at its index
+      let index = fromMaybe 0 (findIndex ((== op) . (.outpoint)) tx.inputs)
+          refused sh = index >= length tx.outputs && legacySingle net (SigInput so val op sh rdmM)
+      sh <- arbitraryValidSigHash net `suchThat` (not . refused)
       let sigi = SigInput so val op sh rdmM
       return . fromRight (error "Could not decode transaction") $
         signTx net ctx tx [sigi] [prv]

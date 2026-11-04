@@ -155,6 +155,7 @@ module Haskoin.Transaction.Psbt
 
     -- * Signing
     Signer (..),
+    defaultSigHashes,
     keySigner,
     xPrvSigner,
     signPsbt,
@@ -170,7 +171,7 @@ import Control.Monad (ap, forM, forM_, guard, replicateM, unless, when, zipWithM
 import Crypto.Hash (Digest, SHA256, digestFromByteString)
 import Crypto.Secp256k1 (Ctx, PubKey, SecKey, derivePubKey, exportXOnlyPubKey, importXOnlyPubKey, signSchnorr, verifySchnorr)
 import Data.Bifunctor (first)
-import Data.Bits (shiftL, testBit, (.&.), (.|.))
+import Data.Bits (complement, shiftL, testBit, (.&.), (.|.))
 import Data.ByteArray qualified as BA
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as B
@@ -698,11 +699,16 @@ versionOf globals = case plainField versionType globals of
       _ -> Left ("The PSBT is of version " <> show n <> ": only versions 0 and 2 are supported")
 
 -- | The unsigned transaction of the global map of version 0, which must be
--- there, in the serialization without witness, with no input script
+-- there, in the serialization without witness, with no input script. It
+-- is read with 'parseLegacyTx', as Bitcoin Core reads it without allowing
+-- a witness, so that a transaction with no inputs, which the spec allows,
+-- is not taken for the extended format of BIP 144.
 unsignedTxOf :: PsbtMap -> Either String Tx
 unsignedTxOf globals = do
   bytes <- maybe (Left "The global map has no unsigned transaction") Right (Map.lookup unsignedTxKey globals)
-  tx <- decodeFully "The unsigned transaction" bytes
+  tx <- case S.runGetState parseLegacyTx bytes 0 of
+    Right (parsed, rest) | B.null rest -> Right parsed
+    _ -> Left "The unsigned transaction does not decode"
   unless (null tx.witness && S.encode tx == bytes) $
     Left "The unsigned transaction is not in the serialization without witness"
   unless (all (B.null . (.script)) tx.inputs) $
@@ -1442,13 +1448,36 @@ insertProprietary identifier subtype = Map.insert (proprietaryKey (Proprietary i
 
 -- | Where a signer gets its private keys: by a derivation record naming a
 -- public key, or by the hash of a public key when the input has no record
--- for it. A key that is not held is 'Nothing'.
+-- for it. A key that is not held is 'Nothing'. The signer also says which
+-- sighash types it agrees to sign with.
 data Signer = Signer
   { -- | the private key of the public key a derivation record names
     keyOfRecord :: PublicKey -> Derivation -> Maybe SecKey,
     -- | the private key whose public key, compressed or not, has the hash
-    keyOfHash :: Hash160 -> Maybe PrivateKey
+    keyOfHash :: Hash160 -> Maybe PrivateKey,
+    -- | the sighash types the signer signs with. An input that asks for
+    -- another type is refused, as BIP 174 asks of a signer. The fork id
+    -- flag does not count, since the network decides it.
+    acceptedSigHashes :: [SigHash]
   }
+
+-- | The sighash types a signer accepts unless told otherwise:
+-- 'sigHashDefault', which a Taproot input uses when it asks for none, and
+-- 'sigHashAll'. The other types leave part of the transaction out of the
+-- signature, so a PSBT written by someone else may not ask for them on its
+-- own; a signer that agrees to them lists them, for example
+-- @(keySigner ctx key) {acceptedSigHashes = sigHashNone : defaultSigHashes}@.
+defaultSigHashes :: [SigHash]
+defaultSigHashes = [sigHashDefault, sigHashAll]
+
+-- | Whether the signer accepts the sighash type: it is one of its types,
+-- the fork id flag aside
+acceptsSigHash :: Signer -> SigHash -> Bool
+acceptsSigHash signer sighash =
+  withoutForkId sighash `elem` map withoutForkId signer.acceptedSigHashes
+  where
+    withoutForkId = (.&. complement forkIdBit)
+    forkIdBit = fromIntegral (fromEnum SIGHASH_FORKID)
 
 -- | A signer that holds one private key, for the records of its public
 -- key and for the hash of its public key in either form
@@ -1458,7 +1487,8 @@ keySigner ctx secret =
     { keyOfRecord = \public _ -> do
         guard (public.point == derivePubKey ctx secret)
         return secret,
-      keyOfHash = \h -> find ((== h) . addressHash . marshal ctx . derivePublicKey ctx) [PrivateKey secret True, PrivateKey secret False]
+      keyOfHash = \h -> find ((== h) . addressHash . marshal ctx . derivePublicKey ctx) [PrivateKey secret True, PrivateKey secret False],
+      acceptedSigHashes = defaultSigHashes
     }
 
 -- | A signer that derives from an extended private key. A record names a
@@ -1475,7 +1505,8 @@ xPrvSigner ctx xprv originM =
         let secret = (derivePath ctx path xprv).key
         guard (public.point == derivePubKey ctx secret)
         return secret,
-      keyOfHash = const Nothing
+      keyOfHash = const Nothing,
+      acceptedSigHashes = defaultSigHashes
     }
   where
     own = xPubFP ctx (deriveXPubKey ctx xprv)
@@ -1493,9 +1524,12 @@ xPrvSigner ctx xprv originM =
 -- 174 requires. The keys are those the derivation records of the input
 -- name, and those the coin, its redeem script or its witness script name,
 -- by hash. The sighash is the one the input asks for, SIGHASH_ALL when it
--- asks for none; a type no node accepts is refused. A P2SH coin needs its
--- redeem script in the input, and a P2WSH coin its witness script; a
--- script that does not hash to the coin is refused.
+-- asks for none; a type no node accepts, or one the signer does not accept
+-- ('acceptedSigHashes'), is refused. A legacy coin asked to sign
+-- SIGHASH_SINGLE at an input with no output is refused too, as
+-- 'makeSignature' explains. A P2SH coin needs its redeem script in the
+-- input, and a P2WSH coin its witness script; a script that does not hash
+-- to the coin is refused.
 --
 -- A Taproot coin is signed by its key path when the input has its internal
 -- key, which with the Merkle root must give the output key, and by each of
@@ -1529,6 +1563,8 @@ signPsbt net ctx signer psbt = do
     signEcdsa i input m coin coinScript witnessOnly sighashM = do
       let sighash = fromMaybe sigHashAll sighashM
       checkEcdsaSigHash net sighash
+      unless (acceptsSigHash signer sighash) $
+        Left (notAcceptedSigHash sighash)
       sigInput <- signingInput ctx input coin coinScript sighash m
       when (witnessOnly && not (isSegwit sigInput.script)) $
         Left "the coin is given as a witness output only, which may not be signed with a non-witness signature"
@@ -1547,6 +1583,8 @@ signPsbt net ctx signer psbt = do
       let sighash = fromMaybe sigHashDefault sighashM
       unless (isTaprootSigHash sighash) $
         Left ("the sighash type " <> show (fromIntegral sighash :: Word32) <> " is not one a Taproot signature may use")
+      unless (acceptsSigHash signer sighash) $
+        Left (notAcceptedSigHash sighash)
       spent <- maybe (Left "a Taproot signature needs the output every input spends") Right allCoins
       program <- taprootProgram coinScript
       internalM <- inputTapInternalKey ctx m
@@ -1601,6 +1639,11 @@ singleKeyLeaf ctx leaf = case leaf.script.ops of
   [OP_PUSHDATA keyBytes OPCODE, OP_CHECKSIG]
     | leaf.leafVersion == tapscriptLeafVersion -> importXOnlyPubKey ctx keyBytes
   _ -> Nothing
+
+-- | The error for a sighash type the signer does not accept
+notAcceptedSigHash :: SigHash -> String
+notAcceptedSigHash sighash =
+  "the sighash type " <> show (fromIntegral sighash :: Word32) <> " is not one the signer accepts"
 
 -- | A sighash type an ECDSA signature may carry on the network: one of
 -- ALL, NONE and SINGLE, with ANYONECANPAY or not, and the fork id flag

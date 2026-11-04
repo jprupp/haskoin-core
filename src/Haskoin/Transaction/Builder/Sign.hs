@@ -360,14 +360,27 @@ parseExistingSigs net ctx tx so i = insSigs <> witSigs
 -- Cash, the 'SIGHASH_FORKID' flag is added to the 'SigHash' of the
 -- 'SigInput', since every signature there must carry it. Fails when the
 -- input index is out of range or the output script cannot be encoded.
+--
+-- A legacy input signed with 'SIGHASH_SINGLE' at an index that has no
+-- output is refused. The digest of that case is the constant 1, which
+-- commits to nothing, so the signature would spend any other coin of the
+-- key wherever the same case comes up. Bitcoin Core computes that digest
+-- in @SignatureHash@, and so does 'txSigHash', since a node must verify
+-- such signatures; a signer has no reason to make one. The BIP 143 digest
+-- of a SegWit input and the fork id digest of Bitcoin Cash commit to the
+-- coin in that case, so those are signed.
 makeSignature :: Network -> Ctx -> Tx -> Int -> SigInput -> PrivateKey -> Either String TxSignature
 makeSignature net ctx tx i (SigInput so val _ sh rdmM) key = do
   m <- makeSigHash net ctx tx i so val sh' rdmM
+  when (signsConstantDigest && i >= length tx.outputs) $
+    Left "makeSignature: SIGHASH_SINGLE without an output at the input index"
   return $ TxSignature (signHash ctx key.key m) sh'
   where
     sh'
       | isJust net.sigHashForkId = setForkIdFlag sh
       | otherwise = sh
+    signsConstantDigest =
+      isSigHashSingle sh' && not (isSegwit so) && isNothing net.sigHashForkId
 
 -- | A function which selects the digest algorithm and parameters as appropriate
 --

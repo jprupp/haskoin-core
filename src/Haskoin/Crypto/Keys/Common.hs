@@ -141,7 +141,18 @@ data PrivateKey = PrivateKey
   { key :: !SecKey,
     compress :: !Bool
   }
-  deriving (Eq, Show, Read, Generic, NFData)
+  deriving (Eq, Generic, NFData)
+
+-- | The secret is not shown. A key that ends up in a log, an error message
+-- or a REPL session must not give its coins away. There is no 'Read'
+-- instance for the same reason: use 'toWif' and 'fromWif' to write a key
+-- out and read it back.
+instance Show PrivateKey where
+  showsPrec d p =
+    showParen (d > 10) $
+      showString "PrivateKey {key = <redacted>, compress = "
+        . shows p.compress
+        . showString "}"
 
 instance Serial PrivateKey where
   serialize p = do

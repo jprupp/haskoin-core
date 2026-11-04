@@ -10,6 +10,7 @@
 -- estimation, the SegWit witness helpers and the genesis coinbases.
 module Haskoin.TransactionSpec (spec) where
 
+import Control.Exception (evaluate)
 import Control.Monad (forM_, unless)
 import Data.Aeson (decode, eitherDecode)
 import Data.ByteString (ByteString)
@@ -420,6 +421,21 @@ bytesSpec ctx =
       parseTx ("01000000" <> "0001" <> "00" <> "01804a5d05000000001976a91424aa604689cc582292b97668bedd91dd5bf9374c88ac" <> "00000000")
         `shouldSatisfy` either ("Superfluous witness record" `isInfixOf`) (const False)
 
+    -- An input count of zero makes the next byte the flags of BIP 144
+    it "refuse a flags byte other than the witness bit after an empty input list, as Bitcoin Core does" $ do
+      parseTx ("01000000" <> "00" <> "02" <> "02e80300000000000000e8030000000000000000000000")
+        `shouldSatisfy` either ("Unknown transaction optional data" `isInfixOf`) (const False)
+      parseTx ("01000000" <> "00" <> "03" <> "01db494559df26b5cf3b121f05af26e0568708f5bd9ccceb41656f1654a1eb29eb0e00000000ffffffff01804a5d05000000001976a91424aa604689cc582292b97668bedd91dd5bf9374c88ac" <> "00" <> "00000000")
+        `shouldSatisfy` either ("Unknown transaction optional data" `isInfixOf`) (const False)
+
+    it "read an empty input list with a zero flags byte as a transaction with no inputs and no outputs, as Bitcoin Core does" $
+      parseTx ("01000000" <> "00" <> "00" <> "00000000") `shouldBe` Right (Tx 1 [] [] [] 0)
+
+    it "refuse a literal with bytes after the transaction" $ do
+      let legacy = "0100000001db494559df26b5cf3b121f05af26e0568708f5bd9ccceb41656f1654a1eb29eb0e00000000ffffffff01804a5d05000000001976a91424aa604689cc582292b97668bedd91dd5bf9374c88ac00000000"
+      length (fromString legacy :: Tx).inputs `shouldBe` 1
+      evaluate (fromString (legacy <> "00") :: Tx) `shouldThrow` errorCall "Could not read transaction from hex string"
+
     it "write a transaction whose witness stacks are all empty without the marker, and read it back without witness" $ do
       let legacy = "0100000001db494559df26b5cf3b121f05af26e0568708f5bd9ccceb41656f1654a1eb29eb0e00000000ffffffff01804a5d05000000001976a91424aa604689cc582292b97668bedd91dd5bf9374c88ac00000000"
       tx <- either fail return (parseTx legacy)
@@ -591,6 +607,37 @@ verificationSpec ctx =
       verifyStdTx btc ctx (buildTx ctx [] [(PayPKHash h, 1)]) [] `shouldBe` False
       -- The same coins hold less than the outputs spend
       verifyStdTx btc ctx signed [(PayPKHash h, 70000, op) | op <- ops] `shouldBe` False
+
+    it "signs SIGHASH_SINGLE on a legacy input with an output at its index and on a SegWit input, but refuses it on a legacy input without one" $ do
+      (k, p) <- generate (arbitraryKeyPair ctx)
+      let h = fromJust (addressHash160 (pubKeyAddr ctx p))
+          ops = [coinOf 0, coinOf 1]
+          -- one output, so input 1 has none at its index
+          tx = buildTx ctx ops [(PayPKHash h, 150000)]
+          legacy op = SigInput (PayPKHash h) 100000 op sigHashSingle Nothing
+          segwit op = SigInput (PayWitnessPKHash h) 100000 op sigHashSingle Nothing
+      signedFirst <- either fail return (signTx btc ctx tx [legacy (coinOf 0)] [k.key])
+      verifyStdInput btc ctx signedFirst [(PayPKHash h, 100000, coinOf 0)] 0 `shouldBe` True
+      signTx btc ctx tx [legacy (coinOf 1)] [k.key] `shouldBe` Left "makeSignature: SIGHASH_SINGLE without an output at the input index"
+      -- The BIP 143 digest commits to the coin even without an output
+      signedWitness <- either fail return (signTx btc ctx tx [segwit (coinOf 1)] [k.key])
+      verifyStdInput btc ctx signedWitness [(PayWitnessPKHash h, 100000, coinOf 1)] 1 `shouldBe` True
+
+    -- A node accepts the signature over the constant digest 1 that a
+    -- legacy SIGHASH_SINGLE input without an output has, so the verifier
+    -- must too, although the signer refuses to make one
+    it "accepts a legacy SIGHASH_SINGLE signature over the constant digest 1, as a node does" $ do
+      (k, p) <- generate (arbitraryKeyPair ctx)
+      let h = fromJust (addressHash160 (pubKeyAddr ctx p))
+          ops = [coinOf 0, coinOf 1]
+          tx = buildTx ctx ops [(PayPKHash h, 150000)]
+          one = "0100000000000000000000000000000000000000000000000000000000000000" :: Hash256
+          overOne = marshal (btc, ctx) (RegularInput (SpendPKHash (TxSignature (signHash ctx k.key one) sigHashSingle) p))
+          spent = Tx tx.version [TxIn (coinOf 0) "" 0xffffffff, TxIn (coinOf 1) overOne 0xffffffff] tx.outputs [] tx.locktime
+          spentFirst = Tx tx.version [TxIn (coinOf 0) overOne 0xffffffff, TxIn (coinOf 1) "" 0xffffffff] tx.outputs [] tx.locktime
+      verifyStdInput btc ctx spent [(PayPKHash h, 100000, coinOf 1)] 1 `shouldBe` True
+      -- The same signature on input 0, which has an output, does not verify
+      verifyStdInput btc ctx spentFirst [(PayPKHash h, 100000, coinOf 0)] 0 `shouldBe` False
 
     it "refuses a SegWit input with a non-empty input script and a wrong amount" $ do
       (k, p) <- generate (arbitraryKeyPair ctx)

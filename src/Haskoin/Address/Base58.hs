@@ -97,6 +97,13 @@ encodeBase58 bs =
 
 -- | Decode a 'Base58'-encoded 'Text' to a 'ByteString'. Returns 'Nothing' if
 -- the input contains any character outside the 'Base58' alphabet.
+--
+-- The time this takes grows with the square of the length of the input,
+-- since the digits are accumulated into one big number. Bound the length
+-- before decoding text from an untrusted source. No Bitcoin address is
+-- longer than 35 characters and no extended key longer than 112;
+-- 'Haskoin.Address.textToAddr', 'Haskoin.Crypto.Keys.fromWif' and
+-- 'Haskoin.Crypto.Keys.xPrvImport' apply those bounds themselves.
 decodeBase58 :: Base58 -> Maybe ByteString
 decodeBase58 t =
   B.append prefix <$> r
@@ -115,7 +122,9 @@ encodeBase58Check bs =
 
 -- | Decode a 'Base58'-encoded string that contains a checksum. This function
 -- returns 'Nothing' if the input string contains invalid 'Base58' characters,
--- if it is too short to hold a checksum, or if the checksum fails.
+-- if it is too short to hold a checksum, or if the checksum fails. The cost
+-- grows with the square of the length, as for 'decodeBase58': bound the
+-- length of untrusted input first.
 decodeBase58Check :: Base58 -> Maybe ByteString
 decodeBase58Check t = do
   rs <- decodeBase58 t
