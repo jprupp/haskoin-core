@@ -29,9 +29,13 @@ module Haskoin.Transaction.Common
     WitnessStack,
     WitnessStackItem,
     txHash,
+    txWitnessHash,
+    txWeight,
+    txVirtualSize,
     hexToTxHash,
     txHashToHex,
     nosigTxHash,
+    hasWitness,
     nullOutPoint,
   )
 where
@@ -63,7 +67,10 @@ import Haskoin.Network.Common
 import Haskoin.Util.Helpers
 import Text.Read as R
 
--- | Transaction id: hash of transaction excluding witness data.
+-- | A hash that identifies a transaction: the transaction id of 'txHash',
+-- which leaves the witness out, or the witness transaction id of
+-- 'txWitnessHash', which includes it. Shown in hex with the bytes reversed,
+-- as block explorers and Bitcoin Core show it.
 newtype TxHash = TxHash {get :: Hash256}
   deriving (Eq, Ord, Generic)
   deriving newtype (Hashable, NFData)
@@ -102,12 +109,14 @@ instance ToJSON TxHash where
   toJSON = A.String . txHashToHex
   toEncoding = hexEncoding . BL.reverse . runPutL . serialize
 
--- | Transaction hash excluding signatures.
+-- | Hash of the transaction with every input script and the whole witness
+-- removed, so that it is the same before and after signing, whether the
+-- signatures go in the input scripts or in the witness.
 nosigTxHash :: Tx -> TxHash
 nosigTxHash Tx {..} =
   TxHash . doubleSHA256 . runPutS $ serialize tx
   where
-    tx = Tx {inputs = map clr inputs, ..}
+    tx = Tx {inputs = map clr inputs, witness = [], ..}
     clr TxIn {..} = TxIn {script = B.empty, ..}
 
 -- | Convert transaction hash to hex form, reversing bytes.
@@ -115,10 +124,12 @@ txHashToHex :: TxHash -> Text
 txHashToHex (TxHash h) =
   encodeHex . B.reverse . runPutS $ serialize h
 
--- | Convert transaction hash from hex, reversing bytes.
+-- | Convert transaction hash from hex, reversing bytes. The hex must be
+-- exactly 32 bytes long, as @uint256::FromHex@ requires in Bitcoin Core.
 hexToTxHash :: Text -> Maybe TxHash
 hexToTxHash hex = do
   bs <- B.reverse <$> decodeHex hex
+  guard (B.length bs == 32)
   h <- either (const Nothing) Just (runGetS deserialize bs)
   return $ TxHash h
 
@@ -139,16 +150,44 @@ data Tx = Tx
     inputs :: ![TxIn],
     -- | list of transaction outputs
     outputs :: ![TxOut],
-    -- | witness data for the transaction
+    -- | witness data for the transaction: one stack per input, or empty
+    -- when no input has a witness. A transaction whose stacks are all empty
+    -- has no witness: it is serialized without the witness marker, as
+    -- Bitcoin Core serializes it, and reads back with an empty list here.
     witness :: !WitnessData,
     -- | earliest mining height or time
     locktime :: !Word32
   }
   deriving (Show, Read, Eq, Ord, Generic, Hashable, NFData)
 
--- | Compute transaction hash.
+-- | Compute transaction hash: the transaction id, which leaves the witness
+-- out.
 txHash :: Tx -> TxHash
 txHash tx = TxHash . doubleSHA256 . runPutS $ serialize tx {witness = []}
+
+-- | The witness transaction id of BIP 141: the hash of the transaction with
+-- its witness. It is the same as 'txHash' when the transaction has no
+-- witness, as @GetWitnessHash@ gives it in Bitcoin Core.
+txWitnessHash :: Tx -> TxHash
+txWitnessHash = TxHash . doubleSHA256 . runPutS . serialize
+
+-- | The weight of the transaction in weight units, as BIP 141 defines it:
+-- three times the size without the witness, plus the size with it.
+txWeight :: Tx -> Int
+txWeight tx =
+  3 * B.length (runPutS (serialize tx {witness = []})) + B.length (runPutS (serialize tx))
+
+-- | The virtual size of the transaction in virtual bytes, as BIP 141
+-- defines it: the weight divided by four, rounded up. Fees are charged by
+-- virtual byte.
+txVirtualSize :: Tx -> Int
+txVirtualSize tx = (txWeight tx + 3) `div` 4
+
+-- | Whether any input of the transaction has a witness, as @HasWitness@
+-- tells in Bitcoin Core. A transaction whose stacks are all empty has
+-- none.
+hasWitness :: Tx -> Bool
+hasWitness = any (not . null) . (.witness)
 
 instance IsString Tx where
   fromString =
@@ -159,8 +198,8 @@ instance IsString Tx where
 instance Serial Tx where
   deserialize = isWitnessTx >>= bool parseLegacyTx parseWitnessTx
   serialize tx
-    | null tx.witness = putLegacyTx tx
-    | otherwise = putWitnessTx tx
+    | hasWitness tx = putWitnessTx tx
+    | otherwise = putLegacyTx tx
 
 instance Binary Tx where
   put = serialize
@@ -172,10 +211,8 @@ instance Serialize Tx where
 
 putInOut :: (MonadPut m) => Tx -> m ()
 putInOut tx = do
-  putVarInt $ length tx.inputs
-  mapM_ serialize tx.inputs
-  putVarInt $ length tx.outputs
-  mapM_ serialize tx.outputs
+  putVarIntList serialize tx.inputs
+  putVarIntList serialize tx.outputs
 
 -- | Non-SegWit transaction serializer.
 putLegacyTx :: (MonadPut m) => Tx -> m ()
@@ -184,15 +221,19 @@ putLegacyTx tx = do
   putInOut tx
   putWord32le tx.locktime
 
--- | Witness transaciton serializer.
+-- | Witness transaction serializer. One stack is written per input: an
+-- input without a stack gets an empty one, and stacks beyond the inputs
+-- are not written.
 putWitnessTx :: (MonadPut m) => Tx -> m ()
 putWitnessTx tx = do
   putWord32le tx.version
   putWord8 0x00
   putWord8 0x01
   putInOut tx
-  putWitnessData tx.witness
+  putWitnessData $ take n (tx.witness ++ repeat [])
   putWord32le tx.locktime
+  where
+    n = length tx.inputs
 
 isWitnessTx :: (MonadGet m) => m Bool
 isWitnessTx = lookAhead $ do
@@ -201,55 +242,42 @@ isWitnessTx = lookAhead $ do
   f <- getWord8
   return (m == 0x00 && f == 0x01)
 
--- | Non-SegWit transaction deseralizer.
+-- | Non-SegWit transaction deserializer. Every count is bounded by
+-- 'maxListSize', as @ReadCompactSize@ bounds it in Bitcoin Core.
 parseLegacyTx :: (MonadGet m) => m Tx
 parseLegacyTx = do
   version <- getWord32le
-  inputs <- rl =<< deserialize
-  outputs <- rl =<< deserialize
-  when (length inputs == 0x00 && length outputs == 0x01) $
+  inputs <- getVarIntList deserialize
+  outputs <- getVarIntList deserialize
+  when (null inputs && length outputs == 0x01) $
     fail "Witness transaction"
   locktime <- getWord32le
   return Tx {witness = [], ..}
-  where
-    rl (VarInt c) = replicateM (fromIntegral c) deserialize
 
--- | Witness transaction deserializer.
+-- | Witness transaction deserializer. A transaction with the witness marker
+-- must have a witness: one whose stacks are all empty fails, as it does in
+-- Bitcoin Core ("Superfluous witness record").
 parseWitnessTx :: (MonadGet m) => m Tx
 parseWitnessTx = do
   version <- getWord32le
   m <- getWord8
   f <- getWord8
   unless (m == 0x00 && f == 0x01) $ fail "Not a witness transaction"
-  inputs <- replicateList =<< deserialize
-  outputs <- replicateList =<< deserialize
+  inputs <- getVarIntList deserialize
+  outputs <- getVarIntList deserialize
   witness <- parseWitnessData $ length inputs
+  unless (any (not . null) witness) $
+    fail "Superfluous witness record"
   locktime <- getWord32le
   return Tx {..}
-  where
-    replicateList (VarInt c) = replicateM (fromIntegral c) deserialize
 
 -- | Witness data deserializer. Requires count of inputs.
 parseWitnessData :: (MonadGet m) => Int -> m WitnessData
-parseWitnessData n = replicateM n parseWitnessStack
-  where
-    parseWitnessStack = do
-      VarInt i <- deserialize
-      replicateM (fromIntegral i) parseWitnessStackItem
-    parseWitnessStackItem = do
-      VarInt i <- deserialize
-      getByteString $ fromIntegral i
+parseWitnessData n = replicateM n (getVarIntList getVarIntBytes)
 
 -- | Witness data serializer.
 putWitnessData :: (MonadPut m) => WitnessData -> m ()
-putWitnessData = mapM_ putWitnessStack
-  where
-    putWitnessStack ws = do
-      putVarInt $ length ws
-      mapM_ putWitnessStackItem ws
-    putWitnessStackItem bs = do
-      putVarInt $ B.length bs
-      putByteString bs
+putWitnessData = mapM_ (putVarIntList putVarIntBytes)
 
 instance FromJSON Tx where
   parseJSON = withObject "Tx" $ \o ->
@@ -296,14 +324,11 @@ data TxIn = TxIn
 
 instance Serial TxIn where
   deserialize =
-    TxIn <$> deserialize <*> (readBS =<< deserialize) <*> getWord32le
-    where
-      readBS (VarInt len) = getByteString $ fromIntegral len
+    TxIn <$> deserialize <*> getVarIntBytes <*> getWord32le
 
   serialize (TxIn o s q) = do
     serialize o
-    putVarInt $ B.length s
-    putByteString s
+    putVarIntBytes s
     putWord32le q
 
 instance Binary TxIn where
@@ -347,15 +372,11 @@ data TxOut = TxOut
   deriving (Eq, Show, Read, Ord, Generic, Hashable, NFData)
 
 instance Serial TxOut where
-  deserialize = do
-    val <- getWord64le
-    VarInt len <- deserialize
-    TxOut val <$> getByteString (fromIntegral len)
+  deserialize = TxOut <$> getWord64le <*> getVarIntBytes
 
   serialize (TxOut o s) = do
     putWord64le o
-    putVarInt $ B.length s
-    putByteString s
+    putVarIntBytes s
 
 instance Binary TxOut where
   put = serialize

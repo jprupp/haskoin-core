@@ -59,7 +59,7 @@ data WitnessProgram
   = P2WPKH WitnessProgramPKH
   | P2WSH WitnessProgramSH
   | EmptyWitnessProgram
-  deriving (Eq)
+  deriving (Eq, Show)
 
 -- | Encode a witness program
 --
@@ -80,7 +80,7 @@ data WitnessProgramPKH = WitnessProgramPKH
   { signature :: !TxSignature,
     key :: !PublicKey
   }
-  deriving (Eq)
+  deriving (Eq, Show)
 
 -- | High-level representation of a P2WSH witness
 --

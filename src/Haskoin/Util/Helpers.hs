@@ -152,9 +152,12 @@ decodeHexLazy t =
 
 -- | Obtain 'Int' bits from beginning of 'ByteString'. Resulting 'ByteString'
 -- will be smallest required to hold that many bits, padded with zeroes to the
--- right.
+-- right. Raises an error when the 'ByteString' does not hold that many
+-- bits, instead of returning fewer bits than asked.
 getBits :: Int -> ByteString -> ByteString
 getBits b bs
+  | b < 0 || b > 8 * B.length bs =
+      error ("getBits: " <> show b <> " bits asked of " <> show (B.length bs) <> " bytes")
   | r == 0 = B.take q bs
   | otherwise = i `B.snoc` l
   where
@@ -349,9 +352,16 @@ putLengthBytes bs = do
   putByteString bs
 
 getLengthBytes :: (MonadGet m) => m ByteString
-getLengthBytes = do
-  len <- fromIntegral <$> getWord64be
-  getByteString len
+getLengthBytes = getByteString =<< getCount
+
+-- | A 64-bit count that must fit an 'Int'. A larger one fails the parse
+-- instead of wrapping around to a negative number.
+getCount :: (MonadGet m) => m Int
+getCount = do
+  n <- getWord64be
+  when (n > fromIntegral (maxBound :: Int)) $
+    fail ("Count too large: " <> show n)
+  return (fromIntegral n)
 
 --
 -- Fold and unfold an Integer to and from a list of its bytes
@@ -399,7 +409,7 @@ putList f ls = do
 
 getList :: (MonadGet m) => m a -> m [a]
 getList f = do
-  l <- fromIntegral <$> getWord64be
+  l <- getCount
   replicateM l f
 
 --

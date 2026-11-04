@@ -5,19 +5,26 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 
+-- | Transactions: their ids, their bytes and sizes, building, signing and
+-- verifying them, merging partial signatures, coin selection and fee
+-- estimation, the SegWit witness helpers and the genesis coinbases.
 module Haskoin.TransactionSpec (spec) where
 
-import Control.Monad (unless)
+import Control.Monad (forM_, unless)
+import Data.Aeson (decode, eitherDecode)
+import Data.ByteString (ByteString)
 import Data.ByteString qualified as B
 import Data.Bytes.Get
 import Data.Bytes.Put
 import Data.Bytes.Serial
 import Data.Default (def)
 import Data.Either
+import Data.List (inits, isInfixOf)
 import Data.Maybe
 import Data.String (fromString)
 import Data.String.Conversions
 import Data.Text (Text)
+import Data.Text qualified as T
 import Data.Word (Word32, Word64)
 import Haskoin.Address
 import Haskoin.Crypto
@@ -31,6 +38,7 @@ import Test.HUnit
 import Test.Hspec
 import Test.Hspec.QuickCheck
 import Test.QuickCheck
+import Text.Read (readMaybe)
 
 identityTests :: Ctx -> IdentityTests
 identityTests ctx =
@@ -74,16 +82,13 @@ spec = prepareContext $ \ctx -> do
     prop "building address tx" $
       forAll arbitraryNetAddress $ \(net, addr) ->
         forAll (arbitrarySatoshi net) $ testBuildAddrTx net ctx addr
-    prop "guess transaction size" $
+    prop "the size guess is at least the virtual size of a signed legacy transaction, with little slack" $
       forAll arbitraryNetwork $ \net ->
         forAll (arbitraryAddrOnlyTxFull net ctx) (testGuessSize net ctx)
     prop "choose coins" $
       forAll arbitraryNetwork $ \net ->
-        forAll (listOf (arbitrarySatoshi net)) testChooseCoins
-    prop "choose multisig coins" $
-      forAll arbitraryNetwork $ \net ->
-        forAll arbitraryMSParam $
-          forAll (listOf (arbitrarySatoshi net)) . testChooseMSCoins
+        forAll (listOf (arbitrarySatoshi net)) $ \coins ->
+          forAll (listOf arbitraryOutputKind) (testChooseCoins coins)
     prop "sign and validate transaction" $
       forAll arbitraryNetwork $ \net ->
         forAll (arbitrarySigningData net ctx) (testDetSignTx net ctx)
@@ -93,10 +98,23 @@ spec = prepareContext $ \ctx -> do
     prop "merge partially signed transactions" $
       forAll arbitraryNetwork $ \net ->
         property $ forAll (arbitraryPartialTxs net ctx) (testMergeTx net ctx)
+    prop "nosigTxHash does not change when a transaction is signed, whether in the input scripts or in the witness" $
+      forAll arbitraryNetwork $ \net ->
+        forAll (arbitrarySigningData net ctx) $ \(tx, sigis, prv) ->
+          nosigTxHash (either error id (signTx net ctx tx sigis (map (.key) prv))) === nosigTxHash tx
   describe "Transaction vectors" $ do
     it "compute txid from tx" $ mapM_ testTxidVector txidVectors
     it "build pkhash transaction (generated from bitcoind)" $
       mapM_ (testPKHashVector ctx) pkHashVectors
+  idsSpec
+  bytesSpec ctx
+  sizeSpec ctx
+  coinSelectionSpec
+  verificationSpec ctx
+  mergeSpec ctx
+  taprootSigningSpec ctx
+  segwitSpec ctx
+  genesisSpec
 
 -- Txid Vectors
 
@@ -226,67 +244,46 @@ pkHashVectors =
 -- Transaction Properties --
 
 testBuildAddrTx :: Network -> Ctx -> Address -> TestCoin -> IO ()
-testBuildAddrTx net ctx a (TestCoin v)
+testBuildAddrTx net ctx a coin
   | isPubKeyAddress a = (PayPKHash <$> addressHash160 a) `shouldBe` Just out
   | isScriptAddress a = (PayScriptHash <$> addressHash160 a) `shouldBe` Just out
   | otherwise = discard
   where
     out = either error id $ do
-      tx <- buildAddrTx net ctx [] [(fromJust (addrToText net a), v)]
+      tx <- buildAddrTx net ctx [] [(fromJust (addrToText net a), coin.getTestCoin)]
       unmarshal ctx (head tx.outputs).script
 
--- We compute an upper bound but it should be close enough to the real size
--- We give 2 bytes of slack on every signature (1 on r and 1 on s)
+-- The guess is an upper bound on the virtual size that counts 72 bytes
+-- per signature. A signature with a short r or s is 1 or 2 bytes less.
 testGuessSize :: Network -> Ctx -> Tx -> Bool
 testGuessSize net ctx tx =
-  guess >= len && guess <= len + 2 * delta
+  guess >= size && guess <= size + 2 * signatures
   where
-    delta = pki + sum (map fst msi)
-    guess = guessTxSize pki msi pkout msout
-    len = B.length $ runPutS $ serialize tx
-    ins = map f tx.inputs
-    f i = either error id $ unmarshal (net, ctx) i.script
-    pki = length $ filter isSpendPKHash ins
-    msi = concatMap shData ins
-    shData (ScriptHashInput _ (PayMulSig keys r)) = [(r, length keys)]
-    shData _ = []
-    out = map (either error id . unmarshal ctx . (.script)) tx.outputs
-    pkout = length $ filter isPayPKHash out
-    msout = length $ filter isPayScriptHash out
+    guess = guessTxSize (map inputKind ins) (map outputKind outs)
+    size = txVirtualSize tx
+    ins = map (either error id . unmarshal (net, ctx) . (.script)) tx.inputs
+    outs = map (either error id . unmarshal ctx . (.script)) tx.outputs
+    inputKind (ScriptHashInput _ (PayMulSig keys r)) = InputMulSig r (length keys)
+    inputKind _ = InputPKHash
+    outputKind o
+      | isPayPKHash o = OutputPKHash
+      | otherwise = OutputScriptHash
+    signatures = sum (map sigCount ins)
+    sigCount (ScriptHashInput (SpendMulSig sigs) _) = length sigs
+    sigCount _ = 1
 
-testChooseCoins :: [TestCoin] -> Word64 -> Word64 -> Int -> Property
-testChooseCoins coins target byteFee nOut =
-  nOut >= 0 ==>
-    case chooseCoins target byteFee nOut True coins of
-      Right (chosen, change) ->
-        let outSum = sum $ map coinValue chosen
-            fee = guessTxFee byteFee nOut (length chosen)
-         in outSum == target + change + fee
-      Left _ ->
-        let fee = guessTxFee byteFee nOut (length coins)
-         in target == 0 || s < target + fee
+-- A selection covers the target, the fee of the coins chosen, and the
+-- change. When there is no selection, no prefix of the coins covers the
+-- target and its own fee, since the coins are taken in order.
+testChooseCoins :: [TestCoin] -> [OutputKind] -> Word64 -> Word64 -> Property
+testChooseCoins coins outs target byteFee =
+  case chooseCoins target byteFee outs True coins of
+    Right (chosen, change) ->
+      sum (map coinValue chosen) === target + change + fee chosen
+    Left _ ->
+      property $ target == 0 || all (\prefix -> sum (map coinValue prefix) < target + fee prefix) (drop 1 (inits coins))
   where
-    s = sum $ map coinValue coins
-
-testChooseMSCoins ::
-  (Int, Int) ->
-  [TestCoin] ->
-  Word64 ->
-  Word64 ->
-  Int ->
-  Property
-testChooseMSCoins (m, n) coins target byteFee nOut =
-  nOut >= 0 ==>
-    case chooseMSCoins target byteFee (m, n) nOut True coins of
-      Right (chosen, change) ->
-        let outSum = sum $ map coinValue chosen
-            fee = guessMSTxFee byteFee (m, n) nOut (length chosen)
-         in outSum == target + change + fee
-      Left _ ->
-        let fee = guessMSTxFee byteFee (m, n) nOut (length coins)
-         in target == 0 || s < target + fee
-  where
-    s = sum $ map coinValue coins
+    fee cs = guessTxFee byteFee (map coinInputKind cs) outs
 
 {- Signing Transactions -}
 
@@ -344,3 +341,436 @@ testMergeTx net ctx (txs, os) =
         Right (RegularInput (SpendMulSig sigs)) -> length sigs
         Right (ScriptHashInput (SpendMulSig sigs) _) -> length sigs
         _ -> error "Invalid input script type"
+
+{- Ids -}
+
+-- The id of the genesis coinbase, in display order
+genesisTxId :: Text
+genesisTxId = "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"
+
+-- The signed transaction of the P2WPKH example of BIP 143: 343 bytes, 233
+-- without its witness
+bip143SignedTx :: Text
+bip143SignedTx =
+  "01000000000102fff7f7881a8099afa6940d42d1e7f6362bec38171ea3edf433541db4e4ad969f00000000494830450221008b9d1dc26ba6a9cb62127b02742fa9d754cd3bebf337f7a55d114c8e5cdd30be022040529b194ba3f9281a99f2b1c0a19c0489bc22ede944ccf4ecbab4cc618ef3ed01eeffffffef51e1b804cc89d182d279655c3aa89e815b1b309fe287d9b2b55d57b90ec68a0100000000ffffffff02202cb206000000001976a9148280b37df378db99f66f85c95a783a76ac7a6d5988ac9093510d000000001976a9143bde42dbee7e4dbe6a21b2d50ce2f0167faa815988ac000247304402203609e17b84f6a7d30c80bfa610b5b4542f32a8a0d5447a12fb1366d7f01cc44a0220573a954c4518331561406f90300e8f3358f51928d43c212a8caed02de67eebee0121025476c2e83188368da1ff3e292e7acafcdb3566bb0ad253f62fc70f07aeee635711000000"
+
+hexBytes :: Text -> ByteString
+hexBytes = fromJust . decodeHex
+
+parseTx :: Text -> Either String Tx
+parseTx = runGetS deserialize . hexBytes
+
+idsSpec :: Spec
+idsSpec =
+  describe "Transaction ids" $ do
+    it "hexToTxHash reads 32 bytes of hex in display order, in either case" $ do
+      fmap (encodeHex . runPutS . serialize) (hexToTxHash genesisTxId)
+        `shouldBe` Just "3ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a"
+      hexToTxHash "4A5E1E4BAAB89F3A32518A88C31BC87F618F76673E2CC77AB2127B7AFDEDA33B" `shouldBe` hexToTxHash genesisTxId
+      fmap txHashToHex (hexToTxHash genesisTxId) `shouldBe` Just genesisTxId
+
+    it "hexToTxHash refuses hex that is not exactly 32 bytes, or not hex" $ do
+      hexToTxHash (genesisTxId <> "ff") `shouldBe` Nothing
+      hexToTxHash (T.take 62 genesisTxId) `shouldBe` Nothing
+      hexToTxHash "" `shouldBe` Nothing
+      hexToTxHash "zz5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b" `shouldBe` Nothing
+
+    it "the Read, string and JSON forms of a transaction id refuse 33 bytes" $ do
+      (readMaybe (show (cs (genesisTxId <> "ff") :: String)) :: Maybe TxHash) `shouldBe` Nothing
+      (decode (cs ("\"" <> genesisTxId <> "ff\"")) :: Maybe TxHash) `shouldBe` Nothing
+      (decode (cs ("{\"txid\":\"" <> genesisTxId <> "ff\",\"index\":0}")) :: Maybe OutPoint) `shouldBe` Nothing
+      (decode (cs ("{\"txid\":\"" <> genesisTxId <> "\",\"index\":0}")) :: Maybe OutPoint) `shouldBe` Just (OutPoint (fromJust (hexToTxHash genesisTxId)) 0)
+
+    it "the witness transaction id of the BIP 143 example is the hash of all its bytes, and its id leaves the witness out" $ do
+      tx <- either fail return (parseTx bip143SignedTx)
+      txHashToHex (txHash tx) `shouldBe` "e8151a2af31c368a35053ddd4bdb285a8595c769a3ad83e0fa02314a602d4609"
+      txHashToHex (txWitnessHash tx) `shouldBe` "c36c38370907df2324d9ce9d149d191192f338b37665a82e78e76a12c909b762"
+
+    it "the witness transaction id of a transaction without witness is its id" $
+      txWitnessHash mainnetGenesisTx `shouldBe` txHash mainnetGenesisTx
+
+    -- The genesis coinbase with its input script removed hashes to
+    -- 2a9487e4…78c1, which is neither its id nor the hash of its script
+    it "nosigTxHash is the hash of the transaction with its input scripts and witness removed" $ do
+      txHashToHex (nosigTxHash mainnetGenesisTx) `shouldBe` "2a9487e467412bc4b0a993a770bc73d5f4230f0ea5907b3f5df2669f0d7e78c1"
+      tx <- either fail return (parseTx bip143SignedTx)
+      let unsigned = Tx tx.version [TxIn i.outpoint "" i.sequence | i <- tx.inputs] tx.outputs [] tx.locktime
+      nosigTxHash tx `shouldBe` nosigTxHash unsigned
+      nosigTxHash unsigned `shouldBe` txHash unsigned
+
+{- Bytes -}
+
+bytesSpec :: Ctx -> Spec
+bytesSpec ctx =
+  describe "Transaction bytes" $ do
+    -- The bytes of the first pkhash vector, with the input count written
+    -- as 0xffffffffffffffff, which wraps around to -1 as an Int
+    it "refuse a count that is beyond the limit of a list" $ do
+      parseTx ("01000000" <> "ffffffffffffffffff" <> "02" <> "804a5d05000000001976a91424aa604689cc582292b97668bedd91dd5bf9374c88ac" <> "804a5d05000000001976a91424aa604689cc582292b97668bedd91dd5bf9374c88ac" <> "00000000")
+        `shouldSatisfy` either ("List count too large" `isInfixOf`) (const False)
+      parseTx ("01000000" <> "0001" <> "01db494559df26b5cf3b121f05af26e0568708f5bd9ccceb41656f1654a1eb29eb0e00000000ffffffff01804a5d05000000001976a91424aa604689cc582292b97668bedd91dd5bf9374c88ac" <> "ffffffffffffffffff" <> "00000000")
+        `shouldSatisfy` either ("List count too large" `isInfixOf`) (const False)
+      parseTx ("01000000" <> "01db494559df26b5cf3b121f05af26e0568708f5bd9ccceb41656f1654a1eb29eb0e000000" <> "ffffffffffffffffff" <> "ffffffff" <> "01804a5d05000000001976a91424aa604689cc582292b97668bedd91dd5bf9374c88ac" <> "00000000")
+        `shouldSatisfy` either ("Byte count too large" `isInfixOf`) (const False)
+
+    it "refuse the witness marker on a transaction whose witness is empty, as Bitcoin Core does" $ do
+      parseTx ("01000000" <> "0001" <> "01db494559df26b5cf3b121f05af26e0568708f5bd9ccceb41656f1654a1eb29eb0e00000000ffffffff01804a5d05000000001976a91424aa604689cc582292b97668bedd91dd5bf9374c88ac" <> "00" <> "00000000")
+        `shouldSatisfy` either ("Superfluous witness record" `isInfixOf`) (const False)
+      -- No inputs, so no witness at all
+      parseTx ("01000000" <> "0001" <> "00" <> "01804a5d05000000001976a91424aa604689cc582292b97668bedd91dd5bf9374c88ac" <> "00000000")
+        `shouldSatisfy` either ("Superfluous witness record" `isInfixOf`) (const False)
+
+    it "write a transaction whose witness stacks are all empty without the marker, and read it back without witness" $ do
+      let legacy = "0100000001db494559df26b5cf3b121f05af26e0568708f5bd9ccceb41656f1654a1eb29eb0e00000000ffffffff01804a5d05000000001976a91424aa604689cc582292b97668bedd91dd5bf9374c88ac00000000"
+      tx <- either fail return (parseTx legacy)
+      hasWitness tx `shouldBe` False
+      hasWitness tx {witness = [[]]} `shouldBe` False
+      hasWitness tx {witness = [["x"]]} `shouldBe` True
+      encodeHex (runPutS (serialize tx {witness = [[]]})) `shouldBe` legacy
+      runGetS deserialize (runPutS (serialize tx {witness = [[]]})) `shouldBe` Right tx
+      txWitnessHash tx {witness = [[]]} `shouldBe` txHash tx
+
+    it "write one witness stack per input" $ do
+      let legacy = "0100000001db494559df26b5cf3b121f05af26e0568708f5bd9ccceb41656f1654a1eb29eb0e00000000ffffffff01804a5d05000000001976a91424aa604689cc582292b97668bedd91dd5bf9374c88ac00000000"
+      tx <- either fail return (parseTx legacy)
+      -- A second stack has no input to go with
+      fmap (.witness) (runGetS deserialize (runPutS (serialize tx {witness = [["ab"], ["cd"]]})) :: Either String Tx) `shouldBe` Right [["ab"]]
+
+    it "give the weight and the virtual size of BIP 141: the BIP 143 example and the genesis coinbase" $ do
+      tx <- either fail return (parseTx bip143SignedTx)
+      -- 3 × 233 + 343 = 1042 weight units, 260.5 rounded up
+      txWeight tx `shouldBe` 1042
+      txVirtualSize tx `shouldBe` 261
+      -- 204 bytes without witness: four times the size
+      txWeight mainnetGenesisTx `shouldBe` 816
+      txVirtualSize mainnetGenesisTx `shouldBe` 204
+
+    it "the JSON form of an output refuses a negative amount" $ do
+      (eitherDecode "{\"value\":-1,\"outputscript\":\"\"}" :: Either String TxOut) `shouldSatisfy` isLeft
+      (eitherDecode "{\"value\":5000000000,\"outputscript\":\"51\"}" :: Either String TxOut) `shouldBe` Right (TxOut 5000000000 "\x51")
+
+{- Sizes and fees -}
+
+sizeSpec :: Ctx -> Spec
+sizeSpec ctx =
+  describe "Size and fee estimation" $ do
+    it "counts the bytes of each kind of input, without and with witness" $ do
+      -- outpoint 36, sequence 4, script length 1, signature push 73, key push 34
+      inputWeight InputPKHash `shouldBe` (148, 0)
+      -- an empty script; the witness: count 1, signature 73, key 34
+      inputWeight InputWitnessPKHash `shouldBe` (41, 108)
+      -- the push of the 22-byte program: 23 bytes after their length
+      inputWeight InputNestedWitnessPKHash `shouldBe` (64, 108)
+      -- the witness: count 1, a 65-byte signature after its length
+      inputWeight InputTaproot `shouldBe` (41, 67)
+      -- OP_0, two signatures of 73, the 105-byte script pushed with OP_PUSHDATA1 (107): 254 bytes, after a 3-byte length
+      inputWeight (InputMulSig 2 3) `shouldBe` (297, 0)
+      -- the witness: count 1, the empty item 1, two signatures of 73, the script after its length 106
+      inputWeight (InputWitnessMulSig 2 3) `shouldBe` (41, 254)
+      -- the push of the 34-byte program: 35 bytes after their length
+      inputWeight (InputNestedWitnessMulSig 2 3) `shouldBe` (76, 254)
+      -- OP_0, one signature, the 37-byte script pushed directly (38): 112 bytes
+      inputWeight (InputMulSig 1 1) `shouldBe` (153, 0)
+
+    it "counts the bytes of each kind of output" $ do
+      outputSize OutputPKHash `shouldBe` 34
+      outputSize OutputScriptHash `shouldBe` 32
+      outputSize OutputWitnessPKHash `shouldBe` 31
+      outputSize OutputWitnessScriptHash `shouldBe` 43
+      outputSize OutputTaproot `shouldBe` 43
+
+    it "gives the weight and virtual size of a transaction of each shape" $ do
+      -- 8 + 1 + 148 + 1 + 34 = 192 bytes, no witness
+      guessTxWeight [InputPKHash] [OutputPKHash] `shouldBe` 768
+      guessTxSize [InputPKHash] [OutputPKHash] `shouldBe` 192
+      -- 8 + 1 + 41 + 1 + 31 = 82 bytes without witness, 2 + 108 of witness: 438 units, 109.5 rounded up
+      guessTxWeight [InputWitnessPKHash] [OutputWitnessPKHash] `shouldBe` 438
+      guessTxSize [InputWitnessPKHash] [OutputWitnessPKHash] `shouldBe` 110
+      -- 8 + 1 + 64 + 1 + 32 = 106 bytes, 110 of witness: 534 units
+      guessTxSize [InputNestedWitnessPKHash] [OutputScriptHash] `shouldBe` 134
+      -- 8 + 1 + 41 + 1 + 43 = 94 bytes, 2 + 67 of witness: 445 units
+      guessTxSize [InputTaproot] [OutputTaproot] `shouldBe` 112
+      -- 8 + 1 + 297 + 1 + 34 + 32 = 373 bytes, no witness
+      guessTxSize [InputMulSig 2 3] [OutputPKHash, OutputScriptHash] `shouldBe` 373
+      -- 8 + 1 + 41 + 1 + 43 = 94 bytes, 2 + 254 of witness: 632 units
+      guessTxSize [InputWitnessMulSig 2 3] [OutputWitnessScriptHash] `shouldBe` 158
+      -- 8 + 1 + 76 + 1 + 34 = 120 bytes, 256 of witness: 736 units
+      guessTxSize [InputNestedWitnessMulSig 2 3] [OutputPKHash] `shouldBe` 184
+      -- 8 + 1 + 148 + 41 + 1 + 34 = 233 bytes, 110 of witness: 1042 units, 260.5 rounded up
+      guessTxSize [InputPKHash, InputWitnessPKHash] [OutputPKHash] `shouldBe` 261
+
+    it "charges the fee rate per virtual byte" $ do
+      guessTxFee 10 [InputPKHash] [OutputPKHash] `shouldBe` 1920
+      guessTxFee 10 [InputWitnessPKHash] [OutputWitnessPKHash] `shouldBe` 1100
+      guessTxFee 0 [InputPKHash] [OutputPKHash] `shouldBe` 0
+
+    it "is at least the virtual size of a signed P2WPKH spend, and of a Taproot key path spend" $ do
+      (k0, _) <- generate (arbitraryKeyPair ctx)
+      -- SegWit keys are compressed
+      let k = PrivateKey k0.key True
+          p = derivePublicKey ctx k
+          h = fromJust (addressHash160 (pubKeyAddr ctx p))
+          op = OutPoint (fromJust (hexToTxHash genesisTxId)) 0
+          witnessTx = buildTx ctx [op] [(PayWitnessPKHash h, 90000)]
+          taprootOutput = taprootScriptOutput ctx (TaprootOutput p.point Nothing)
+          taprootTx = buildTx ctx [op] [(taprootOutput, 90000)]
+      signedWitness <- either fail return (signTx btc ctx witnessTx [SigInput (PayWitnessPKHash h) 100000 op sigHashAll Nothing] [k.key])
+      signedTaproot <- either fail return (signTx btc ctx taprootTx [SigInput taprootOutput 100000 op sigHashDefault Nothing] [k.key])
+      -- The witness of the taproot spend is 64 bytes, one less than counted
+      txVirtualSize signedWitness `shouldSatisfy` (\v -> v <= 110 && v >= 108)
+      txVirtualSize signedTaproot `shouldSatisfy` (\v -> v <= 112 && v >= 111)
+
+{- Coin selection -}
+
+coinSelectionSpec :: Spec
+coinSelectionSpec =
+  describe "Coin selection" $ do
+    -- One P2PKH input and two P2PKH outputs: 8 + 1 + 148 + 1 + 68 = 226
+    -- virtual bytes, 2260 satoshi at 10 satoshi per virtual byte. The first
+    -- coin covers 60000 + 2260, with 37740 of change.
+    it "selects the first coins that cover the target and the fee of the transaction they make" $ do
+      let coins = [TestCoin 100000 InputPKHash, TestCoin 50000 InputPKHash]
+      chooseCoins 60000 10 [OutputPKHash, OutputPKHash] False coins `shouldBe` Right ([TestCoin 100000 InputPKHash], 37740)
+      chooseCoins 60000 10 [OutputPKHash, OutputPKHash] True coins `shouldBe` Right ([TestCoin 100000 InputPKHash], 37740)
+
+    -- Two P2WPKH inputs and one P2WPKH output: 8 + 1 + 82 + 1 + 31 = 123
+    -- bytes without witness, 2 + 216 with it: 710 units, 178 virtual
+    -- bytes, 1780 satoshi. Neither coin alone covers 60000 and the fee of
+    -- one input (8 + 1 + 41 + 1 + 31 = 82, 2 + 108: 438 units, 110 bytes,
+    -- 1100 satoshi), both together do, with 90000 - 60000 - 1780 of change.
+    it "adds coins until they cover the target and the fee, which grows with them" $ do
+      let coins = [TestCoin 50000 InputWitnessPKHash, TestCoin 40000 InputWitnessPKHash]
+      chooseCoins 60000 10 [OutputWitnessPKHash] False coins `shouldBe` Right ([TestCoin 40000 InputWitnessPKHash, TestCoin 50000 InputWitnessPKHash], 28220)
+
+    it "looks for a smaller solution after the first when asked to continue" $ do
+      let coins = [TestCoin 30000 InputPKHash, TestCoin 40000 InputPKHash, TestCoin 65000 InputPKHash]
+      -- 30000 + 40000 covers 60000 + 10 × (8 + 1 + 296 + 1 + 34) = 60000 + 3400; then 65000 alone covers 60000 + 1920, and is smaller
+      chooseCoins 60000 10 [OutputPKHash] False coins `shouldBe` Right ([TestCoin 40000 InputPKHash, TestCoin 30000 InputPKHash], 6600)
+      chooseCoins 60000 10 [OutputPKHash] True coins `shouldBe` Right ([TestCoin 65000 InputPKHash], 3080)
+
+    it "refuses a target of zero and reports when the coins do not suffice" $ do
+      chooseCoins 0 10 [OutputPKHash] False [TestCoin 100000 InputPKHash] `shouldBe` Left "chooseCoins: Target must be > 0"
+      chooseCoins 100000 10 [OutputPKHash] False [TestCoin 100000 InputPKHash] `shouldBe` Left "chooseCoins: No solution found"
+      chooseCoins 1 10 [OutputPKHash] False ([] :: [TestCoin]) `shouldBe` Left "chooseCoins: No solution found"
+
+{- Verification -}
+
+verificationSpec :: Ctx -> Spec
+verificationSpec ctx =
+  describe "Verification" $ do
+    let coinOf = OutPoint (fromJust (hexToTxHash genesisTxId))
+    it "accepts a correct P2PKH spend, and refuses a witness on its input, a wrong key, a wrong amount and a missing coin" $ do
+      (k, p) <- generate (arbitraryKeyPair ctx)
+      (_, other) <- generate (arbitraryKeyPair ctx)
+      let h = fromJust (addressHash160 (pubKeyAddr ctx p))
+          otherHash = fromJust (addressHash160 (pubKeyAddr ctx other))
+          op = coinOf 0
+          tx = buildTx ctx [op] [(PayPKHash h, 90000)]
+      signed <- either fail return (signTx btc ctx tx [SigInput (PayPKHash h) 100000 op sigHashAll Nothing] [k.key])
+      verifyStdTx btc ctx signed [(PayPKHash h, 100000, op)] `shouldBe` True
+      verifyStdTx btc ctx signed {witness = [["junk"]]} [(PayPKHash h, 100000, op)] `shouldBe` False
+      verifyStdTx btc ctx signed [(PayPKHash otherHash, 100000, op)] `shouldBe` False
+      -- The legacy digest does not commit to the amount, but the outputs may not spend more than the coin
+      verifyStdTx btc ctx signed [(PayPKHash h, 89999, op)] `shouldBe` False
+      verifyStdTx btc ctx signed [(PayPKHash h, 100000, coinOf 1)] `shouldBe` False
+      verifyStdTx btc ctx signed [] `shouldBe` False
+      verifyStdInput btc ctx signed [(PayPKHash h, 100000, op)] 0 `shouldBe` True
+      verifyStdInput btc ctx signed [(PayPKHash h, 100000, op)] 1 `shouldBe` False
+      verifyStdInput btc ctx signed [(PayPKHash h, 100000, op)] (-1) `shouldBe` False
+
+    it "refuses a transaction without inputs, and the outputs of a transaction spending more than its coins" $ do
+      (k, p) <- generate (arbitraryKeyPair ctx)
+      let h = fromJust (addressHash160 (pubKeyAddr ctx p))
+          ops = [coinOf 0, coinOf 1]
+          tx = buildTx ctx ops [(PayPKHash h, 150000)]
+          sigis = [SigInput (PayPKHash h) 100000 op sigHashAll Nothing | op <- ops]
+          coins = [(PayPKHash h, 100000, op) | op <- ops]
+      signed <- either fail return (signTx btc ctx tx sigis [k.key])
+      verifyStdTx btc ctx signed coins `shouldBe` True
+      verifyStdTx btc ctx signed (take 1 coins) `shouldBe` False
+      verifyStdTx btc ctx (buildTx ctx [] [(PayPKHash h, 1)]) [] `shouldBe` False
+      -- The same coins hold less than the outputs spend
+      verifyStdTx btc ctx signed [(PayPKHash h, 70000, op) | op <- ops] `shouldBe` False
+
+    it "refuses a SegWit input with a non-empty input script and a wrong amount" $ do
+      (k, p) <- generate (arbitraryKeyPair ctx)
+      let h = fromJust (addressHash160 (pubKeyAddr ctx p))
+          op = coinOf 0
+          tx = buildTx ctx [op] [(PayWitnessPKHash h, 90000)]
+      signed <- either fail return (signTx btc ctx tx [SigInput (PayWitnessPKHash h) 100000 op sigHashAll Nothing] [k.key])
+      verifyStdTx btc ctx signed [(PayWitnessPKHash h, 100000, op)] `shouldBe` True
+      -- The BIP 143 digest commits to the amount
+      verifyStdTx btc ctx signed [(PayWitnessPKHash h, 100001, op)] `shouldBe` False
+      let pushed = Tx signed.version [TxIn op "\x51" i.sequence | i <- signed.inputs] signed.outputs signed.witness signed.locktime
+      verifyStdTx btc ctx pushed [(PayWitnessPKHash h, 100000, op)] `shouldBe` False
+
+{- Merging -}
+
+mergeSpec :: Ctx -> Spec
+mergeSpec ctx =
+  describe "Merging partially signed transactions" $ do
+    it "leaves an input that no transaction signed unsigned, and merges the others" $ do
+      (k1, p1) <- generate (arbitraryKeyPair ctx)
+      (k2, p2) <- generate (arbitraryKeyPair ctx)
+      let ms = PayMulSig [p1, p2] 2
+          so = PayScriptHash (fromJust (addressHash160 (payToScriptAddress ctx ms)))
+          ops = [OutPoint (fromJust (hexToTxHash genesisTxId)) 0, OutPoint (fromJust (hexToTxHash genesisTxId)) 1]
+          tx = buildTx ctx ops [(PayPKHash (fromJust (addressHash160 (pubKeyAddr ctx p1))), 90000)]
+          coins = [(so, 100000, op) | op <- ops]
+          sigi = SigInput so 100000 (head ops) sigHashAll (Just ms)
+      a <- either fail return (signTx btc ctx tx [sigi] [k1.key])
+      b <- either fail return (signTx btc ctx tx [sigi] [k2.key])
+      merged <- either fail return (mergeTxs btc ctx [a, b] coins)
+      (merged.inputs !! 1).script `shouldBe` ""
+      verifyStdInput btc ctx merged coins 0 `shouldBe` True
+      verifyStdTx btc ctx merged coins `shouldBe` False
+      -- The second input signed by both completes the transaction
+      let sigi2 = SigInput so 100000 (ops !! 1) sigHashAll (Just ms)
+      c <- either fail return (signTx btc ctx tx [sigi2] [k1.key])
+      d <- either fail return (signTx btc ctx tx [sigi2] [k2.key])
+      complete <- either fail return (mergeTxs btc ctx [a, b, c, d] coins)
+      verifyStdTx btc ctx complete coins `shouldBe` True
+
+    it "countMulSig counts the signatures that verify, in key order" $ do
+      (k1, p1) <- generate (arbitraryKeyPair ctx)
+      (k2, p2) <- generate (arbitraryKeyPair ctx)
+      (k3, p3) <- generate (arbitraryKeyPair ctx)
+      let ms = PayMulSig [p1, p2, p3] 2
+          msScript = either error id (encodeOutput ctx ms)
+          op = OutPoint (fromJust (hexToTxHash genesisTxId)) 0
+          tx = buildTx ctx [op] [(PayPKHash (fromJust (addressHash160 (pubKeyAddr ctx p1))), 90000)]
+          sigOf k = TxSignature (signHash ctx k.key (either error id (txSigHash btc tx msScript 100000 0 sigHashAll))) sigHashAll
+          count = countMulSig btc ctx tx msScript 100000 0 (map (.point) [p1, p2, p3])
+      count [sigOf k1, sigOf k3] `shouldBe` 2
+      count [sigOf k1, sigOf k2, sigOf k3] `shouldBe` 3
+      count [sigOf k1, TxSignatureEmpty, sigOf k3] `shouldBe` 2
+      -- A signature out of key order is not counted, nor a signature of another digest
+      count [sigOf k3, sigOf k1] `shouldBe` 1
+      count [TxSignature (signHash ctx k1.key (sha256 ("other" :: ByteString))) sigHashAll] `shouldBe` 0
+      count [] `shouldBe` 0
+
+    it "findSigInput pairs the signing parameters with the index of their input" $ do
+      let ops = [OutPoint (fromJust (hexToTxHash genesisTxId)) i | i <- [0 .. 2]]
+          tx = buildTx ctx ops []
+          sigi op = SigInput (PayPKHash "0000000000000000000000000000000000000000") 1 op sigHashAll Nothing
+      map snd (findSigInput [sigi (ops !! 2), sigi (ops !! 0)] tx.inputs) `shouldBe` [0, 2]
+      findSigInput [sigi (OutPoint (fromJust (hexToTxHash genesisTxId)) 9)] tx.inputs `shouldBe` []
+
+    it "buildInput refuses an index out of range, a Taproot output and a mismatched redeem script" $ do
+      (k, p) <- generate (arbitraryKeyPair ctx)
+      let op = OutPoint (fromJust (hexToTxHash genesisTxId)) 0
+          tx = buildTx ctx [op] []
+          sig = TxSignature (signHash ctx k.key (sha256 ("digest" :: ByteString))) sigHashAll
+          h = fromJust (addressHash160 (pubKeyAddr ctx p))
+      buildInput btc ctx tx 1 (PayPKHash h) 1 Nothing sig p `shouldBe` Left "buildInput: Invalid input index"
+      buildInput btc ctx tx 0 (taprootScriptOutput ctx (TaprootOutput p.point Nothing)) 1 Nothing sig p `shouldBe` Left "buildInput: a Taproot input has no input script"
+      buildInput btc ctx tx 0 (PayPKHash h) 1 (Just (PayPK p)) sig p `shouldBe` Left "buildInput: Invalid output/redeem script combination"
+      buildInput btc ctx tx 0 (PayPKHash h) 1 Nothing sig p `shouldBe` Right (RegularInput (SpendPKHash sig p))
+
+    it "refuses an empty list and transactions that differ" $ do
+      mergeTxs btc ctx [] [] `shouldBe` Left "Transaction list is empty"
+      let op = OutPoint (fromJust (hexToTxHash genesisTxId)) 0
+          one = buildTx ctx [op] []
+          other = buildTx ctx [op] [(PayPK (PublicKey (derivePubKey ctx (fromJust (secKey (B.replicate 32 1)))) True), 1)]
+      mergeTxs btc ctx [one] [] `shouldBe` Right one
+      mergeTxs btc ctx [one, other] [] `shouldBe` Left "Transactions do not match"
+
+{- Taproot -}
+
+taprootSigningSpec :: Ctx -> Spec
+taprootSigningSpec ctx =
+  describe "Taproot key path signing" $ do
+    let op = OutPoint (fromJust (hexToTxHash genesisTxId)) 0
+    it "signs with the internal key of an output without script tree, as BIP 86 spends, and with the output key itself" $ do
+      (k, p) <- generate (arbitraryKeyPair ctx)
+      let so = taprootScriptOutput ctx (TaprootOutput p.point Nothing)
+          tx = buildTx ctx [op] [(so, 90000)]
+          sigi = SigInput so 100000 op sigHashDefault Nothing
+          tweaked = fromJust (taprootOutputSecKey ctx k.key Nothing)
+      byInternal <- either fail return (signTx btc ctx tx [sigi] [k.key])
+      byOutput <- either fail return (signTx btc ctx tx [sigi] [tweaked])
+      byInternal `shouldBe` byOutput
+      map length byInternal.witness `shouldBe` [1]
+      map (B.length . head) byInternal.witness `shouldBe` [64]
+      verifyStdTx btc ctx byInternal [(so, 100000, op)] `shouldBe` True
+      -- A signature with a hash type is 65 bytes and verifies as well
+      withType <- either fail return (signTx btc ctx tx [sigi {sighash = setAnyoneCanPay sigHashAll}] [k.key])
+      map (B.length . head) withType.witness `shouldBe` [65]
+      verifyStdTx btc ctx withType [(so, 100000, op)] `shouldBe` True
+      -- Another key does not sign
+      (other, _) <- generate (arbitraryKeyPair ctx)
+      fmap (.witness) (signTx btc ctx tx [sigi] [other.key]) `shouldBe` Right []
+
+    it "needs the output every input spends, and refuses signInput" $ do
+      (k, p) <- generate (arbitraryKeyPair ctx)
+      let so = taprootScriptOutput ctx (TaprootOutput p.point Nothing)
+          other = OutPoint (fromJust (hexToTxHash genesisTxId)) 1
+          tx = buildTx ctx [op, other] [(so, 90000)]
+          sigi = SigInput so 100000 op sigHashDefault Nothing
+      signTx btc ctx tx [sigi] [k.key] `shouldBe` Left "signTx: a Taproot signature needs the output every input spends"
+      signInput btc ctx tx 0 sigi k `shouldBe` Left "signInput: a Taproot input is signed with signTaprootInput"
+      signTaprootInput ctx tx [TxOut 100000 (marshal ctx so)] 0 sigHashDefault k.key `shouldBe` Left "taprootSigHash: one spent output per input is required"
+      signTaprootInput ctx tx [TxOut 100000 (marshal ctx so), TxOut 1 ""] 0 (setForkIdFlag sigHashAll) k.key `shouldBe` Left "taprootSigHash: invalid hash type 65"
+
+{- SegWit helpers -}
+
+segwitSpec :: Ctx -> Spec
+segwitSpec ctx =
+  describe "SegWit witness helpers" $ do
+    (k, p) <- runIO (generate (arbitraryKeyPair ctx))
+    let digest = sha256 ("message" :: ByteString)
+        sig = TxSignature (signHash ctx k.key digest) sigHashAll
+        sigBytes = encodeTxSig btc ctx sig
+        keyBytes = marshal ctx p
+        h = fromJust (addressHash160 (pubKeyAddr ctx p))
+        multisig = PayMulSig [p] 1
+        multisigScript = either error id (encodeOutput ctx multisig)
+        wsh = toP2WSH multisigScript
+    it "isSegwit is true for the version 0 programs only" $ do
+      isSegwit (PayWitnessPKHash h) `shouldBe` True
+      isSegwit wsh `shouldBe` True
+      isSegwit (PayPKHash h) `shouldBe` False
+      isSegwit (PayWitness 1 (B.replicate 32 0)) `shouldBe` False
+
+    it "a simple input stacks its signatures, keys and the empty item of multisig" $ do
+      simpleInputStack btc ctx (SpendPK sig) `shouldBe` [sigBytes]
+      simpleInputStack btc ctx (SpendPKHash sig p) `shouldBe` [sigBytes, keyBytes]
+      simpleInputStack btc ctx (SpendMulSig [sig, TxSignatureEmpty]) `shouldBe` ["", sigBytes, ""]
+
+    it "a witness program encodes to its stack, with the script last for P2WSH" $ do
+      toWitnessStack btc ctx (P2WPKH (WitnessProgramPKH sig p)) `shouldBe` [sigBytes, keyBytes]
+      toWitnessStack btc ctx (P2WSH (WitnessProgramSH ["", sigBytes] multisigScript)) `shouldBe` ["", sigBytes, runPutS (serialize multisigScript)]
+      toWitnessStack btc ctx EmptyWitnessProgram `shouldBe` []
+
+    it "a witness is read against the output it spends" $ do
+      viewWitnessProgram btc ctx (PayWitnessPKHash h) [sigBytes, keyBytes] `shouldBe` Right (P2WPKH (WitnessProgramPKH sig p))
+      viewWitnessProgram btc ctx (PayWitnessPKHash h) [sigBytes] `shouldBe` Left "viewWitnessProgram: Invalid witness program"
+      viewWitnessProgram btc ctx wsh ["", sigBytes, runPutS (serialize multisigScript)] `shouldBe` Right (P2WSH (WitnessProgramSH ["", sigBytes] multisigScript))
+      viewWitnessProgram btc ctx (PayPKHash h) [] `shouldBe` Right EmptyWitnessProgram
+      viewWitnessProgram btc ctx (PayPKHash h) [sigBytes] `shouldBe` Left "viewWitnessProgram: Invalid witness program"
+
+    it "a witness program decodes to the input it stands for" $ do
+      decodeWitnessInput btc ctx (P2WPKH (WitnessProgramPKH sig p)) `shouldBe` Right (Nothing, SpendPKHash sig p)
+      decodeWitnessInput btc ctx (P2WSH (WitnessProgramSH ["", sigBytes] multisigScript)) `shouldBe` Right (Just multisig, SpendMulSig [sig])
+      decodeWitnessInput btc ctx (P2WSH (WitnessProgramSH [sigBytes] multisigScript)) `shouldBe` Left "decodeWitnessInput: Non-standard script output"
+      decodeWitnessInput btc ctx EmptyWitnessProgram `shouldBe` Left "decodeWitnessInput: Empty witness program"
+
+    it "a witness program is computed from a standard input, native or nested" $ do
+      calcWitnessProgram btc ctx (PayWitnessPKHash h) (RegularInput (SpendPKHash sig p)) `shouldBe` Right (P2WPKH (WitnessProgramPKH sig p))
+      calcWitnessProgram btc ctx (toP2SH (either error id (encodeOutput ctx (PayWitnessPKHash h)))) (RegularInput (SpendPKHash sig p)) `shouldBe` Right (P2WPKH (WitnessProgramPKH sig p))
+      calcWitnessProgram btc ctx wsh (ScriptHashInput (SpendMulSig [sig]) multisig) `shouldBe` Right (P2WSH (WitnessProgramSH ["", sigBytes] multisigScript))
+      calcWitnessProgram btc ctx (PayPKHash h) (RegularInput (SpendPKHash sig p)) `shouldBe` Left "calcWitnessProgram: Invalid segwit SigInput"
+
+{- Genesis -}
+
+genesisSpec :: Spec
+genesisSpec =
+  describe "Genesis coinbases" $ do
+    it "genesisCoinbase builds a version 1 transaction with one null input and one output of 50 BTC" $ do
+      let tx = genesisCoinbase "in" "out"
+      tx `shouldBe` Tx 1 [TxIn nullOutPoint "in" 0xffffffff] [TxOut 5000000000 "out"] [] 0
+      nullOutPoint `shouldBe` OutPoint "0000000000000000000000000000000000000000000000000000000000000000" 0xffffffff
+    it "the mainnet coinbase has the id of the genesis block's only transaction" $
+      txHashToHex (txHash mainnetGenesisTx) `shouldBe` "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"
+    it "the testnet4 coinbase has its own id" $
+      txHashToHex (txHash testnet4GenesisTx) `shouldBe` "7aa0a7ae1e223414cb807e40cd57e667b718e42aaf9306db9102fe28912b7b4e"

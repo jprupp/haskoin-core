@@ -17,6 +17,7 @@
 module Haskoin.Crypto.Signature
   ( -- * Signatures
     signHash,
+    hashToMsg,
     verifyHashSig,
     isCanonicalHalfOrder,
     decodeStrictSig,

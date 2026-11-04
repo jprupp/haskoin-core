@@ -28,8 +28,8 @@ marshalLazy s = runPutL . marshalPut s
 unmarshal :: (Marshal s a) => s -> ByteString -> Either String a
 unmarshal = runGetS . marshalGet
 
-unmarshalLazy :: (Marshal s a) => s -> Lazy.ByteString -> a
-unmarshalLazy = runGetL . marshalGet
+unmarshalLazy :: (Marshal s a) => s -> Lazy.ByteString -> Either String a
+unmarshalLazy s = runGetS (marshalGet s) . Lazy.toStrict
 
 class MarshalJSON s a | a -> s where
   marshalValue :: s -> a -> Value
