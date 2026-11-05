@@ -8,6 +8,7 @@ Haskoin Core is a library of Bitcoin and Bitcoin Cash functions written in Haske
 - Bech32 suport
 - BIP32 extended key derivation and parsing (m/1'/2/3)
 - BIP39 mnemonic keys
+- SLIP39 Shamir secret-sharing of a master secret in mnemonic shares
 - ECDSA secp256k1 cryptographic primitives
 - Script parsing
 - Building and signing of standard transactions (regular, multisig, p2sh, segwit)

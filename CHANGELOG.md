@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/)
 and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `Haskoin.Crypto.Keys.Slip39`: Shamir's secret-sharing for mnemonic codes, SLIP-0039, as a standalone module. `generateMnemonics` splits a master secret, encrypted with a passphrase, into share mnemonics under a two-level scheme of groups and members, and `combineMnemonics` rebuilds it from a threshold of them; `generateSharesWith` takes the identifier and the random values as arguments, so that a split can be reproduced. `encodeShare` and `decodeShare` read and write one share, with its checksum, padding and ranges checked as the specification requires; `encryptMasterSecret` and `decryptMasterSecret` are the passphrase step; `splitSecret`, `recoverSecret` and `interpolate` are the sharing over GF(256), and `rs1024Checksum` the checksum. The 45 vectors of the reference implementation, a share set of Sparrow's library, and split cases with fixed random values made by an independent Python implementation of the specification, `test/Haskoin/Crypto/Keys/slip39_verify.py`, check it. The word list is `data/slip39_wordlist.txt`, the file of the specification, and its SHA-256 is checked.
+
 ## [1.5.1] - 2026-11-04
 
 ### Fixed

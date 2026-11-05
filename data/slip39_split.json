@@ -1,0 +1,324 @@
+[
+ {
+  "description": "1-of-1, 128 bits, no passphrase",
+  "scheme": {
+   "groupThreshold": 1,
+   "groups": [
+    [
+     1,
+     1
+    ]
+   ]
+  },
+  "identifier": 7945,
+  "extendable": true,
+  "iterationExponent": 0,
+  "passphrase": "",
+  "masterSecret": "4142434445464748494a4b4c4d4e4f50",
+  "random": [
+   {
+    "shares": [],
+    "digest": ""
+   },
+   {
+    "shares": [],
+    "digest": ""
+   }
+  ],
+  "mnemonics": [
+   [
+    "duckling evil academic academic cards jacket national hairy ancestor crunch muscle parcel award peanut guitar dryer eclipse peasant resident fact"
+   ]
+  ]
+ },
+ {
+  "description": "2-of-3, 128 bits, passphrase TREZOR",
+  "scheme": {
+   "groupThreshold": 1,
+   "groups": [
+    [
+     2,
+     3
+    ]
+   ]
+  },
+  "identifier": 42,
+  "extendable": true,
+  "iterationExponent": 1,
+  "passphrase": "TREZOR",
+  "masterSecret": "4142434445464748494a4b4c4d4e4f50",
+  "random": [
+   {
+    "shares": [],
+    "digest": ""
+   },
+   {
+    "shares": [],
+    "digest": "698c2ccb37ff81b7f5603f9b"
+   }
+  ],
+  "mnemonics": [
+   [
+    "acid fawn academic acid club member living lawsuit sunlight pancake market lend peasant sunlight glad simple infant organize grant infant",
+    "acid fawn academic agency bracelet transfer march argue wits exact dough parcel animal traveler dictate river military salt satisfy payment",
+    "acid fawn academic always advocate either wine oasis solution goat toxic injury radar romantic shrimp check warmth fangs ending mineral"
+   ]
+  ]
+ },
+ {
+  "description": "3-of-5, 128 bits, not extendable",
+  "scheme": {
+   "groupThreshold": 1,
+   "groups": [
+    [
+     3,
+     5
+    ]
+   ]
+  },
+  "identifier": 42,
+  "extendable": false,
+  "iterationExponent": 1,
+  "passphrase": "TREZOR",
+  "masterSecret": "4142434445464748494a4b4c4d4e4f50",
+  "random": [
+   {
+    "shares": [],
+    "digest": ""
+   },
+   {
+    "shares": [
+     "58fb87176761c432c8410001e0454f62"
+    ],
+    "digest": "7235aa0b577e0ffceb3978f5"
+   }
+  ],
+  "mnemonics": [
+   [
+    "acid extra academic acne blue wine buyer install steady scandal silent lilac easy adapt lecture fiction step nylon indicate umbrella",
+    "acid extra academic agree body market fraction duckling laden often freshman temple scene year brother image vexed science disaster explain",
+    "acid extra academic amazing already repeat husband escape evaluate metric equation crunch robin slow episode strategy grant diagnose rhythm minister",
+    "acid extra academic arcade alto slice dining adorn union smear syndrome episode downtown declare sniff wits entrance hairy various debut",
+    "acid extra academic axle diploma verdict marathon shrimp educate traveler random maximum corner crush crazy fatal together campus bedroom frost"
+   ]
+  ]
+ },
+ {
+  "description": "3-of-5, 256 bits, exponent 2",
+  "scheme": {
+   "groupThreshold": 1,
+   "groups": [
+    [
+     3,
+     5
+    ]
+   ]
+  },
+  "identifier": 32767,
+  "extendable": true,
+  "iterationExponent": 2,
+  "passphrase": "pass phrase",
+  "masterSecret": "4142434445464748494a4b4c4d4e4f505152535455565758595a303132333435",
+  "random": [
+   {
+    "shares": [],
+    "digest": ""
+   },
+   {
+    "shares": [
+     "1e83c5fa3334312d90c0f1dfffa3b191d8e38dbf7ccf5e3d0c974a88ce700563"
+    ],
+    "digest": "ba2957e47955e605c968472eb58339f2e2fd28917f72760ff7c88606"
+   }
+  ],
+  "mnemonics": [
+   [
+    "zero wits academic acne adapt pants scramble trash depend aquatic curly element average island yoga medal broken inside theater diet voting deploy frozen veteran sharp source lying dive acid float voice slap unhappy",
+    "zero wits academic agree airline adapt cards royal duckling universe friar fatal cylinder become admit loan vegan boring cards escape family task amazing work temple loyalty vanish western modify herald hour tricycle salon",
+    "zero wits academic amazing antenna stay genre hospital stilt ruler juice facility story industry formal clothes flexible blimp painting describe tofu fishing critical beyond helpful remove march humidity heat muscle mailman likely kind",
+    "zero wits academic arcade average jerky repeat endorse spew class answer echo warmth behavior pile dance quiet injury friendly entrance element repeat ladle bulge email type visual presence zero payment bike percent extra",
+    "zero wits academic axle amazing ultimate python switch patrol hobo genre smith depict national phantom fatal clinic cowboy sunlight research exotic brother work depict acquire legs holy plunge random maiden realize walnut domestic"
+   ]
+  ]
+ },
+ {
+  "description": "2-of-2, 160 bits",
+  "scheme": {
+   "groupThreshold": 1,
+   "groups": [
+    [
+     2,
+     2
+    ]
+   ]
+  },
+  "identifier": 0,
+  "extendable": true,
+  "iterationExponent": 0,
+  "passphrase": "",
+  "masterSecret": "4142434445464748494a4b4c4d4e4f5051525354",
+  "random": [
+   {
+    "shares": [],
+    "digest": ""
+   },
+   {
+    "shares": [],
+    "digest": "c6058760ba014cea8b09057071391884"
+   }
+  ],
+  "mnemonics": [
+   [
+    "academic again academic acid beyond focus device elevator alto clinic industry legal both relate identify story scroll emerald mortgage priest permit browser party",
+    "academic again academic agency mailman usual enlarge airport living airport dream endorse laden usual arcade canyon being drove finger surprise hazard being exchange"
+   ]
+  ]
+ },
+ {
+  "description": "2 of 3 groups: 1-of-1, 2-of-3, 3-of-5, 128 bits",
+  "scheme": {
+   "groupThreshold": 2,
+   "groups": [
+    [
+     1,
+     1
+    ],
+    [
+     2,
+     3
+    ],
+    [
+     3,
+     5
+    ]
+   ]
+  },
+  "identifier": 12345,
+  "extendable": true,
+  "iterationExponent": 0,
+  "passphrase": "TREZOR",
+  "masterSecret": "4142434445464748494a4b4c4d4e4f50",
+  "random": [
+   {
+    "shares": [],
+    "digest": "20520badd1c2f4add42f6f8b"
+   },
+   {
+    "shares": [],
+    "digest": ""
+   },
+   {
+    "shares": [],
+    "digest": "4b5df7a7faee6e3110e7dd40"
+   },
+   {
+    "shares": [
+     "307499552909a562c0c8da3c50734567"
+    ],
+    "digest": "ab0c66efb073adb6bb838ea1"
+   }
+  ],
+  "mnemonics": [
+   [
+    "garlic single acrobat leader anatomy fridge album sympathy paper mandate vegan secret adult identify python diagnose garlic idle tidy fridge"
+   ],
+   [
+    "garlic single beard leaf champion news smirk extend mule grownup orange dismiss paces believe teacher learn crowd hazard rapids believe",
+    "garlic single beard lily away emphasis hamster display legend square airport priority ceiling cradle smirk royal desktop junction enjoy jewelry",
+    "garlic single beard lungs aircraft domestic lobe chubby jerky capital prisoner beam physics grant replace prospect blanket diminish minister spine"
+   ],
+   [
+    "garlic single ceramic learn apart infant gray famous elder permit mama arcade dictate dream either desert forbid fumes hobo texture",
+    "garlic single ceramic lips easel cluster focus viral phantom sharp darkness company blue armed phantom market epidemic grin problem execute",
+    "garlic single ceramic luxury antenna example manager trial pencil geology pleasure wine transfer satisfy payment oven ruin ordinary smirk lunch",
+    "garlic single ceramic march discuss cards recall exhaust element aspect auction snapshot senior vanish enemy coal soldier petition apart climate",
+    "garlic single ceramic method blimp elegant lend minister warn exact guest mixture prayer ocean chest breathe alarm civil painting seafood"
+   ]
+  ]
+ },
+ {
+  "description": "1 of 2 groups: 2-of-3 and 2-of-3, 256 bits, not extendable",
+  "scheme": {
+   "groupThreshold": 1,
+   "groups": [
+    [
+     2,
+     3
+    ],
+    [
+     2,
+     3
+    ]
+   ]
+  },
+  "identifier": 1,
+  "extendable": false,
+  "iterationExponent": 1,
+  "passphrase": "",
+  "masterSecret": "4142434445464748494a4b4c4d4e4f505152535455565758595a303132333435",
+  "random": [
+   {
+    "shares": [],
+    "digest": ""
+   },
+   {
+    "shares": [],
+    "digest": "990df1d6f4a02cca605b9418b260b7c70dfad975780be420c2bc4cdf"
+   },
+   {
+    "shares": [],
+    "digest": "8588cc4bd3f26057b5095f8f1462aef1a6421db7917bfa1ad21164f9"
+   }
+  ],
+  "mnemonics": [
+   [
+    "academic always academic echo alive river tolerate elite quiet nail diet unusual shaped arena quantity discuss rescue laden sympathy detect romp decision glance duration deal unusual pupal fishing universe national acid endorse smoking",
+    "academic always academic email anxiety decision ladybug spit piece gesture traffic grant humidity downtown criminal calcium execute acne veteran junction ending dish sprinkle traffic elite gray legend example scout grant credit glen story",
+    "academic always academic entrance aviation glasses slow hazard crisis domestic midst military describe client obesity camera fake ruler member saver keyboard chest beard wireless guard welcome spend angel browser voter brother texture crystal"
+   ],
+   [
+    "academic always away echo admit race airline lunar picture freshman priority manager vexed tricycle cylinder violence coastal order dish mandate declare course hanger saver smug squeeze finance various training hormone dining security brother",
+    "academic always away email anatomy raisin should reward jury timely unfold orbit inside welcome glad nylon hazard anatomy benefit pajamas sympathy smear bucket carbon desire fraction friar plunge become mortgage desert flexible adult",
+    "academic always away entrance airport intend leaf voting rich profile critical smith ecology short rapids elegant cards industry hormone race equation genre magazine judicial browser single enforce darkness ancestor camera elite brother arena"
+   ]
+  ]
+ },
+ {
+  "description": "4-of-4, 128 bits: two random shares",
+  "scheme": {
+   "groupThreshold": 1,
+   "groups": [
+    [
+     4,
+     4
+    ]
+   ]
+  },
+  "identifier": 100,
+  "extendable": true,
+  "iterationExponent": 0,
+  "passphrase": "",
+  "masterSecret": "30313233343536373839616263646566",
+  "random": [
+   {
+    "shares": [],
+    "digest": ""
+   },
+   {
+    "shares": [
+     "e34d5d16e5543909b2dd338dd0b8fc11",
+     "60ddb24c0d605a48fcc89a42f4626e08"
+    ],
+    "digest": "2536c03e1df9d5b3b4cbe3ad"
+   }
+  ],
+  "mnemonics": [
+   [
+    "acquire clay academic acquire dish exchange industry hormone filter dismiss coal custody example math elegant mental agency fitness jerky pumps",
+    "acquire clay academic aide branch symbolic shaped royal flea forecast class skin cluster elegant software coal lend curly math glasses",
+    "acquire clay academic ambition duke wrap thumb soul sack bracelet tofu seafood ranked beyond blanket loud emperor listen kind distance",
+    "acquire clay academic arena depend iris process surface mild photo veteran mailman impulse display force bulge obtain campus downtown exchange"
+   ]
+  ]
+ }
+]
