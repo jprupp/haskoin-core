@@ -19,6 +19,7 @@ build-type:     Simple
 extra-source-files:
     data/block_100000.hex
     data/bip341.json
+    data/bip39_vectors.json
     data/complex_psbt.json
     data/forkid_script_tests.json
     data/forkid_sighash.json
