@@ -38,6 +38,7 @@ extra-source-files:
     data/sighash.json
     data/slip39_split.json
     data/slip39_vectors.json
+    data/bip39_wordlist.txt
     data/slip39_wordlist.txt
     data/test_vectors_aserti3-2d_run01.txt
     data/test_vectors_aserti3-2d_run02.txt

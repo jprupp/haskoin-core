@@ -4,6 +4,7 @@
 module Haskoin.Crypto.Keys.MnemonicSpec (spec) where
 
 import Control.Monad (forM_, zipWithM_)
+import Crypto.Hash (SHA256 (..), hashWith)
 import Data.Bits (shiftR, (.&.))
 import Data.ByteString qualified as BS
 import Data.Either (fromRight)
@@ -13,6 +14,8 @@ import Data.Maybe (fromJust)
 import Data.Serialize (Serialize, encode)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding qualified as E
+import Data.Text.IO qualified as TIO
 import Data.Vector qualified as V
 import Data.Word (Word32, Word64)
 import Haskoin (btc)
@@ -26,6 +29,8 @@ import Test.QuickCheck hiding ((.&.))
 spec :: Spec
 spec =
   describe "mnemonic" $ do
+    -- data/bip39_wordlist.txt is bip-0039/english.txt of the BIPs repository
+    wordListFile <- runIO (TIO.readFile "data/bip39_wordlist.txt")
     it "entropy to mnemonic sentence" toMnemonicTest
     it "mnemonic sentence to entropy" fromMnemonicTest
     it "mnemonic sentence to seed" mnemonicToSeedTest
@@ -89,6 +94,13 @@ spec =
       M.size wordListMap `shouldBe` 2048
       M.lookup "abandon" wordListMap `shouldBe` Just 0
       M.lookup "zoo" wordListMap `shouldBe` Just 2047
+    it "has the published English word list, by its SHA-256" $
+      -- sha256sum of bip-0039/english.txt in the BIPs repository, one word
+      -- per line with a newline after each
+      show (hashWith SHA256 (E.encodeUtf8 (T.unlines (V.toList wordList))))
+        `shouldBe` "2f5eed53a4727b4bf8880d8f3f199efc90e58503646d9ff8eff3a2ed3b24dbda"
+    it "has the word list of the data directory, word for word" $
+      V.toList wordList `shouldBe` T.lines wordListFile
 
 -- | The first Trezor sentence, for 16 zero bytes of entropy.
 abandon12 :: Mnemonic
