@@ -258,11 +258,43 @@ arbitraryTxSignatureEmpty net ctx =
       (10, lst3 <$> arbitraryTxSignature net ctx)
     ]
 
--- | Arbitrary m of n parameters, with n up to 'maxMultisigKeys'.
+-- | Arbitrary m of n parameters, with n up to 'maxMultisigKeys'. Such a
+-- multisig fits a bare output or a pay-to-witness-script-hash output. For a
+-- pay-to-script-hash output use 'arbitraryP2SHMSParam'.
 arbitraryMSParam :: Gen (Int, Int)
 arbitraryMSParam = do
   m <- choose (1, maxMultisigKeys)
   n <- choose (m, maxMultisigKeys)
+  return (m, n)
+
+-- | The most keys of a pay-to-script-hash multisig whatever the form of its
+-- keys. A redeem script is at most 520 bytes, and an uncompressed key takes
+-- 66 of them with its push: 3 + 7 × 66 = 465, and 8 keys would be 531.
+maxP2SHMultisigKeys :: Int
+maxP2SHMultisigKeys = 7
+
+-- | The most compressed keys of a pay-to-script-hash multisig. A compressed
+-- key takes 34 bytes with its push: 3 + 15 × 34 = 513, and 16 keys would be
+-- 547.
+maxP2SHMultisigKeysC :: Int
+maxP2SHMultisigKeysC = 15
+
+-- | Arbitrary m of n parameters of a multisig whose script fits a
+-- pay-to-script-hash redeem script with keys of any form: n up to
+-- 'maxP2SHMultisigKeys'.
+arbitraryP2SHMSParam :: Gen (Int, Int)
+arbitraryP2SHMSParam = do
+  m <- choose (1, maxP2SHMultisigKeys)
+  n <- choose (m, maxP2SHMultisigKeys)
+  return (m, n)
+
+-- | Arbitrary m of n parameters of a multisig of compressed keys whose
+-- script fits a pay-to-script-hash redeem script: n up to
+-- 'maxP2SHMultisigKeysC'.
+arbitraryP2SHMSParamC :: Gen (Int, Int)
+arbitraryP2SHMSParamC = do
+  m <- choose (1, maxP2SHMultisigKeysC)
+  n <- choose (m, maxP2SHMultisigKeysC)
   return (m, n)
 
 -- | Arbitrary 'ScriptOutput' (Can by any valid type).
@@ -275,13 +307,17 @@ arbitraryScriptOutput net ctx =
       arbitrarySHOutput,
       arbitraryDCOutput
     ]
-      ++ if net.segWit
-        then
-          [ arbitraryWPKHashOutput,
-            arbitraryWSHOutput,
-            arbitraryWitOutput
-          ]
-        else []
+      ++ ( if net.segWit
+             then
+               [ arbitraryWPKHashOutput,
+                 arbitraryWSHOutput,
+                 arbitraryWitOutput
+               ]
+             else []
+         )
+      -- Pay-to-script-hash with a 256-bit hash exists on the networks that
+      -- have CashAddr.
+      ++ [arbitrarySH32Output | isJust net.cashAddrPrefix]
 
 -- | Arbitrary 'ScriptOutput' of type 'PayPK', 'PayPKHash' or 'PayMS'
 -- (Not 'PayScriptHash', 'DataCarrier', or SegWit)
@@ -333,6 +369,32 @@ arbitraryMSOutputC ctx = do
       <$> vectorOf n (arbitraryKeyPair ctx `suchThat` ((.compress) . snd))
   return $ PayMulSig keys m
 
+-- | Arbitrary multisig that fits a pay-to-script-hash redeem script: up to
+-- 7 keys of any form, or up to 15 compressed keys.
+arbitraryP2SHMSOutput :: Ctx -> Gen ScriptOutput
+arbitraryP2SHMSOutput ctx =
+  oneof
+    [ do
+        (m, n) <- arbitraryP2SHMSParam
+        keys <- map snd <$> vectorOf n (arbitraryKeyPair ctx)
+        return $ PayMulSig keys m,
+      arbitraryP2SHMSOutputC ctx
+    ]
+
+-- | Arbitrary multisig of compressed keys that fits a pay-to-script-hash
+-- redeem script: up to 15 keys.
+arbitraryP2SHMSOutputC :: Ctx -> Gen ScriptOutput
+arbitraryP2SHMSOutputC ctx = do
+  (m, n) <- arbitraryP2SHMSParamC
+  keys <-
+    map snd
+      <$> vectorOf n (arbitraryKeyPair ctx `suchThat` ((.compress) . snd))
+  return $ PayMulSig keys m
+
+-- | Arbitrary 'ScriptOutput' of type 'PayScript32Hash'.
+arbitrarySH32Output :: Gen ScriptOutput
+arbitrarySH32Output = PayScript32Hash <$> arbitraryHash256
+
 -- | Arbitrary 'ScriptOutput' of type 'PayScriptHash'.
 arbitrarySHOutput :: Gen ScriptOutput
 arbitrarySHOutput = do
@@ -346,16 +408,17 @@ arbitrarySHOutput = do
 arbitraryDCOutput :: Gen ScriptOutput
 arbitraryDCOutput = DataCarrier <$> listOf arbitraryBS
 
--- | Arbitrary 'ScriptInput'.
+-- | Arbitrary 'ScriptInput'. A nested witness input is only drawn on a
+-- network that has SegWit.
 arbitraryScriptInput :: Network -> Ctx -> Gen ScriptInput
 arbitraryScriptInput net ctx =
-  oneof
+  oneof $
     [ arbitraryPKInput net ctx,
       arbitraryPKHashInput net ctx,
       arbitraryMSInput net ctx,
-      arbitrarySHInput net ctx,
-      arbitraryNestedWitnessInput
+      arbitrarySHInput net ctx
     ]
+      ++ [arbitraryNestedWitnessInput | net.segWit]
 
 -- | Arbitrary 'ScriptInput' of type 'NestedWitnessInput', wrapping a
 -- 'PayWitnessPKHash' or a 'PayWitnessScriptHash'.
@@ -422,10 +485,12 @@ arbitrarySHInput net ctx =
     ]
 
 -- | Arbitrary 'ScriptInput' of type 'ScriptHashInput' containing a
--- 'RedeemScript' of type 'PayMulSig' and an input of type 'SpendMulSig'.
+-- 'RedeemScript' of type 'PayMulSig' and an input of type 'SpendMulSig'. The
+-- redeem script is at most 520 bytes long, as a pay-to-script-hash redeem
+-- script must be.
 arbitraryMulSigSHInput :: Network -> Ctx -> Gen ScriptInput
 arbitraryMulSigSHInput net ctx =
-  arbitraryMSOutput ctx >>= \case
+  arbitraryP2SHMSOutput ctx >>= \case
     rdm@(PayMulSig _ m) -> do
       sigs <- vectorOf m (arbitraryTxSignatureEmpty net ctx)
       return $ ScriptHashInput (SpendMulSig sigs) rdm
@@ -435,7 +500,7 @@ arbitraryMulSigSHInput net ctx =
 -- 'RedeemScript' of type 'PayMulSig' and an input of type 'SpendMulSig'.
 arbitraryMulSigSHInputC :: Network -> Ctx -> Gen ScriptInput
 arbitraryMulSigSHInputC net ctx =
-  arbitraryMSOutputC ctx >>= \case
+  arbitraryP2SHMSOutputC ctx >>= \case
     rdm@(PayMulSig _ m) -> do
       sigs <- vectorOf m (arbitraryTxSignatureEmpty net ctx)
       return $ ScriptHashInput (SpendMulSig sigs) rdm
@@ -444,7 +509,7 @@ arbitraryMulSigSHInputC net ctx =
 -- | Like 'arbitraryMulSigSHCInput' with no empty signatures.
 arbitraryMulSigSHInputFull :: Network -> Ctx -> Gen ScriptInput
 arbitraryMulSigSHInputFull net ctx =
-  arbitraryMSOutput ctx >>= \case
+  arbitraryP2SHMSOutput ctx >>= \case
     rdm@(PayMulSig _ m) -> do
       sigs <- map lst3 <$> vectorOf m (arbitraryTxSignature net ctx)
       return $ ScriptHashInput (SpendMulSig sigs) rdm
@@ -453,7 +518,7 @@ arbitraryMulSigSHInputFull net ctx =
 -- | Like 'arbitraryMulSigSHCInput' with no empty signatures.
 arbitraryMulSigSHInputFullC :: Network -> Ctx -> Gen ScriptInput
 arbitraryMulSigSHInputFullC net ctx =
-  arbitraryMSOutputC ctx >>= \case
+  arbitraryP2SHMSOutputC ctx >>= \case
     rdm@(PayMulSig _ m) -> do
       sigs <- map lst3 <$> vectorOf m (arbitraryTxSignature net ctx)
       return $ ScriptHashInput (SpendMulSig sigs) rdm

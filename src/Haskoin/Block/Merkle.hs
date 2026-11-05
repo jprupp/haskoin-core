@@ -24,6 +24,9 @@ module Haskoin.Block.Merkle
     testMerkleRoot,
     buildPartialMerkle,
     extractMatches,
+    extractIndexedMatches,
+    merkleBlockIndexedTxs,
+    maxMerkleFlagBits,
     decodeMerkleFlags,
     encodeMerkleFlags,
     calcTreeHeight,
@@ -36,14 +39,16 @@ module Haskoin.Block.Merkle
 where
 
 import Control.DeepSeq
-import Control.Monad (when)
+import Control.Monad (replicateM, when)
 import Data.Binary (Binary (..))
 import Data.Bits
+import qualified Data.ByteString as B
 import Data.Bytes.Get
 import Data.Bytes.Put
 import Data.Bytes.Serial
 import Data.Either (isRight)
 import Data.Hashable
+import Data.Maybe (listToMaybe)
 import Data.Serialize (Serialize (..))
 import qualified Data.Vector as V
 import Data.Word (Word32, Word8)
@@ -77,13 +82,40 @@ data MerkleBlock = MerkleBlock
   }
   deriving (Eq, Show, Read, Generic, Hashable, NFData)
 
+-- | The parse fails for a merkle block that no verifier accepts because of
+-- its size alone: more hashes than transactions, or more flag bytes than
+-- 'maxMerkleFlagBits' allows. Both are refused by @ExtractMatches@ of
+-- @CPartialMerkleTree@ in Bitcoin Core and Bitcoin Cash Node, the first as
+-- such and the second as unused flag bits. Checking them here, before the
+-- hashes and the flags are read, bounds the memory that a peer can make the
+-- parser use. The flag bytes are kept packed and unpacked on demand.
 instance Serial MerkleBlock where
   deserialize = do
     header <- deserialize
     ntx <- getWord32le
-    hashes <- getVarIntList deserialize
-    flagBytes <- getVarIntList getWord8
-    return $ MerkleBlock header ntx hashes (decodeMerkleFlags flagBytes)
+    VarInt hashCount <- deserialize
+    when (hashCount > maxListSize) $
+      fail ("List count too large: " ++ show hashCount)
+    when (hashCount > fromIntegral ntx) $
+      fail $
+        "Merkle block with more hashes than transactions: "
+          ++ show hashCount
+          ++ " hashes, "
+          ++ show ntx
+          ++ " transactions"
+    hashes <- replicateM (fromIntegral hashCount) deserialize
+    VarInt flagCount <- deserialize
+    let maxBits = maxMerkleFlagBits (fromIntegral ntx) (fromIntegral hashCount)
+    when (toInteger flagCount > (maxBits + 7) `div` 8) $
+      fail $
+        "Merkle block with more flag bytes than its tree can use: "
+          ++ show flagCount
+          ++ " bytes, at most "
+          ++ show ((maxBits + 7) `div` 8)
+    flagBytes <- getByteString (fromIntegral flagCount)
+    -- The copy lets go of the message buffer. The list of bits is built when
+    -- it is asked for.
+    return $ MerkleBlock header ntx hashes (decodeMerkleFlags (B.unpack (B.copy flagBytes)))
 
   serialize (MerkleBlock h ntx hashes flags) = do
     serialize h
@@ -98,6 +130,27 @@ instance Binary MerkleBlock where
 instance Serialize MerkleBlock where
   put = serialize
   get = deserialize
+
+-- | Largest number of flag bits that a valid partial Merkle tree can use,
+-- for a block of the given number of transactions and a proof of the given
+-- number of hashes. A proof spends one flag bit on each tree node it visits.
+-- Every node it visits lies on the path from the root to one of its hashes,
+-- which has at most the tree height plus one nodes, and it cannot visit more
+-- nodes than the tree has.
+maxMerkleFlagBits ::
+  -- | number of transactions in the block
+  Integer ->
+  -- | number of hashes in the proof
+  Integer ->
+  Integer
+maxMerkleFlagBits ntx hashCount
+  | ntx <= 0 || hashCount <= 0 = 0
+  | otherwise = min (hashCount * (height + 1)) nodes
+  where
+    widths = takeWhile (> 1) (iterate (\w -> (w + 1) `div` 2) ntx)
+    -- one level per width above one, and the root
+    height = toInteger (length widths)
+    nodes = sum widths + 1
 
 -- | Unpack Merkle flags into 'FlagBits' structure. The least significant bit
 -- of each byte comes first.
@@ -172,9 +225,9 @@ buildMerkleRoot txs
 hash2 :: Hash256 -> Hash256 -> Hash256
 hash2 a b = doubleSHA256 $ runPutS (serialize a) <> runPutS (serialize b)
 
--- | Computes the hash of a specific node in a Merkle tree. Builds the whole
--- tree, so use 'buildMerkleRoot' or 'buildPartialMerkle' for more than one
--- node.
+-- | Computes the hash of a specific node in a Merkle tree, or 'Nothing' when
+-- the tree has no node at that height and position. Builds the whole tree,
+-- so use 'buildMerkleRoot' or 'buildPartialMerkle' for more than one node.
 calcHash ::
   -- | height of the node
   Int ->
@@ -183,10 +236,10 @@ calcHash ::
   -- | transaction hashes (leaf nodes)
   [TxHash] ->
   -- | hash of the node at the specified position
-  Hash256
+  Maybe Hash256
 calcHash height pos txs
-  | height < 0 || pos < 0 = error "calcHash: Invalid parameters"
-  | otherwise = (levels !! height) V.! pos
+  | height < 0 || pos < 0 || null txs = Nothing
+  | otherwise = listToMaybe (drop height levels) >>= (V.!? pos)
   where
     (levels, _) = merkleLevels (map (.get) txs)
 
@@ -236,15 +289,15 @@ traverseAndBuild levels matches height pos
 
 -- | Depth-first walk that rebuilds a node of the partial Merkle tree, like
 -- @CPartialMerkleTree::TraverseAndExtract@ in Bitcoin Core. Returns the hash
--- of the node, the matching transactions below it and the flags and hashes
--- that are still unused.
+-- of the node, the matching transactions below it with their positions in
+-- the block, and the flags and hashes that are still unused.
 traverseAndExtract ::
   Int ->
   Int ->
   Int ->
   FlagBits ->
   PartialMerkleTree ->
-  Either String (Hash256, [TxHash], FlagBits, PartialMerkleTree)
+  Either String (Hash256, [(Int, TxHash)], FlagBits, PartialMerkleTree)
 traverseAndExtract height pos ntx flags hashes =
   case flags of
     [] -> Left "extractMatches: ran out of flag bits"
@@ -254,7 +307,7 @@ traverseAndExtract height pos ntx flags hashes =
           case hashes of
             [] -> Left "extractMatches: ran out of hashes"
             (h : hashes') ->
-              Right (h, [TxHash h | height == 0 && parentOfMatch], flags', hashes')
+              Right (h, [(pos, TxHash h) | height == 0 && parentOfMatch], flags', hashes')
       | otherwise -> do
           (left, leftMatches, flags'', hashes'') <-
             traverseAndExtract (height - 1) (pos * 2) ntx flags' hashes
@@ -270,7 +323,8 @@ traverseAndExtract height pos ntx flags hashes =
 
 -- | Extracts the matching hashes from a partial merkle tree. This will return
 -- the list of transaction hashes that have been included (set to true) in
--- a call to 'buildPartialMerkle'.
+-- a call to 'buildPartialMerkle'. See 'extractIndexedMatches' for what this
+-- does not prove.
 extractMatches ::
   Network ->
   FlagBits ->
@@ -279,7 +333,29 @@ extractMatches ::
   Int ->
   -- | Merkle root and list of matching transaction hashes
   Either String (MerkleRoot, [TxHash])
-extractMatches net flags hashes ntx
+extractMatches net flags hashes ntx =
+  fmap (map snd) <$> extractIndexedMatches net flags hashes ntx
+
+-- | Like 'extractMatches', and gives the position of each matching
+-- transaction in the block, as @ExtractMatches@ does in Bitcoin Core.
+--
+-- The number of transactions is a claim of whoever made the proof. Nothing
+-- here can check it, and it sets the depth of the tree. A 64-byte
+-- transaction hashes like an inner node of the tree, so a proof that claims
+-- twice as many transactions can present the two halves of such a
+-- transaction as two matches (CVE-2017-12842). A verifier that knows the
+-- block compares the count with it, as Bitcoin Core does. One that does not
+-- can ask for a proof of the coinbase transaction, which is always at
+-- position 0, and require the same number of transactions in both proofs.
+extractIndexedMatches ::
+  Network ->
+  FlagBits ->
+  PartialMerkleTree ->
+  -- | number of transaction at height 0 (leaf nodes)
+  Int ->
+  -- | Merkle root, and the matching transactions with their positions
+  Either String (MerkleRoot, [(Int, TxHash)])
+extractIndexedMatches net flags hashes ntx
   | ntx == 0 =
       Left "extractMatches: number of transactions can not be 0"
   | ntx > net.maxBlockSize `div` 60 =
@@ -300,10 +376,12 @@ extractMatches net flags hashes ntx
       return (root, matches)
 
 -- | Helper function to split a list in chunks 'Int' length. Last chunk may be
--- smaller.
+-- smaller. A chunk length below one gives the whole list as one chunk.
 splitIn :: Int -> [a] -> [[a]]
 splitIn _ [] = []
-splitIn c xs = xs1 : splitIn c xs2
+splitIn c xs
+  | c < 1 = [xs]
+  | otherwise = xs1 : splitIn c xs2
   where
     (xs1, xs2) = splitAt c xs
 
@@ -312,14 +390,24 @@ boolsToWord8 :: [Bool] -> Word8
 boolsToWord8 [] = 0
 boolsToWord8 xs = foldl setBit 0 (map snd $ filter fst $ zip xs [0 .. 7])
 
--- | Get matching transactions from Merkle block.
+-- | Get matching transactions from Merkle block. The partial tree must
+-- rebuild the Merkle root of the header that came in the same message. That
+-- is all this checks: the caller has to validate the header itself, its proof
+-- of work and its place in the chain, and the transaction count is a claim,
+-- see 'extractIndexedMatches'.
 merkleBlockTxs :: Network -> MerkleBlock -> Either String [TxHash]
-merkleBlockTxs net b = do
-  (root, ths) <- extractMatches net b.flags b.hashes (fromIntegral b.txn)
+merkleBlockTxs net b = map snd <$> merkleBlockIndexedTxs net b
+
+-- | Like 'merkleBlockTxs', with the position of each matching transaction
+-- in the block.
+merkleBlockIndexedTxs :: Network -> MerkleBlock -> Either String [(Int, TxHash)]
+merkleBlockIndexedTxs net b = do
+  (root, ths) <- extractIndexedMatches net b.flags b.hashes (fromIntegral b.txn)
   when (root /= b.header.merkle) $
     Left "merkleBlockTxs: Merkle root incorrect"
   return ths
 
--- | Check if Merkle block root is valid against the block header.
+-- | Check if Merkle block root is valid against the block header. See
+-- 'merkleBlockTxs' for what that does not prove.
 testMerkleRoot :: Network -> MerkleBlock -> Bool
 testMerkleRoot net = isRight . merkleBlockTxs net

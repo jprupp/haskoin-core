@@ -34,6 +34,13 @@ arbitraryKeyPair ctx = do
   k <- arbitraryPrivateKey
   return (k, derivePublicKey ctx k)
 
+-- | Arbitrary private key with its public key, both in compressed form: the
+-- only form of key that a SegWit version 0 input is signed with
+arbitraryKeyPairC :: Ctx -> Gen (PrivateKey, PublicKey)
+arbitraryKeyPairC ctx = do
+  k <- wrapSecKey True <$> arbitrary
+  return (k, derivePublicKey ctx k)
+
 arbitraryFingerprint :: Gen Fingerprint
 arbitraryFingerprint = Fingerprint <$> arbitrary
 

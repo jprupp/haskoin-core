@@ -21,6 +21,7 @@ import Data.Word (Word32, Word64)
 import Haskoin.Address
 import Haskoin.Crypto (Ctx)
 import Haskoin.Crypto.Keys.Common
+import Haskoin.Crypto.Keys.Extended (XPubKey (..), listToPath)
 import Haskoin.Network.Constants
 import Haskoin.Network.Data
 import Haskoin.Script
@@ -49,20 +50,27 @@ arbitraryTxHash :: Gen TxHash
 arbitraryTxHash = TxHash <$> arbitraryHash256
 
 -- | Arbitrary amount of Satoshi as 'Word64' (Between 1 and 21e14), spent
--- with an arbitrary kind of input
+-- with an arbitrary kind of input. A third of the amounts are below 10,000
+-- satoshi, near the fees and the dust thresholds, a third below one coin,
+-- and a third anywhere up to the 21 million coins.
 arbitrarySatoshi :: Network -> Gen TestCoin
-arbitrarySatoshi net = TestCoin <$> choose (1, net.maxSatoshi) <*> arbitraryInputKind
+arbitrarySatoshi net = TestCoin <$> amount <*> arbitraryInputKind
+  where
+    amount = oneof [choose (1, 10000), choose (1, 100000000), choose (1, net.maxSatoshi)]
 
--- | Arbitrary kind of input, with multisig parameters from
--- 'arbitraryMSParam'
+-- | Arbitrary kind of input that can exist. A SegWit multisig has
+-- parameters from 'arbitraryMSParam', up to 20 keys. A pay-to-script-hash
+-- multisig has them from 'arbitraryP2SHMSParamC', up to the 15 compressed
+-- keys that fit a redeem script.
 arbitraryInputKind :: Gen InputKind
 arbitraryInputKind = do
   (m, n) <- arbitraryMSParam
+  (mP2SH, nP2SH) <- arbitraryP2SHMSParamC
   elements
     [ InputPK,
       InputPKHash,
       InputUncompressedPKHash,
-      InputMulSig m n,
+      InputMulSig mP2SH nP2SH,
       InputWitnessPKHash,
       InputWitnessMulSig m n,
       InputNestedWitnessPKHash,
@@ -176,19 +184,24 @@ arbitraryAddrOnlyTxOut net ctx = do
   return $ TxOut v $ marshal ctx out
 
 -- | Arbitrary 'SigInput' with the corresponding private keys used
--- to generate the 'ScriptOutput' or 'RedeemScript'. On a network without
--- a fork id, it may be a Taproot output spent by its key path.
+-- to generate the 'ScriptOutput' or 'RedeemScript'. On a network with
+-- SegWit, it may be a SegWit version 0 output, or a Taproot output spent
+-- by its key path. The signer refuses those on a network without SegWit.
 arbitrarySigInput :: Network -> Ctx -> Gen (SigInput, [PrivateKey])
 arbitrarySigInput net ctx =
   oneof $
     [ wrapKey <$> arbitraryPKSigInput net ctx,
       wrapKey <$> arbitraryPKHashSigInput net ctx,
       arbitraryMSSigInput net ctx,
-      arbitrarySHSigInput net ctx,
-      wrapKey <$> arbitraryWPKHSigInput net ctx,
-      arbitraryWSHSigInput net ctx
+      arbitrarySHSigInput net ctx
     ]
-      <> [wrapKey <$> arbitraryTaprootSigInput net ctx | isNothing net.sigHashForkId]
+      <> concat
+        [ [ wrapKey <$> arbitraryWPKHSigInput net ctx,
+            arbitraryWSHSigInput net ctx,
+            wrapKey <$> arbitraryTaprootSigInput net ctx
+          ]
+        | net.segWit
+        ]
 
 -- | Arbitrary 'SigInput' of a Taproot output without a script tree, spent
 -- by its key path with the key of the internal key, as a wallet of BIP 86
@@ -211,10 +224,16 @@ arbitraryPKSigInput net ctx = arbitraryAnyInput net ctx False
 arbitraryPKHashSigInput :: Network -> Ctx -> Gen (SigInput, PrivateKey)
 arbitraryPKHashSigInput net ctx = arbitraryAnyInput net ctx True
 
--- | Arbitrary 'SigInput'.
+-- | Arbitrary 'SigInput' of a key in either form.
 arbitraryAnyInput :: Network -> Ctx -> Bool -> Gen (SigInput, PrivateKey)
-arbitraryAnyInput net ctx pkh = do
-  (k, p) <- arbitraryKeyPair ctx
+arbitraryAnyInput net ctx = arbitraryAnyInputOf (arbitraryKeyPair ctx) net ctx
+
+-- | Arbitrary 'SigInput' with a 'ScriptOutput' of type 'PayPKHash', when
+-- the flag is set, or 'PayPK', of a key from the generator given.
+arbitraryAnyInputOf ::
+  Gen (PrivateKey, PublicKey) -> Network -> Ctx -> Bool -> Gen (SigInput, PrivateKey)
+arbitraryAnyInputOf keyPair net ctx pkh = do
+  (k, p) <- keyPair
   let out
         | pkh = case addressHash160 (pubKeyAddr ctx p) of
             Just h -> PayPKHash h
@@ -233,9 +252,21 @@ arbitraryInputStuff net = do
 
 -- | Arbitrary 'SigInput' with a 'ScriptOutput' of type 'PayMulSig'.
 arbitraryMSSigInput :: Network -> Ctx -> Gen (SigInput, [PrivateKey])
-arbitraryMSSigInput net ctx = do
-  (m, n) <- arbitraryMSParam
-  ks <- vectorOf n (arbitraryKeyPair ctx)
+arbitraryMSSigInput = arbitraryMSSigInputOf arbitraryMSParam
+
+-- | Arbitrary 'SigInput' with a 'ScriptOutput' of type 'PayMulSig', whose m
+-- of n parameters come from the given generator.
+arbitraryMSSigInputOf ::
+  Gen (Int, Int) -> Network -> Ctx -> Gen (SigInput, [PrivateKey])
+arbitraryMSSigInputOf params net ctx = arbitraryMSSigInputWith (arbitraryKeyPair ctx) params net
+
+-- | Arbitrary 'SigInput' with a 'ScriptOutput' of type 'PayMulSig', whose
+-- keys and m of n parameters come from the given generators.
+arbitraryMSSigInputWith ::
+  Gen (PrivateKey, PublicKey) -> Gen (Int, Int) -> Network -> Gen (SigInput, [PrivateKey])
+arbitraryMSSigInputWith keyPair params net = do
+  (m, n) <- params
+  ks <- vectorOf n keyPair
   let out = PayMulSig (map snd ks) m
   (val, op, sh) <- arbitraryInputStuff net
   perm <- choose (0, n - 1)
@@ -243,38 +274,45 @@ arbitraryMSSigInput net ctx = do
   return (SigInput out val op sh Nothing, ksPerm)
 
 -- | Arbitrary 'SigInput' with 'ScriptOutput' of type 'PaySH' and a
--- 'RedeemScript'.
+-- 'RedeemScript'. A multisig redeem script has at most 7 keys, so that it
+-- fits the 520 bytes of a pay-to-script-hash redeem script with keys of any
+-- form.
 arbitrarySHSigInput :: Network -> Ctx -> Gen (SigInput, [PrivateKey])
 arbitrarySHSigInput net ctx = do
   (SigInput rdm val op sh _, ks) <-
     oneof
       [ wrapKey <$> arbitraryPKSigInput net ctx,
         wrapKey <$> arbitraryPKHashSigInput net ctx,
-        arbitraryMSSigInput net ctx
+        arbitraryMSSigInputOf arbitraryP2SHMSParam net ctx
       ]
-  let out = case addressHash160 (payToScriptAddress ctx rdm) of
+  let out = case either (const Nothing) addressHash160 (payToScriptAddress ctx rdm) of
         Just h -> PayScriptHash h
         Nothing -> error "Could not get Hash160 from address"
   return (SigInput out val op sh $ Just rdm, ks)
 
+-- | Arbitrary 'SigInput' with a 'ScriptOutput' of type 'PayWitnessPKHash'.
+-- The key is compressed, as nodes require of a SegWit version 0 input.
 arbitraryWPKHSigInput :: Network -> Ctx -> Gen (SigInput, PrivateKey)
 arbitraryWPKHSigInput net ctx = do
-  (k, p) <- arbitraryKeyPair ctx
+  (k, p) <- arbitraryKeyPairC ctx
   (val, op, sh) <- arbitraryInputStuff net
   let out = case addressHash160 (pubKeyAddr ctx p) of
         Just h -> PayWitnessPKHash h
         Nothing -> error "Could not get Hash160 from address"
   return (SigInput out val op sh Nothing, k)
 
+-- | Arbitrary 'SigInput' with a 'ScriptOutput' of type
+-- 'PayWitnessScriptHash' and its witness script. The keys of the witness
+-- script are compressed, as nodes require of a SegWit version 0 input.
 arbitraryWSHSigInput :: Network -> Ctx -> Gen (SigInput, [PrivateKey])
 arbitraryWSHSigInput net ctx = do
   (SigInput rdm val op sh _, ks) <-
     oneof
-      [ wrapKey <$> arbitraryPKSigInput net ctx,
-        wrapKey <$> arbitraryPKHashSigInput net ctx,
-        arbitraryMSSigInput net ctx
+      [ wrapKey <$> arbitraryAnyInputOf (arbitraryKeyPairC ctx) net ctx False,
+        wrapKey <$> arbitraryAnyInputOf (arbitraryKeyPairC ctx) net ctx True,
+        arbitraryMSSigInputWith (arbitraryKeyPairC ctx) arbitraryMSParam net
       ]
-  let out = case addressHash256 (payToWitnessScriptAddress ctx rdm) of
+  let out = case either (const Nothing) addressHash256 (payToWitnessScriptAddress ctx rdm) of
         Just h -> PayWitnessScriptHash h
         Nothing -> error "Could not get Hash256 from address"
   return (SigInput out val op sh $ Just rdm, ks)
@@ -351,7 +389,9 @@ arbitraryPartialTxs net ctx = do
       return . fromRight (error "Could not decode transaction") $
         signTx net ctx tx [sigi] [prv]
     arbitraryData = do
-      (m, n) <- arbitraryMSParam
+      -- At most 7 keys, so that the script also fits a pay-to-script-hash
+      -- redeem script
+      (m, n) <- arbitraryP2SHMSParam
       val <- getTestCoin <$> arbitrarySatoshi net
       nPrv <- choose (m, n)
       keys <- vectorOf n (arbitraryKeyPair ctx)
@@ -362,7 +402,7 @@ arbitraryPartialTxs net ctx = do
       let h =
             fromMaybe
               (error "Could not get Hash160 from address")
-              (addressHash160 (payToScriptAddress ctx so))
+              (either (const Nothing) addressHash160 (payToScriptAddress ctx so))
       elements
         [ (so, val, Nothing, prvKeys, m, n),
           ( PayScriptHash h,
@@ -379,18 +419,32 @@ wrapKey (s, k) = (s, [k])
 
 -- | Arbitrary PSBT of a transaction of the network, of version 0 or 2,
 -- with fields of every kind: previous transactions, witness outputs,
--- sighash types, scripts, final scripts, derivation records, proprietary
--- fields, and keys the spec does not define. One of version 2 may have
--- its flags, and lock times its inputs require.
+-- partial signatures, sighash types, scripts, final scripts, derivation
+-- records, extended public keys, the Taproot fields, proprietary fields,
+-- and keys the spec does not define. An input that carries a previous
+-- transaction spends an output of it, as 'decodePsbt' requires. One PSBT
+-- in ten has no input. One of version 2 may have its flags, and lock
+-- times its inputs require.
 arbitraryPsbt :: Network -> Ctx -> Gen Psbt
 arbitraryPsbt net ctx = do
-  base <- psbtOf <$> arbitraryTx net ctx
-  globals <- unknownFields
-  inputs <- mapM (const inputFields) base.inputs
+  drawn <- arbitraryTx net ctx
+  inputs0 <- frequency [(9, return drawn.inputs), (1, return [])]
+  parents <- mapM (const (oneof [return Nothing, Just <$> spendable])) inputs0
+  let spend input = maybe input (\(parent, index) -> TxIn (OutPoint (txHash parent) index) input.script input.sequence)
+      base = psbtOf (Tx drawn.version (zipWith spend inputs0 parents) drawn.outputs [] drawn.locktime)
+  globals <- globalFields
+  inputs <- mapM inputFields parents
   outputs <- mapM (const outputFields) base.outputs
   let version0 = Psbt Version0 base.unsignedTx globals inputs outputs
   oneof [return version0, version2 version0]
   where
+    -- A transaction with at least one output, and the index of one of them
+    spendable = do
+      parent <- arbitraryTx net ctx
+      extra <- arbitraryTxOut net ctx
+      let outputs = if null parent.outputs then [extra] else parent.outputs
+      index <- choose (0, length outputs - 1)
+      return (Tx parent.version parent.inputs outputs parent.witness parent.locktime, fromIntegral index)
     -- The same PSBT in version 2, with flags at times, and lock times the
     -- inputs require: all heights, all times, or both in every input, so
     -- that one fits them all. The PSBT is rebuilt from its maps for the
@@ -413,22 +467,44 @@ arbitraryPsbt net ctx = do
               _ -> insertRequiredHeightLockTime height (insertRequiredTimeLockTime time m)
       let globals = maybe id insertTxModifiable flagsM converted.globals
       either (error . ("arbitraryPsbt: " <>)) return (psbtOfMaps globals inputs converted.outputs)
-    -- Types from 0x20 on are none the spec defines for any map
-    unknownFields = Map.fromList <$> resize 3 (listOf (oneof [unknownField, proprietaryField]))
+    -- Types from 0x20 to 0x7f are none the spec defines for any map. A
+    -- type from 253 on is written over three bytes: 0xfd, then the type
+    -- over two bytes, little-endian, which are the start of the key data.
+    unknownFields = Map.fromList <$> resize 3 (listOf (oneof [unknownField, wideTypeField, proprietaryField]))
     unknownField = (,) <$> (Key <$> choose (0x20, 0x7f) <*> arbitraryBS) <*> arbitraryBS
+    wideTypeField = do
+      wide <- choose (0xfd, 0xffff :: Int)
+      rest <- arbitraryBS
+      (,) (Key 0xfd (BS.pack [fromIntegral (wide `mod` 256), fromIntegral (wide `div` 256)] <> rest)) <$> arbitraryBS
     proprietaryField = (,) <$> (proprietaryKey <$> (Proprietary <$> arbitraryBS <*> arbitrary <*> arbitraryBS)) <*> arbitraryBS
-    inputFields = do
+    globalFields = do
+      m <- unknownFields
+      xpubs <- resize 2 (listOf xpubRecord)
+      return (foldr ($) m xpubs)
+    -- The path of an extended key has one index per level of its depth
+    xpubRecord = do
+      xpub <- arbitraryXPubKey ctx
+      path <- listToPath <$> vectorOf (fromIntegral xpub.depth) arbitrary
+      (\fingerprint -> insertXpubRecord net ctx xpub (Derivation fingerprint path)) <$> arbitraryFingerprint
+    inputFields parentM = do
       m <- unknownFields
       fields <-
         sequence
-          [ maybeField (insertNonWitnessUtxo <$> arbitraryTx net ctx),
+          [ return (maybe id (insertNonWitnessUtxo . fst) parentM),
             maybeField (insertWitnessUtxo <$> arbitraryTxOut net ctx),
             maybeField (insertSigHashType . fromIntegral <$> (arbitrary :: Gen Word32)),
             maybeField (insertInputRedeemScript <$> arbitraryScript),
             maybeField (insertInputWitnessScript <$> arbitraryScript),
             maybeField (insertFinalScriptSig <$> arbitraryBS),
             maybeField (insertFinalScriptWitness <$> resize 3 (listOf arbitraryBS)),
-            derivations (insertInputDerivation ctx)
+            derivations (insertInputDerivation ctx),
+            partialSignatures,
+            maybeField (insertInputTapInternalKey ctx <$> point),
+            maybeField (insertInputTapMerkleRoot <$> digest),
+            maybeField (insertTapKeySig <$> arbitraryTapSig),
+            maybeField (insertTapScriptSig ctx <$> point <*> digest <*> arbitraryTapSig),
+            maybeField (insertTapLeafScript <$> leafScript),
+            maybeField (insertInputTapDerivation ctx <$> point <*> tapDerivation)
           ]
       return (foldr ($) m fields)
     outputFields = do
@@ -437,10 +513,36 @@ arbitraryPsbt net ctx = do
         sequence
           [ maybeField (insertOutputRedeemScript <$> arbitraryScript),
             maybeField (insertOutputWitnessScript <$> arbitraryScript),
-            derivations (insertOutputDerivation ctx)
+            derivations (insertOutputDerivation ctx),
+            maybeField (insertOutputTapInternalKey ctx <$> point),
+            maybeField (insertOutputTapTree <$> scriptTree),
+            maybeField (insertOutputTapDerivation ctx <$> point <*> tapDerivation)
           ]
       return (foldr ($) m fields)
     maybeField gen = oneof [return id, gen]
     derivations insert = do
       records <- resize 2 (listOf ((,) <$> (snd <$> arbitraryKeyPair ctx) <*> (Derivation <$> arbitraryFingerprint <*> arbitraryDerivPath)))
       return $ foldr (\(key, derivation) inserted -> insert key derivation . inserted) id records
+    -- Signatures of a sighash type the network defines, under keys that
+    -- need not be theirs: a PSBT is read without verifying them
+    partialSignatures = do
+      signatures <- resize 2 (listOf ((,) <$> (snd <$> arbitraryKeyPair ctx) <*> ((\(_, _, signature) -> encodeTxSig net ctx signature) <$> arbitraryTxSignature net ctx)))
+      return $ foldr (\(key, signature) inserted -> insertPartialSignature ctx key signature . inserted) id signatures
+    point = (.point) . snd <$> arbitraryKeyPair ctx
+    digest = leafHash 0xc0 <$> arbitraryScript
+    -- 64 bytes, alone or with one of the six sighash bytes of BIP 341
+    arbitraryTapSig = do
+      bytes <- arbitraryBSn 64
+      sighash <- elements [[], [0x01], [0x02], [0x03], [0x81], [0x82], [0x83]]
+      return (fromRight (error "arbitraryPsbt: Taproot signature") (decodeTaprootSig (bytes <> BS.pack sighash)))
+    leafScript = do
+      internal <- point
+      nodes <- resize 3 (listOf digest)
+      (\script -> TapLeafScript (encodeControlBlock ctx 0xc0 internal nodes) script 0xc0) <$> arbitraryScript
+    tapDerivation = TapDerivation <$> resize 2 (listOf digest) <*> (Derivation <$> arbitraryFingerprint <*> arbitraryDerivPath)
+    -- The leaves of a whole tree: one leaf alone, or two under the root
+    scriptTree =
+      oneof
+        [ (\script -> [TapLeaf 0 0xc0 script]) <$> arbitraryScript,
+          (\a b -> [TapLeaf 1 0xc0 a, TapLeaf 1 0xc0 b]) <$> arbitraryScript <*> arbitraryScript
+        ]

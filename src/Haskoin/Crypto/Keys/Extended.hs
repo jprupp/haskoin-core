@@ -10,6 +10,7 @@
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE NoFieldSelectors #-}
 
 -- |
@@ -68,7 +69,7 @@ module Haskoin.Crypto.Keys.Extended
     cycleIndex,
 
     -- ** Derivation Paths
-    DerivPathI (..),
+    DerivPathI (Deriv, (:|), (:/)),
     AnyDeriv,
     HardDeriv,
     SoftDeriv,
@@ -80,6 +81,8 @@ module Haskoin.Crypto.Keys.Extended
     Bip32PathIndex (..),
     derivePath,
     derivePubPath,
+    tryDerivePath,
+    tryDerivePubPath,
     toHard,
     toSoft,
     toGeneric,
@@ -106,7 +109,7 @@ where
 import Control.Applicative
 import Control.DeepSeq
 import Control.Exception (Exception, throw)
-import Control.Monad (guard, mzero, unless, when, (<=<))
+import Control.Monad (foldM, guard, mzero, unless, when, (<=<))
 import Crypto.Secp256k1
 import Data.Aeson as Aeson
   ( FromJSON,
@@ -119,6 +122,7 @@ import Data.Aeson as Aeson
 import Data.Aeson.Encoding (Encoding, string, text)
 import Data.Aeson.Types (Parser)
 import Data.Binary (Binary (get, put))
+import Data.Bifunctor (first)
 import Data.Bits (clearBit, setBit, testBit)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as B
@@ -205,6 +209,9 @@ data XPrvKey = XPrvKey
 -- below this one, so a value that ends up in a log or an error message
 -- must not reveal them. There is no 'Read' instance for the same reason:
 -- use 'xPrvExport' and 'xPrvImport' to write a key out and read it back.
+--
+-- The @key@ field is a 'SecKey', whose own 'Show' instance prints the secret
+-- in hex. Do not show that field by itself.
 instance Show XPrvKey where
   showsPrec d k =
     showParen (d > 10) $
@@ -270,9 +277,7 @@ instance Marshal (Network, Ctx) XPubKey where
     p <- deserialize
     i <- getWord32be
     checkMasterFields d p i
-    XPubKey d p i
-      <$> deserialize
-      <*> ((\PublicKey {point} -> point) <$> marshalGet ctx)
+    XPubKey d p i <$> deserialize <*> getCompressedPubKey ctx
 
   marshalPut (net, ctx) k = do
     putWord32be net.xPubPrefix
@@ -293,6 +298,18 @@ instance MarshalJSON (Network, Ctx) XPubKey where
 
   marshalEncoding (net, ctx) = text . xPubExport net ctx
 
+-- | Read the public key of an extended key. BIP32 serializes it in 33 bytes,
+-- the compressed form. The 65-byte form is refused, so that an extended key
+-- has one binary form of 78 bytes.
+getCompressedPubKey :: (MonadGet m) => Ctx -> m PubKey
+getCompressedPubKey ctx = do
+  bs <- getByteString 33
+  unless (B.head bs `elem` [0x02, 0x03]) $
+    fail "Extended key must hold a compressed public key"
+  case importPubKey ctx bs of
+    Nothing -> fail "Extended key holds an invalid public key"
+    Just k -> return k
+
 -- | A key at depth 0 is a master key. BIP32 requires its parent fingerprint
 -- and child index to be zero; test vector 5 lists keys that break this rule
 -- as invalid.
@@ -301,13 +318,24 @@ checkMasterFields depth parent index =
   when (depth == 0 && (parent /= Fingerprint 0 || index /= 0)) $
     fail "Extended key at depth 0 must have a zero parent fingerprint and index"
 
--- | Build a BIP32 compatible extended private key from a bytestring. This will
--- produce a root node (@depth=0@ and @parent=0@). Throws 'DerivationException'
--- in the vanishingly unlikely case that the seed gives a key outside the curve
--- order, which BIP32 declares invalid.
+-- | Build a BIP32 compatible extended private key from a seed. This will
+-- produce a root node (@depth=0@ and @parent=0@).
+--
+-- The seed must be 16 to 64 bytes long: BIP32 takes a seed "between 128 and
+-- 512 bits", and Bitcoin Core refuses any other length. A shorter seed, such
+-- as the empty string left by a failed read of entropy, would give a master
+-- key that anyone can compute.
+--
+-- Throws 'DerivationException' for a seed of another length, and in the
+-- vanishingly unlikely case that the seed gives a key outside the curve order,
+-- which BIP32 declares invalid.
 makeXPrvKey :: ByteString -> XPrvKey
-makeXPrvKey bs =
-  XPrvKey 0 (Fingerprint 0) 0 c k
+makeXPrvKey bs
+  | B.length bs < 16 || B.length bs > 64 =
+      throw $
+        DerivationException
+          "Invalid seed: its length must be between 16 and 64 bytes"
+  | otherwise = XPrvKey 0 (Fingerprint 0) 0 c k
   where
     (p, c) = split512 $ hmac512 "Bitcoin seed" bs
     k = fromMaybe err (decodeSecKey (runPutS (serialize p)))
@@ -336,16 +364,21 @@ prvSubKey ::
   KeyIndex ->
   -- | extended child private key
   XPrvKey
-prvSubKey ctx xkey child
-  | child < 0x80000000 =
-      XPrvKey (nextDepth xkey.depth) (xPrvFP ctx xkey) child c k
-  | otherwise = throw hardIndexException
+prvSubKey ctx xkey child = orThrow (tryPrvSubKey ctx xkey child)
+
+-- | 'prvSubKey' with its failures as an error value.
+tryPrvSubKey :: Ctx -> XPrvKey -> KeyIndex -> Either String XPrvKey
+tryPrvSubKey ctx xkey child = do
+  unless (child < 0x80000000) $ Left hardIndexError
+  depth <- nextDepth xkey.depth
+  k <-
+    maybeToEither "Invalid prvSubKey derivation" $
+      tweakSecKey ctx xkey.key a
+  return $ XPrvKey depth (xPrvFP ctx xkey) child c k
   where
     pK = (deriveXPubKey ctx xkey).key
     m = B.append (exportPubKey ctx True pK) (runPutS (serialize child))
     (a, c) = split512 $ hmac512 (runPutS $ serialize xkey.chain) m
-    k = fromMaybe err $ tweakSecKey ctx xkey.key a
-    err = throw $ DerivationException "Invalid prvSubKey derivation"
 
 -- | Compute a public, soft child key derivation. Given a parent key /M/
 -- and a derivation index /i/, this function will compute /M\/i/.
@@ -357,15 +390,20 @@ pubSubKey ::
   KeyIndex ->
   -- | extended child public key
   XPubKey
-pubSubKey ctx xKey child
-  | child < 0x80000000 =
-      XPubKey (nextDepth xKey.depth) (xPubFP ctx xKey) child c pK
-  | otherwise = throw hardIndexException
+pubSubKey ctx xKey child = orThrow (tryPubSubKey ctx xKey child)
+
+-- | 'pubSubKey' with its failures as an error value.
+tryPubSubKey :: Ctx -> XPubKey -> KeyIndex -> Either String XPubKey
+tryPubSubKey ctx xKey child = do
+  unless (child < 0x80000000) $ Left hardIndexError
+  depth <- nextDepth xKey.depth
+  pK <-
+    maybeToEither "Invalid pubSubKey derivation" $
+      tweakPubKey ctx xKey.key a
+  return $ XPubKey depth (xPubFP ctx xKey) child c pK
   where
     m = B.append (exportPubKey ctx True xKey.key) (runPutS $ serialize child)
     (a, c) = split512 $ hmac512 (runPutS $ serialize xKey.chain) m
-    pK = fromMaybe err $ tweakPubKey ctx xKey.key a
-    err = throw $ DerivationException "Invalid pubSubKey derivation"
 
 -- | Compute a hard child key derivation. Hard derivations can only be computed
 -- for private keys. Hard derivations do not allow the parent public key to
@@ -381,31 +419,45 @@ hardSubKey ::
   KeyIndex ->
   -- | extended child private key
   XPrvKey
-hardSubKey ctx xkey child
-  | child < 0x80000000 =
-      XPrvKey (nextDepth xkey.depth) (xPrvFP ctx xkey) i c k
-  | otherwise = throw hardIndexException
+hardSubKey ctx xkey child = orThrow (tryHardSubKey ctx xkey child)
+
+-- | 'hardSubKey' with its failures as an error value.
+tryHardSubKey :: Ctx -> XPrvKey -> KeyIndex -> Either String XPrvKey
+tryHardSubKey ctx xkey child = do
+  unless (child < 0x80000000) $ Left hardIndexError
+  depth <- nextDepth xkey.depth
+  k <-
+    maybeToEither "Invalid hardSubKey derivation" $
+      tweakSecKey ctx xkey.key a
+  return $ XPrvKey depth (xPrvFP ctx xkey) i c k
   where
     i = setBit child 31
     m = B.append (bsPadPrvKey xkey.key) (runPutS $ serialize i)
     (a, c) = split512 $ hmac512 (runPutS $ serialize xkey.chain) m
-    k = fromMaybe err $ tweakSecKey ctx xkey.key a
-    err = throw $ DerivationException "Invalid hardSubKey derivation"
 
--- | The exception for a child index with the hard bit set. The derivation
+-- | Turn the failure of a derivation into a 'DerivationException'. Every
+-- failure of a derivation function that does not return 'Either' throws that
+-- exception, so that a caller can catch them all at once.
+orThrow :: Either String a -> a
+orThrow = either (throw . DerivationException) id
+
+-- | The error for a child index with the hard bit set. The derivation
 -- functions take the index without the bit, below 2^31, and 'hardSubKey'
--- sets the bit itself. Every failure of a derivation throws
--- 'DerivationException', so that a caller can catch them all at once.
-hardIndexException :: DerivationException
-hardIndexException = DerivationException "Invalid child derivation index"
+-- sets the bit itself.
+hardIndexError :: String
+hardIndexError = "Invalid child derivation index"
+
+-- | The error for a derivation below depth 255.
+depthError :: String
+depthError = "Maximum derivation depth exceeded"
 
 -- | Depth of a child key. BIP32 stores the depth in one byte, so a key at
--- depth 255 can have no children. Bitcoin Core wraps around to 0 here, which
--- gives a key that cannot be told from a master key. This library refuses, as
--- rust-bitcoin does.
-nextDepth :: Word8 -> Word8
-nextDepth 255 = throw $ DerivationException "Maximum derivation depth exceeded"
-nextDepth d = d + 1
+-- depth 255 can have no children. Bitcoin Core refuses to derive one
+-- (@CExtKey::Derive@ and @CExtPubKey::Derive@ return false), and so does this
+-- library.
+nextDepth :: Word8 -> Either String Word8
+nextDepth 255 = Left depthError
+nextDepth d = Right (d + 1)
 
 -- | Returns true if the extended private key was derived through a hard
 -- derivation.
@@ -479,7 +531,7 @@ xPubWitnessAddr ctx xkey = p2wpkhAddr (xPubKeyHash ctx xkey)
 -- always exists.
 xPubCompatWitnessAddr :: Ctx -> XPubKey -> Address
 xPubCompatWitnessAddr ctx xkey =
-  payToScriptAddress ctx (PayWitnessPKHash (xPubKeyHash ctx xkey))
+  p2shP2wpkhAddr (xPubKeyHash ctx xkey)
 
 -- | HASH160 of the compressed public key of an extended public key.
 xPubKeyHash :: Ctx -> XPubKey -> Hash160
@@ -597,30 +649,45 @@ deriveCompatWitnessAddrs ctx k =
   where
     f i = let (a, key) = deriveCompatWitnessAddr ctx k i in (a, key, i)
 
--- | Derive a multisig address from a list of public keys, the number of
--- required signatures /m/ and a derivation index. The derivation type is a
--- public, soft derivation.
+-- | Derive a pay-to-script-hash multisig address from a list of public keys,
+-- the number of required signatures /m/ and a derivation index. The
+-- derivation type is a public, soft derivation, and the keys of the redeem
+-- script are sorted as BIP 67 defines.
+--
+-- Fails when /m/ is not between 1 and the number of keys, and when there are
+-- more than 15 keys. The redeem script of 16 compressed keys is 547 bytes
+-- (3 + 16 × 34), and a pay-to-script-hash redeem script can have at most 520
+-- ('maxRedeemScriptSize'), so coins sent to such an address could never be
+-- spent. For 16 to 20 keys, build a pay-to-witness-script-hash address from
+-- the redeem script with 'payToWitnessScriptAddress'.
 deriveMSAddr ::
-  Ctx -> [XPubKey] -> Int -> KeyIndex -> (Address, RedeemScript)
-deriveMSAddr ctx keys m i = (payToScriptAddress ctx rdm, rdm)
+  Ctx -> [XPubKey] -> Int -> KeyIndex -> Either String (Address, RedeemScript)
+deriveMSAddr ctx keys m i = do
+  addr <- payToScriptAddress ctx rdm
+  return (addr, rdm)
   where
     rdm = sortMulSig ctx $ PayMulSig k m
     k = map (wrapPubKey True . (.key) . flip (pubSubKey ctx) i) keys
 
 -- | Cyclic list of all multisig addresses derived from a list of public keys,
 -- a number of required signatures /m/ and starting from an offset index. The
--- derivation type is a public, soft derivation.
+-- derivation type is a public, soft derivation. Fails as 'deriveMSAddr' does.
 deriveMSAddrs ::
   Ctx ->
   [XPubKey] ->
   Int ->
   KeyIndex ->
-  [(Address, RedeemScript, KeyIndex)]
-deriveMSAddrs ctx keys m = map f . cycleIndex
-  where
-    f i =
-      let (a, rdm) = deriveMSAddr ctx keys m i
-       in (a, rdm, i)
+  Either String [(Address, RedeemScript, KeyIndex)]
+deriveMSAddrs ctx keys m start = do
+  -- Whether an address can be made depends on the number of keys and on m,
+  -- not on the index. One check therefore covers the whole list, which stays
+  -- lazy and endless.
+  _ <- deriveMSAddr ctx keys m start
+  return
+    [ (a, rdm, i)
+      | i <- cycleIndex start,
+        Right (a, rdm) <- [deriveMSAddr ctx keys m i]
+    ]
 
 -- | Helper function to go through derivation indices. Throws
 -- 'DerivationException' for an index with the hard bit set.
@@ -680,10 +747,35 @@ instance AnyOrSoft SoftDeriv
 -- > Deriv :/ 0 :/ 1 :/ 2 :: SoftPath
 -- > Deriv :| 0 :| 1 :| 2 :: HardPath
 -- > Deriv :| 0 :/ 1 :/ 2 :: DerivPath
+--
+-- The index of a step is below 2^31, for a hardened step as well: '(:|)'
+-- stands for the hard bit. Building a step with a larger index throws
+-- 'DerivationException'. A path can therefore not hold an index that its
+-- text and binary forms cannot write.
 data DerivPathI t where
-  (:|) :: (HardOrAny t) => !(DerivPathI t) -> !KeyIndex -> DerivPathI t
-  (:/) :: (AnyOrSoft t) => !(DerivPathI t) -> !KeyIndex -> DerivPathI t
+  HardStep :: (HardOrAny t) => !(DerivPathI t) -> !KeyIndex -> DerivPathI t
+  SoftStep :: (AnyOrSoft t) => !(DerivPathI t) -> !KeyIndex -> DerivPathI t
   Deriv :: DerivPathI t
+
+-- | A hardened step. The index is given without the hard bit.
+pattern (:|) :: () => (HardOrAny t) => DerivPathI t -> KeyIndex -> DerivPathI t
+pattern next :| i <- HardStep next i
+  where
+    next :| i = HardStep next (checkedIndex i)
+
+-- | A soft step.
+pattern (:/) :: () => (AnyOrSoft t) => DerivPathI t -> KeyIndex -> DerivPathI t
+pattern next :/ i <- SoftStep next i
+  where
+    next :/ i = SoftStep next (checkedIndex i)
+
+{-# COMPLETE (:|), (:/), Deriv #-}
+
+-- | The index of a path step, which must be below 2^31.
+checkedIndex :: KeyIndex -> KeyIndex
+checkedIndex i
+  | i < 0x80000000 = i
+  | otherwise = throw (DerivationException hardIndexError)
 
 instance NFData (DerivPathI t) where
   rnf (a :| b) = rnf a `seq` rnf b
@@ -821,24 +913,57 @@ toGeneric p = case p of
       next :| i -> go (f . (:| i)) $ toGeneric next
       _ -> f
 
--- | Derive a private key from a derivation path
+-- | Derive a private key from a derivation path. Throws
+-- 'DerivationException' when the path cannot be followed, for example when it
+-- leads below depth 255. Use 'tryDerivePath' for a path that comes from
+-- outside, such as the path of a PSBT record.
 derivePath :: Ctx -> DerivPathI t -> XPrvKey -> XPrvKey
-derivePath ctx = go id
-  where
-    -- Build the full derivation function starting from the end
-    go f p = case p of
-      next :| i -> go (f . flip (hardSubKey ctx) i) next
-      next :/ i -> go (f . flip (prvSubKey ctx) i) next
-      _ -> f
+derivePath ctx path = orThrow . tryDerivePath ctx path
 
--- | Derive a public key from a soft derivation path
+-- | Derive a public key from a soft derivation path. Throws
+-- 'DerivationException' when the path cannot be followed. Use
+-- 'tryDerivePubPath' for a path that comes from outside.
 derivePubPath :: Ctx -> SoftPath -> XPubKey -> XPubKey
-derivePubPath ctx = go id
+derivePubPath ctx path = orThrow . tryDerivePubPath ctx path
+
+-- | Derive a private key from a derivation path, with an error value when the
+-- path cannot be followed. BIP32 stores the depth of a key in one byte, so a
+-- path that leads below depth 255 has no key. That is checked before any key
+-- is derived, so a path that is far too long costs nothing.
+tryDerivePath :: Ctx -> DerivPathI t -> XPrvKey -> Either String XPrvKey
+tryDerivePath ctx path key = do
+  checkPathDepth key.depth steps
+  foldM step key steps
   where
-    -- Build the full derivation function starting from the end
-    go f p = case p of
-      next :/ i -> go (f . flip (pubSubKey ctx) i) next
-      _ -> f
+    steps = pathSteps path
+    step k (hard, i)
+      | hard = tryHardSubKey ctx k i
+      | otherwise = tryPrvSubKey ctx k i
+
+-- | Derive a public key from a soft derivation path, with an error value when
+-- the path cannot be followed. See 'tryDerivePath'.
+tryDerivePubPath :: Ctx -> SoftPath -> XPubKey -> Either String XPubKey
+tryDerivePubPath ctx path key = do
+  checkPathDepth key.depth steps
+  foldM (tryPubSubKey ctx) key (map snd steps)
+  where
+    steps = pathSteps path
+
+-- | The steps of a path from the key down. Each step says whether it is
+-- hardened, and gives its index without the hard bit.
+pathSteps :: DerivPathI t -> [(Bool, KeyIndex)]
+pathSteps =
+  reverse . go
+  where
+    go (next :| i) = (True, i) : go next
+    go (next :/ i) = (False, i) : go next
+    go Deriv = []
+
+-- | Fail when a key at this depth has no descendant that many steps below.
+checkPathDepth :: Word8 -> [a] -> Either String ()
+checkPathDepth depth steps
+  | length steps > 255 - fromIntegral depth = Left depthError
+  | otherwise = Right ()
 
 instance Show DerivPath where
   showsPrec d p =
@@ -978,8 +1103,11 @@ appendBip32Segment d (Bip32HardIndex i) = d :| i
 
 -- | Parse a BIP32 derivation path index element from a string. The element is
 -- a decimal number below 2^31, followed by @'@, @h@ or @H@ for a hardened
--- index. Bitcoin Core accepts the same three markers. The number is read as an
--- 'Integer' so that a value too large for 32 bits cannot wrap around.
+-- index. BIP32 itself writes a hardened index with a subscript H, as in
+-- @m\/0H\/1@. Bitcoin Core and the descriptors of BIP380 take @'@ and @h@
+-- only, so write one of those two for text that other software reads.
+-- 'pathToStr' writes @'@. The number is read as an 'Integer' so that a value
+-- too large for 32 bits cannot wrap around.
 parseBip32PathIndex :: String -> Maybe Bip32PathIndex
 parseBip32PathIndex segment =
   case span isDigit segment of
@@ -1057,33 +1185,24 @@ data XKey
 -- | Apply a parsed path to an extended key to derive the new key defined in the
 -- path. If the path starts with /m/, a private key will be returned and if the
 -- path starts with /M/, a public key will be returned. Private derivations on a
--- public key, and public derivations with a hard segment, return an error
--- value.
+-- public key, public derivations with a hard segment, and a path that leads
+-- below depth 255 return an error value. The function does not throw.
 applyPath :: Ctx -> ParsedPath -> XKey -> Either String XKey
 applyPath ctx path key =
-  case (path, key) of
-    (ParsedPrv _, XPrv k n) -> return $ XPrv (derivPrvF k) n
-    (ParsedPrv _, XPub {}) -> Left "applyPath: Invalid public key"
-    (ParsedPub _, XPrv k n) -> return $ XPub (deriveXPubKey ctx (derivPrvF k)) n
-    (ParsedPub _, XPub k n) -> derivPubFE >>= \f -> return $ XPub (f k) n
-    -- For empty parsed paths, we take a hint from the provided key
-    (ParsedEmpty _, XPrv k n) -> return $ XPrv (derivPrvF k) n
-    (ParsedEmpty _, XPub k n) -> derivPubFE >>= \f -> return $ XPub (f k) n
+  first ("applyPath: " <>) $
+    case (path, key) of
+      (ParsedPrv _, XPrv k n) -> (`XPrv` n) <$> derivePrv k
+      (ParsedPrv _, XPub {}) -> Left "Invalid public key"
+      (ParsedPub _, XPrv k n) -> (`XPub` n) . deriveXPubKey ctx <$> derivePrv k
+      (ParsedPub _, XPub k n) -> (`XPub` n) <$> derivePub k
+      -- For empty parsed paths, we take a hint from the provided key
+      (ParsedEmpty _, XPrv k n) -> (`XPrv` n) <$> derivePrv k
+      (ParsedEmpty _, XPub k n) -> (`XPub` n) <$> derivePub k
   where
-    derivPrvF = goPrv id path.get
-    derivPubFE = goPubE id path.get
-    -- Build the full private derivation function starting from the end
-    goPrv f p =
-      case p of
-        next :| i -> goPrv (f . flip (hardSubKey ctx) i) next
-        next :/ i -> goPrv (f . flip (prvSubKey ctx) i) next
-        Deriv -> f
-    -- Build the full public derivation function starting from the end
-    goPubE f p =
-      case p of
-        next :/ i -> goPubE (f . flip (pubSubKey ctx) i) next
-        Deriv -> Right f
-        _ -> Left "applyPath: Invalid hard derivation"
+    derivePrv = tryDerivePath ctx path.get
+    derivePub k = do
+      soft <- maybeToEither "Invalid hard derivation" (toSoft path.get)
+      tryDerivePubPath ctx soft k
 
 {- Helpers for derivation paths and addresses -}
 
@@ -1098,27 +1217,27 @@ derivePathAddrs ::
 derivePathAddrs ctx key path = deriveAddrs ctx (derivePubPath ctx path key)
 
 -- | Derive a multisig address from a given parent path. The number of required
--- signatures (m in m of n) is also needed.
+-- signatures (m in m of n) is also needed. Fails as 'deriveMSAddr' does.
 derivePathMSAddr ::
   Ctx ->
   [XPubKey] ->
   SoftPath ->
   Int ->
   KeyIndex ->
-  (Address, RedeemScript)
+  Either String (Address, RedeemScript)
 derivePathMSAddr ctx keys path =
   deriveMSAddr ctx $ map (derivePubPath ctx path) keys
 
 -- | Cyclic list of all multisig addresses derived from a given parent path and
 -- starting from the given offset index. The number of required signatures
--- (m in m of n) is also needed.
+-- (m in m of n) is also needed. Fails as 'deriveMSAddr' does.
 derivePathMSAddrs ::
   Ctx ->
   [XPubKey] ->
   SoftPath ->
   Int ->
   KeyIndex ->
-  [(Address, RedeemScript, KeyIndex)]
+  Either String [(Address, RedeemScript, KeyIndex)]
 derivePathMSAddrs ctx keys path =
   deriveMSAddrs ctx $ map (derivePubPath ctx path) keys
 

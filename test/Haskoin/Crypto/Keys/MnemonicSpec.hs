@@ -3,6 +3,8 @@
 
 module Haskoin.Crypto.Keys.MnemonicSpec (spec) where
 
+import Control.DeepSeq (NFData, force)
+import Control.Exception (evaluate)
 import Control.Monad (forM_, zipWithM_)
 import Crypto.Hash (SHA256 (..), hashWith)
 import Data.Bits (shiftR, (.&.))
@@ -22,6 +24,7 @@ import Haskoin (btc)
 import Haskoin.Crypto
 import Haskoin.Util
 import Haskoin.Util.Arbitrary
+import System.Timeout (timeout)
 import Test.HUnit
 import Test.Hspec
 import Test.QuickCheck hiding ((.&.))
@@ -78,9 +81,24 @@ spec =
         `shouldBe` Left "fromMnemonic: wrong number of words: 48"
     it "refuses a sentence of only whitespace" $
       fromMnemonic "   " `shouldBe` Left "fromMnemonic: wrong number of words: 0"
-    it "refuses a word that is not in the list" $
+    it "refuses a word that is not in the list, naming its position and not the word" $
+      -- the list is lower case, so "Abandon" is not in it
       fromMnemonic "Abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
-        `shouldBe` Left "fromMnemonic: words not in the list: Abandon"
+        `shouldBe` Left "fromMnemonic: word 1 is not in the list"
+    it "names the positions of two unknown words" $
+      fromMnemonic "legal winner thankk year wave sausage wort useful legal winner thank yellow"
+        `shouldBe` Left "fromMnemonic: words 3 and 7 are not in the list"
+    it "keeps every word of an upper-case sentence out of the error text" $ do
+      -- A sentence typed in capitals is a real secret. It used to be
+      -- echoed whole.
+      let capitals = "LEGAL WINNER THANK YEAR WAVE SAUSAGE WORTH USEFUL LEGAL WINNER THANK YELLOW"
+          refusal = Left "fromMnemonic: words 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 and 12 are not in the list"
+      fromMnemonic capitals `shouldBe` refusal
+      mnemonicToSeed "" capitals `shouldBe` refusal
+    it "reports a failed checksum without its values" $
+      -- "zoo" in place of "yellow": every word is in the list
+      fromMnemonic "legal winner thank year wave sausage worth useful legal winner thank zoo"
+        `shouldBe` Left "fromMnemonic: checksum failed"
     it "matches words after NFKD normalisation" $
       -- the first word in fullwidth letters, which NFKD maps back to ASCII
       fmap encodeHex (fromMnemonic "ａｂａｎｄｏｎ abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about")
@@ -123,11 +141,71 @@ spec =
         fromMnemonic (T.unwords (drop 1 (T.words m))) `shouldBe` Left ("fromMnemonic: wrong number of words: " <> show (length (T.words m) - 1))
     it "refuses the wrong-checksum sentence of python-mnemonic's tests" $
       fromMnemonic "bless cloud wheel regular tiny venue bird web grief security dignity zoo"
-        `shouldSatisfy` either ("fromMnemonic: checksum failed:" `isPrefixOf`) (const False)
-    it "refuses the sentences of the JavaScript library's custom word list, naming their words" $
+        `shouldBe` Left "fromMnemonic: checksum failed"
+    it "refuses the sentences of the JavaScript library's custom word list, naming their positions" $
       -- bitcoinjs/bip39 tests them against a word list of its own
       fromMnemonic "aband0n aband0n aband0n aband0n aband0n aband0n aband0n aband0n aband0n aband0n aband0n ab0ut"
-        `shouldBe` Left "fromMnemonic: words not in the list: aband0n aband0n aband0n aband0n aband0n aband0n aband0n aband0n aband0n aband0n aband0n ab0ut"
+        `shouldBe` Left "fromMnemonic: words 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 and 12 are not in the list"
+    it "has words of 3 to 8 letters, so a longer word is never looked up" $
+      -- the lengths of bip-0039/english.txt
+      (minimum (fmap T.length wordList), maximum (fmap T.length wordList)) `shouldBe` (3, 8)
+    it "refuses 36 bytes of entropy, the first size above the limit" $
+      toMnemonic (BS.replicate 36 0)
+        `shouldBe` Left "toMnemonic: maximum entropy is 32 bytes (256 bits)"
+    it "refuses 12 bytes of entropy, the last size below the limit" $
+      toMnemonic (BS.replicate 12 0)
+        `shouldBe` Left "toMnemonic: minimum entropy is 16 bytes (128 bits)"
+    it "refuses a sentence of 9 words and one of 27, the sizes next to the allowed ones" $ do
+      fromMnemonic (T.unwords (replicate 9 "abandon"))
+        `shouldBe` Left "fromMnemonic: wrong number of words: 9"
+      fromMnemonic (T.unwords (replicate 27 "abandon"))
+        `shouldBe` Left "fromMnemonic: wrong number of words: 27"
+    it "gives no seed for a sentence with a wrong checksum" $
+      -- twelve times "abandon": the checksum of 16 zero bytes is "about"
+      mnemonicToSeed "" (T.unwords (replicate 12 "abandon"))
+        `shouldBe` Left "fromMnemonic: checksum failed"
+    it "gives no seed for a sentence of 11 words" $
+      mnemonicToSeed "" (T.unwords (replicate 11 "abandon"))
+        `shouldBe` Left "fromMnemonic: wrong number of words: 11"
+    it "gives the same seed whatever the white space between the words" $
+      -- the second Trezor vector, with two spaces, a tab and a line break
+      fmap encodeHex (mnemonicToSeed "TREZOR" "  legal  winner thank\tyear wave sausage worth useful\nlegal winner thank yellow ")
+        `shouldBe` Right "2e8905819b8723fe2c1d161860e5ee1830318dbf49a83bd451cfb8440c28bd6fa457fe1296106559a3c80937a1c1069be3a3a5bd381ee6260e8d9739fce1f607"
+    it "takes an ASCII passphrase as it is" $
+      -- lower-case letters and spaces: the seed python-mnemonic 0.21 gives
+      fmap encodeHex (mnemonicToSeed "correct horse battery staple" abandon12)
+        `shouldBe` Right "af1c9b2fb5ae8365dc09b9abfd57c2319bf328aee47fad36e1b06c5c115f20285dd3b29aa5a84bbc8167237869e80a0556581cecfab3f2363f844f082bc87837"
+    it "refuses a sentence of one word of 10,001 characters within a second" $
+      -- "a" followed by 10,000 combining acute accents. Normalising it took
+      -- about ten seconds, and the time grew with the square of the length.
+      withinOneSecond (fromMnemonic ("a" <> T.replicate 10000 "\x0301"))
+        `shouldReturn` Just (Left "fromMnemonic: wrong number of words: 1")
+    it "refuses a word of 10,001 characters in a sentence of 12 words within a second" $
+      withinOneSecond (fromMnemonic (T.unwords (("a" <> T.replicate 10000 "\x0301") : replicate 11 "abandon")))
+        `shouldReturn` Just (Left "fromMnemonic: word 1 is not in the list")
+    it "refuses a passphrase with 10,000 combining characters in a row within a second" $
+      withinOneSecond (mnemonicToSeed ("a" <> T.replicate 10000 "\x0301") abandon12)
+        `shouldReturn` Just (Left "mnemonicToSeed: the passphrase has more than 30 combining characters in a row")
+    it "accepts a passphrase with 30 combining characters in a row, and refuses 31" $ do
+      -- The limit of the Stream-Safe Text Format of Unicode (UAX #15). The
+      -- seed is the one python-mnemonic 0.21 gives.
+      fmap encodeHex (mnemonicToSeed ("a" <> T.replicate 30 "\x0301") abandon12)
+        `shouldBe` Right "dcd74c9cf73d2153256e7eb6634c8e3210d81067c00eb522dae1e5b69b6e9068fc422798c5933be591f8828f1f516bbfe4add8f46c8ac854ff17315ee90df46d"
+      mnemonicToSeed ("a" <> T.replicate 31 "\x0301") abandon12
+        `shouldBe` Left "mnemonicToSeed: the passphrase has more than 30 combining characters in a row"
+    it "counts the combining characters of the normalised passphrase, not of its spelling" $ do
+      -- U+FF9E, the halfwidth voiced sound mark, is a letter that NFKD turns
+      -- into the combining character U+3099. The seed is python-mnemonic's.
+      fmap encodeHex (mnemonicToSeed ("\xff76" <> T.replicate 30 "\xff9e") abandon12)
+        `shouldBe` Right "ff2b0cc184bad26986cd04e499def27a5c50a2d35b95489d66ee2a04de568e639d70b3e3ea553956d55fe65629c030f446d63407472d6982270221a26417b88b"
+      mnemonicToSeed ("\xff76" <> T.replicate 31 "\xff9e") abandon12
+        `shouldBe` Left "mnemonicToSeed: the passphrase has more than 30 combining characters in a row"
+    it "accepts a long passphrase of accented letters, in either spelling" $ do
+      -- 1,000 times "é", decomposed and precomposed: the seed of
+      -- python-mnemonic 0.21 for both
+      let seed = "62654f25fab756984c5220d458717da768c5e31db01773f14a6e4fbde575a03d0d6edca6fa48ad7c71b4ebb9822fbb25f0ef95d3246261016e2aee21361b247e"
+      fmap encodeHex (mnemonicToSeed (T.replicate 1000 "e\x0301") abandon12) `shouldBe` Right seed
+      fmap encodeHex (mnemonicToSeed (T.replicate 1000 "\x00e9") abandon12) `shouldBe` Right seed
     it "gives 15 and 21 words for 20 and 28 bytes of entropy, with their seeds and keys" $
       -- The published vectors have no 15- or 21-word case. These were
       -- computed with an independent Python implementation of BIP39 from
@@ -140,6 +218,11 @@ spec =
         toMnemonic ent `shouldBe` Right mnem
         fmap encodeHex (mnemonicToSeed "TREZOR" mnem) `shouldBe` Right seedTxt
         fmap (xPrvExport btc . makeXPrvKey) (mnemonicToSeed "TREZOR" mnem) `shouldBe` Right xprvTxt
+
+-- | The value in normal form, or nothing when computing it takes more than
+-- a second.
+withinOneSecond :: (NFData a) => a -> IO (Maybe a)
+withinOneSecond = timeout 1000000 . evaluate . force
 
 -- | The first Trezor sentence, for 16 zero bytes of entropy.
 abandon12 :: Mnemonic
@@ -186,7 +269,7 @@ fromMnemonicInvalidTest = mapM_ f invalidMss
     f = assertBool "" . h
     h m = case fromMnemonic m of
       Right _ -> False
-      Left err -> "fromMnemonic: checksum failed:" `isPrefixOf` err
+      Left err -> err == "fromMnemonic: checksum failed"
 
 emptyMnemonicTest :: Assertion
 emptyMnemonicTest =

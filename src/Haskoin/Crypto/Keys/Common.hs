@@ -112,10 +112,14 @@ wrapPubKey :: Bool -> PubKey -> PublicKey
 wrapPubKey c p = PublicKey p c
 
 -- | Decode a public key from bytes that must hold the key and nothing else:
--- 33 bytes starting with 0x02 or 0x03, or 65 bytes starting with 0x04. The
--- 'Marshal' instance reads a key from a longer stream and leaves the rest, so
--- it would accept trailing bytes here. A key pushed in a script, a witness or
--- a PSBT record is the whole item, so use this function for those.
+-- 33 bytes starting with 0x02 or 0x03, or 65 bytes starting with 0x04. A key
+-- pushed in a script, a witness or a PSBT record is the whole item, so use
+-- this function, or 'unmarshal', for those. 'marshalGet' reads a key from the
+-- start of a longer stream and leaves the rest.
+--
+-- A hybrid key, 65 bytes starting with 0x06 or 0x07, is refused. Consensus
+-- takes that form, but the relay rules of Bitcoin Core do not, and no wallet
+-- makes one.
 decodePubKey :: Ctx -> ByteString -> Either String PublicKey
 decodePubKey ctx = runGetS $ do
   k <- marshalGet ctx
@@ -147,6 +151,12 @@ data PrivateKey = PrivateKey
 -- or a REPL session must not give its coins away. There is no 'Read'
 -- instance for the same reason: use 'toWif' and 'fromWif' to write a key
 -- out and read it back.
+--
+-- This protects a 'PrivateKey', not the 'SecKey' inside it. The 'Show'
+-- instance of 'SecKey' comes from the secp256k1 binding and prints the 32
+-- bytes in hex, so @show privateKey.key@ gives the secret away. A record of
+-- your own that holds a 'SecKey' and derives 'Show' prints it too. Keep keys
+-- in 'PrivateKey' or 'XPrvKey' where they may be shown.
 instance Show PrivateKey where
   showsPrec d p =
     showParen (d > 10) $
@@ -176,33 +186,44 @@ instance MarshalJSON Network PrivateKey where
 wrapSecKey :: Bool -> SecKey -> PrivateKey
 wrapSecKey c d = PrivateKey d c
 
--- | Order of the secp256k1 group. A secret key is a number in @[1, n-1]@.
-curveOrder :: Integer
-curveOrder = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141
-
--- | Build a secret key from its 32 big-endian bytes. Fails when the value is
--- zero or not below the curve order. 'Crypto.Secp256k1.secKey' only checks the
--- length, and such a key would make 'derivePubKey' and 'signMsg' crash.
+-- | Build a secret key from its 32 big-endian bytes. Fails when there are not
+-- 32 bytes, and when the value is zero or not below the curve order: a secret
+-- key is a number from 1 to n-1. Every form of a private key in this library
+-- is read through this function: WIF, mini keys, extended keys and the binary
+-- form.
+--
+-- The checks are those of 'Crypto.Secp256k1.secKey', which this function
+-- calls. Version 2.0.0 of the binding checks the range. Earlier versions only
+-- checked the length, and this package requires 2.0.0 or later.
 decodeSecKey :: ByteString -> Maybe SecKey
-decodeSecKey bs = do
-  guard (BS.length bs == 32)
-  let n = bsToInteger bs
-  guard (n >= 1 && n < curveOrder)
-  secKey bs
+decodeSecKey = secKey
 
 -- | Tweak a private key.
 tweakSecKey :: Ctx -> SecKey -> Hash256 -> Maybe SecKey
 tweakSecKey ctx k =
   tweakAddSecKey ctx k <=< tweak . runPutS . serialize
 
--- | Decode Casascius mini private keys (22 or 30 characters).
+-- | Decode a Casascius mini private key, as the Bitcoin wiki describes the
+-- format (<https://en.bitcoin.it/wiki/Mini_private_key_format>):
+--
+-- * 30 characters, or the 22 characters of the first series of coins
+-- * every character from the Base58 alphabet, the first one the letter @S@
+-- * SHA-256 of the key followed by @?@ starts with a zero byte
+--
+-- The private key is SHA-256 of the mini key, and its public key is
+-- uncompressed. A string that breaks one of these rules is not a mini key,
+-- even when its check byte happens to be zero, which one string in 256 has.
 fromMiniKey :: ByteString -> Maybe PrivateKey
 fromMiniKey bs = do
-  guard checkShortKey
+  guard (BS.length bs `elem` [22, 30])
+  guard (BS.head bs == letterS)
+  guard (BS.all (`BS.elem` base58Alphabet) bs)
+  guard (BS.head checkHash == 0x00)
   wrapSecKey False <$> (decodeSecKey . runPutS . serialize . sha256) bs
   where
     checkHash = runPutS $ serialize $ sha256 $ bs `BS.append` "?"
-    checkShortKey = BS.length bs `elem` [22, 30] && BS.head checkHash == 0x00
+    letterS = 0x53
+    base58Alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 
 -- | Longest Base58 string a WIF can take. A WIF holds at most 38 bytes with
 -- its checksum, which never need more than 52 digits because 58^52 is larger

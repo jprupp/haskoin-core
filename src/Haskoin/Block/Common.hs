@@ -291,11 +291,13 @@ data GetBlocks = GetBlocks
   }
   deriving (Eq, Show, Read, Generic, NFData)
 
+-- | A locator of more than 'maxLocatorSize' hashes fails the parse. Bitcoin
+-- Core and Bitcoin Cash Node disconnect a peer that sends one.
 instance Serial GetBlocks where
   deserialize =
     GetBlocks
       <$> getWord32le
-      <*> getVarIntList deserialize
+      <*> getVarIntListMax "getblocks" maxLocatorSize deserialize
       <*> deserialize
   serialize (GetBlocks v xs h) = do
     putWord32le v
@@ -320,11 +322,13 @@ data GetHeaders = GetHeaders
   }
   deriving (Eq, Show, Read, Generic, NFData)
 
+-- | A locator of more than 'maxLocatorSize' hashes fails the parse. Bitcoin
+-- Core and Bitcoin Cash Node disconnect a peer that sends one.
 instance Serial GetHeaders where
   deserialize =
     GetHeaders
       <$> getWord32le
-      <*> getVarIntList deserialize
+      <*> getVarIntListMax "getheaders" maxLocatorSize deserialize
       <*> deserialize
   serialize (GetHeaders v xs h) = do
     putWord32le v
@@ -350,8 +354,12 @@ newtype Headers = Headers
   }
   deriving (Eq, Show, Read, Generic, NFData)
 
+-- | A message of more than 'maxHeadersSize' headers fails the parse, as soon
+-- as the count is read. Bitcoin Core and Bitcoin Cash Node check the count
+-- before they read the headers, and punish a peer that sends more.
 instance Serial Headers where
-  deserialize = Headers <$> getVarIntList (liftM2 (,) deserialize deserialize)
+  deserialize =
+    Headers <$> getVarIntListMax "headers" maxHeadersSize (liftM2 (,) deserialize deserialize)
   serialize (Headers xs) =
     putVarIntList (\(a, b) -> serialize a >> serialize b) xs
 

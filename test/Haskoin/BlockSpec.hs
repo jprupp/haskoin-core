@@ -18,7 +18,8 @@ import Data.Bytes.Put (runPutS)
 import Data.Bytes.Serial (deserialize, serialize)
 import Data.Default (def)
 import Data.Either (isLeft)
-import Data.List (isPrefixOf)
+import Data.Hashable (hash)
+import Data.List (isInfixOf, isPrefixOf)
 import Data.Maybe (fromJust)
 import Data.String (fromString)
 import Data.String.Conversions (cs)
@@ -239,6 +240,13 @@ spec = prepareContext $ \ctx -> do
   asertSpec
   checkpointSpec
   merkleSpec
+  versionRuleSpec
+  knownHeaderSpec
+  merkleLimitSpec
+  chainConstantsSpec
+  activationSpec
+  minimumWorkSpec
+  coreProofSpec
   describe "block subsidy" $ do
     it "computes bitcoin block subsidy correctly" (testSubsidy btc)
     it "computes regtest block subsidy correctly" (testSubsidy btcRegTest)
@@ -305,7 +313,7 @@ compactSpec = describe "compact number" $ do
   it "compact number imported vectors" testCompactBitcoinCore
   it "refuses a number wider than 255 bytes" $
     evaluate (encodeCompact (2 ^ (2048 :: Int))) `shouldThrow` anyErrorCall
-  it "encodes the largest 255-byte number" $
+  it "refuses the largest 255-byte number" $
     -- 255 bytes of 0xff: the top byte has the sign bit set, so the mantissa
     -- shifts down one byte and the exponent becomes 256, which cannot be
     -- represented either
@@ -317,10 +325,15 @@ serializationLimitSpec = describe "serialization limits" $ do
     -- count 0xffffffffffffffff would become -1 as an Int and read as no transactions
     (runGetS deserialize (genesisHeaderBytes <> B.pack (0xff : replicate 8 0xff)) :: Either String Block)
       `shouldSatisfy` isLeft
-  it "refuses a headers message with more than 33554432 entries" $
-    -- count 0x02000001 as a four-byte varint
-    (runGetS deserialize (B.pack [0xfe, 0x01, 0x00, 0x00, 0x02]) :: Either String Headers)
-      `shouldSatisfy` isLeft
+  it "refuses a headers message that announces 2001 headers, before it reads them" $
+    -- the count 2001 = 0x07d1 as a three-byte compact size, and no header.
+    -- MAX_HEADERS_RESULTS is 2000 in Bitcoin Core and Bitcoin Cash Node.
+    (runGetS deserialize (B.pack [0xfd, 0xd1, 0x07]) :: Either String Headers)
+      `leftWith` "too many"
+  it "accepts the count of a headers message of 2000 headers" $
+    -- the count is accepted, and the parse then fails on the missing headers
+    (runGetS deserialize (B.pack [0xfd, 0xd0, 0x07]) :: Either String Headers)
+      `leftWith` "too few bytes"
   it "refuses a merkle block whose hash count wraps around" $
     (runGetS deserialize (genesisHeaderBytes <> B.pack [1, 0, 0, 0] <> B.pack (0xff : replicate 8 0xff)) :: Either String MerkleBlock)
       `shouldSatisfy` isLeft
@@ -410,6 +423,22 @@ headerStoreSpec = describe "header store" $ do
     withChain btc (getBlockHeader genesisHash) `shouldBe` Just (genesisNode btc)
   it "finds nothing for an unknown hash" $
     withChain btc (getBlockHeader "0000000000000000000000000000000000000000000000000000000000000001") `shouldBe` Nothing
+  it "finds nothing for a hash that only shares its first eight bytes with a block" $
+    -- the last eight bytes of this display form are those of the genesis hash
+    withChain btc (getBlockHeader "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa72b3f1b60a8ce26f") `shouldBe` Nothing
+  it "reads a stored node whose chain work fits 256 bits, and no other" $ do
+    -- chain work is a 256-bit unsigned number in Bitcoin Core
+    let stored w = runPutS (serialize (genesisNode btc :: BlockNode) {work = w})
+        readWork w = fmap (.work) (runGetS deserialize (stored w) :: Either String BlockNode)
+    readWork (2 ^ (256 :: Int) - 1)
+      `shouldBe` Right 115792089237316195423570985008687907853269984665640564039457584007913129639935
+    readWork (2 ^ (256 :: Int)) `leftWith` "chain work out of range"
+    readWork (-1) `leftWith` "chain work out of range"
+  it "hashes two nodes with the same header to the same value, as they are equal" $ do
+    let a = (genesisNode btc :: BlockNode) {work = 1}
+        b = (genesisNode btc :: BlockNode) {work = 2}
+    a == b `shouldBe` True
+    hash a == hash b `shouldBe` True
   it "finds an added node by hash" $
     withChain btcRegTest (storeChain (evenlySpaced btcRegTest 600 3 0x207fffff) >>= \ns -> getBlockHeader (headerHash (last ns).header))
       `shouldSatisfy` maybe False ((== 3) . (.height))
@@ -471,10 +500,12 @@ headerStoreSpec = describe "header store" $ do
     let node w h = (genesisNode btc :: BlockNode) {work = w, height = h}
     chooseBest (node 10 1) (node 20 1) `shouldBe` node 20 1
     chooseBest (node 20 1) (node 10 5) `shouldBe` node 20 1
-  it "prefers the higher block on equal work" $ do
+  it "keeps the first block on equal work, whatever the heights" $ do
+    -- CBlockIndexWorkComparator in Bitcoin Core compares the chain work and
+    -- then the order of arrival. Height is not part of the rule.
     let node w h = (genesisNode btc :: BlockNode) {work = w, height = h}
-    chooseBest (node 10 1) (node 10 2) `shouldBe` node 10 2
-    chooseBest (node 10 2) (node 10 1) `shouldBe` node 10 2
+    (chooseBest (node 10 1) (node 10 2)).height `shouldBe` 1
+    (chooseBest (node 10 2) (node 10 1)).height `shouldBe` 2
   it "keeps the first block on equal work and height" $ do
     let node w h hdr = (genesisNode btc :: BlockNode) {work = w, height = h, header = hdr}
         first = node 10 1 btc.genesisHeader
@@ -1007,6 +1038,10 @@ merkleSpec = describe "merkle trees" $ do
     encodeMerkleFlags [] `shouldBe` []
   it "splits a list in chunks" $
     splitIn 3 [1 .. 7 :: Int] `shouldBe` [[1, 2, 3], [4, 5, 6], [7]]
+  it "gives the whole list as one chunk for a chunk length below one" $ do
+    splitIn 0 [1, 2, 3 :: Int] `shouldBe` [[1, 2, 3]]
+    splitIn (-1) [1, 2, 3 :: Int] `shouldBe` [[1, 2, 3]]
+    splitIn 0 ([] :: [Int]) `shouldBe` []
   it "packs bools in a byte" $ do
     boolsToWord8 [] `shouldBe` 0
     boolsToWord8 [True] `shouldBe` 1
@@ -1032,9 +1067,22 @@ merkleSpec = describe "merkle trees" $ do
     it "hashes a pair of nodes" $
       hash2 (txids !! 2).get (txids !! 3).get `shouldBe` rightNode
     it "computes single nodes" $ do
-      calcHash 0 2 txids `shouldBe` (txids !! 2).get
-      calcHash 1 1 txids `shouldBe` rightNode
-      calcHash 2 0 txids `shouldBe` root
+      calcHash 0 2 txids `shouldBe` Just (txids !! 2).get
+      calcHash 1 1 txids `shouldBe` Just rightNode
+      calcHash 2 0 txids `shouldBe` Just root
+    it "has no node outside the tree" $ do
+      -- four transactions: levels of 4, 2 and 1 nodes
+      calcHash 0 4 txids `shouldBe` Nothing
+      calcHash 3 0 txids `shouldBe` Nothing
+      calcHash (-1) 0 txids `shouldBe` Nothing
+      calcHash 0 (-1) txids `shouldBe` Nothing
+      calcHash 0 0 [] `shouldBe` Nothing
+    it "gives the position of each match, as Bitcoin Core does" $ do
+      extractIndexedMatches btc [True, True, False, True, False, False, False, False] [(txids !! 0).get, (txids !! 1).get, rightNode] 4
+        `shouldBe` Right (root, [(1, txids !! 1)])
+      -- every transaction matches: positions 0 to 3
+      fmap (map fst . snd) (extractIndexedMatches btc (replicate 7 True ++ [False]) (map (.get) txids) 4)
+        `shouldBe` Right [0, 1, 2, 3]
     it "builds a partial tree for the second transaction" $
       -- root and left node have a match below (1), the first transaction
       -- does not (0), the second does (1), the right node does not (0)
@@ -1389,3 +1437,291 @@ testAsertBits (AsertVector _ anchor_height anchor_parent_time anchor_bits blocks
       (t - anchor_parent_time)
       (h - anchor_height)
       `shouldBe` g
+
+-- | The result must be a failure whose message holds the given words.
+leftWith :: Either String a -> String -> Expectation
+leftWith result msg =
+  case result of
+    Left e | msg `isInfixOf` e -> return ()
+    Left e -> expectationFailure ("expected a failure mentioning " ++ show msg ++ ", got " ++ show e)
+    Right _ -> expectationFailure ("expected a failure mentioning " ++ show msg ++ ", got a value")
+
+versionRuleSpec :: Spec
+versionRuleSpec = describe "block version rule, three independent conditions" $ do
+  -- ContextualCheckBlockHeader in Bitcoin Core and Bitcoin Cash Node rejects
+  -- when (version < 2 and height >= BIP34) or (version < 3 and height >=
+  -- BIP66) or (version < 4 and height >= BIP65).
+  it "refuses version 1 from the BIP66 height of bitcoin cash regtest, 1251" $ do
+    -- BIP34 is at 100000000 there, far above BIP66 at 1251 and BIP65 at 1351
+    validVersion bchRegTest 1250 1 `shouldBe` True
+    validVersion bchRegTest 1251 1 `shouldBe` False
+    validVersion bchRegTest 1251 2 `shouldBe` False
+    validVersion bchRegTest 1251 3 `shouldBe` True
+  it "refuses version 3 from the BIP65 height of bitcoin cash regtest, 1351" $ do
+    validVersion bchRegTest 1350 3 `shouldBe` True
+    validVersion bchRegTest 1351 3 `shouldBe` False
+    validVersion bchRegTest 1351 4 `shouldBe` True
+  it "refuses a negative version from the BIP66 height of bitcoin cash regtest" $
+    validVersion bchRegTest 1251 0xffffffff `shouldBe` False
+  it "refuses versions 2 and 3 at height 3 of bitcoin cash testnet4, where BIP65 comes before BIP66" $ do
+    -- BIP34 at 2, BIP65 at 3, BIP66 at 4
+    validVersion bchTest4 1 1 `shouldBe` True
+    validVersion bchTest4 2 1 `shouldBe` False
+    validVersion bchTest4 2 2 `shouldBe` True
+    validVersion bchTest4 3 2 `shouldBe` False
+    validVersion bchTest4 3 3 `shouldBe` False
+    validVersion bchTest4 3 4 `shouldBe` True
+  it "refuses a version 1 header at height 1252 of bitcoin cash regtest through connectBlock" $
+    let net = bchRegTest
+        result = withChain net $ do
+          chain net net.genesisHeader 1251
+          best <- getBestBlockHeader
+          let hdr = mineBlock net 0 (headerWithVersion 1 (headerOn best.header (best.header.timestamp + 600) 0x207fffff))
+          connectHeight net (best.header.timestamp + 1200) hdr
+     in result `shouldBe` Left "Invalid block version: 1"
+
+knownHeaderSpec :: Spec
+knownHeaderSpec = describe "headers that are already in the store" $ do
+  -- AcceptBlockHeader in Bitcoin Core returns the block index it already has
+  -- for a known header, before any other check.
+  let base = btcRegTest
+      t0 = base.genesisHeader.timestamp
+      b1 = mineOn base base.genesisHeader (t0 + 600) 0x207fffff
+      b2 = mineOn base b1 (t0 + 1200) 0x207fffff
+      b3 = mineOn base b2 (t0 + 1800) 0x207fffff
+      -- regtest with a checkpoint on block 2
+      net = (base :: Network) {checkpoints = [(2, headerHash b2)]}
+  it "returns the stored node for a known header at or below a checkpoint that was reached" $
+    withChain net (connectAll net [b1, b2, b3] >> connectHeight net myTime b1) `shouldBe` Right 1
+  it "returns the stored nodes for a known batch, and keeps the best block" $
+    let (heights, best) = withChain net $ do
+          connectAll net [b1, b2, b3]
+          r <- connectBlocks net myTime [b1, b2]
+          bb <- getBestBlockHeader
+          return (fmap (map (.height)) r, bb.height)
+     in (heights, best) `shouldBe` (Right [2, 1], 3)
+  it "still refuses another header at the height of a checkpoint that was reached" $
+    let other = mineBlock base 1 (headerOn b1 (t0 + 1260) 0x207fffff)
+     in withChain net (connectAll net [b1, b2, b3] >> connectHeight net myTime other)
+          `shouldBe` Left "Rewriting pre-checkpoint chain: 2"
+
+merkleLimitSpec :: Spec
+merkleLimitSpec = describe "merkle block size limits" $ do
+  -- A proof visits at most one tree node per flag bit. Every node it visits
+  -- lies above a stored hash, so it uses at most (height + 1) bits per hash,
+  -- and no more bits than the tree has nodes. CPartialMerkleTree in Bitcoin
+  -- Core refuses more hashes than transactions and unused flag bytes.
+  let header = runPutS (serialize btc.genesisHeader)
+      hashA = runPutS (serialize txA.get)
+      one = B.pack [1, 0, 0, 0]
+      parseMerkle bytes = runGetS deserialize bytes :: Either String MerkleBlock
+  it "refuses a merkle block of one transaction with 1000 flag bytes" $
+    -- 0xfde803 is the count 1000
+    parseMerkle (header <> one <> B.pack [1] <> hashA <> B.pack [0xfd, 0xe8, 0x03] <> B.replicate 1000 1)
+      `leftWith` "flag"
+  it "refuses a merkle block of one transaction with two flag bytes" $
+    -- one transaction is one node, one flag bit, one byte
+    parseMerkle (header <> one <> B.pack [1] <> hashA <> B.pack [2, 1, 0]) `leftWith` "flag"
+  it "reads a merkle block of one transaction with one flag byte" $
+    fmap (\m -> (m.txn, length m.hashes, length m.flags)) (parseMerkle (header <> one <> B.pack [1] <> hashA <> B.pack [1, 1]))
+      `shouldBe` Right (1, 1, 8)
+  it "refuses a merkle block with more hashes than transactions" $
+    parseMerkle (header <> one <> B.pack [2] <> hashA <> hashA <> B.pack [1, 1]) `leftWith` "hashes"
+  it "reads the proof of the second transaction of block 100000" $
+    -- four transactions, three hashes, the five flag bits 1 1 0 1 0 in one byte: 0x0b
+    let hashes =
+          map
+            (runPutS . serialize . (.get) . displayTxHash)
+            [ "8c14f0db3df150123e6f3dbbf30f8b955a8249b62ac1d1ff16284aefa3d06d87",
+              "fff2525b8931402dd09222c50775608f75787bd2b87e56995a7bdd30f79702c4",
+              "8e30899078ca1813be036a073bbf80b86cdddde1c96e9e9c99e9e3782df4ae49"
+            ]
+        bytes = header <> B.pack [4, 0, 0, 0] <> B.pack [3] <> B.concat hashes <> B.pack [1, 0x0b]
+     in fmap (\m -> extractMatches btc m.flags m.hashes (fromIntegral m.txn)) (parseMerkle bytes)
+          `shouldBe` Right
+            ( Right
+                ( (displayTxHash "f3e94742aca4b5ef85488dc37c06c3282295ffec960994b2c0d5ac2a25a95766").get,
+                  [displayTxHash "fff2525b8931402dd09222c50775608f75787bd2b87e56995a7bdd30f79702c4"]
+                )
+            )
+  it "refuses a proof of four transactions and three hashes with two flag bytes" $
+    -- three hashes under a tree of height 2 use at most 3 * 3 = 9 bits, but
+    -- the tree has only 7 nodes: one byte
+    let bytes = header <> B.pack [4, 0, 0, 0] <> B.pack [3] <> B.concat (replicate 3 hashA) <> B.pack [2, 0x0b, 0]
+     in parseMerkle bytes `leftWith` "flag"
+  it "refuses a proof of one hash with three flag bytes under a tree of 1000 transactions" $
+    -- 1000 transactions make a tree of height 10. One hash lies under at
+    -- most 11 nodes, so it uses at most 11 flag bits: two bytes.
+    let thousand = B.pack [0xe8, 0x03, 0, 0]
+     in do
+          parseMerkle (header <> thousand <> B.pack [1] <> hashA <> B.pack [3, 0, 0, 0]) `leftWith` "flag"
+          fmap (\m -> length m.flags) (parseMerkle (header <> thousand <> B.pack [1] <> hashA <> B.pack [2, 0, 0]))
+            `shouldBe` Right 16
+  it "allows 33 flag bits per hash at most, and no more bits than the tree has nodes" $ do
+    -- 7 transactions: widths 7, 4, 2, 1, so 14 nodes and a height of 3
+    maxMerkleFlagBits 7 1 `shouldBe` 4
+    maxMerkleFlagBits 7 3 `shouldBe` 12
+    maxMerkleFlagBits 7 4 `shouldBe` 14
+    maxMerkleFlagBits 7 7 `shouldBe` 14
+    maxMerkleFlagBits 1 1 `shouldBe` 1
+    maxMerkleFlagBits 0 0 `shouldBe` 0
+    -- 2^32 - 1 transactions make a tree of height 32
+    maxMerkleFlagBits 4294967295 2 `shouldBe` 66
+  it "accepts a proof over 16666 transactions and refuses 16667 on bitcoin" $ do
+    -- 1000000 bytes of block / 60 bytes per transaction = 16666
+    extractMatches btc [False] [txA.get] 16666 `shouldBe` Right (txA.get, [])
+    extractMatches btc [False] [txA.get] 16667 `shouldBe` Left "extractMatches: number of transactions excessively high"
+
+chainConstantsSpec :: Spec
+chainConstantsSpec = describe "chain parameters of the reference nodes" $ do
+  it "retargets every 144 blocks on bitcoin regtest, where the timespan is one day" $ do
+    -- kernel/chainparams.cpp of Bitcoin Core: nPowTargetTimespan = 24 * 60 * 60
+    btcRegTest.targetTimespan `shouldBe` 86400
+    diffInterval btcRegTest `shouldBe` 144
+  it "retargets every 2016 blocks on the other networks" $
+    map diffInterval [btc, btcTest, btcTest4, bch, bchTest, bchTest4, bchRegTest] `shouldBe` replicate 7 2016
+  it "starts the EDA and the DAA one block after the heights of Bitcoin Cash Node" $ do
+    -- chainparams.cpp of Bitcoin Cash Node: uahfHeight 478558, daaHeight
+    -- 504031 on mainnet; 1155875 and 1188697 on testnet3; 6 and 3000 on testnet4
+    (bch.edaHeight, bch.daaHeight) `shouldBe` (Just 478559, Just 504032)
+    (bchTest.edaHeight, bchTest.daaHeight) `shouldBe` (Just 1155876, Just 1188698)
+    (bchTest4.edaHeight, bchTest4.daaHeight) `shouldBe` (Just 7, Just 3001)
+  it "activates ASERT at the time of Bitcoin Cash Node, with its half-lives" $ do
+    -- axionActivationTime = 1605441600; nASERTHalfLife is two days on
+    -- mainnet (172800 seconds) and one hour on the test networks (3600)
+    map (.asertActivationTime) [bch, bchTest, bchTest4, bchRegTest] `shouldBe` replicate 4 (Just 1605441600)
+    map (.asertHalfLife) [bch, bchTest, bchTest4, bchRegTest] `shouldBe` [172800, 3600, 3600, 172800]
+  it "halves the subsidy every 210000 blocks, and every 150 on regtest" $ do
+    map (.halvingInterval) [btc, btcTest, btcTest4, bch, bchTest, bchTest4] `shouldBe` replicate 6 210000
+    map (.halvingInterval) [btcRegTest, bchRegTest] `shouldBe` [150, 150]
+  it "pays 50 coins before block 210000 and 25 from it" $ do
+    computeSubsidy btc 209999 `shouldBe` 5000000000
+    computeSubsidy btc 210000 `shouldBe` 2500000000
+    computeSubsidy btc 420000 `shouldBe` 1250000000
+    computeSubsidy btcRegTest 149 `shouldBe` 5000000000
+    computeSubsidy btcRegTest 150 `shouldBe` 2500000000
+  it "pays one satoshi until block 6929999 and nothing from block 6930000" $ do
+    -- 33 halvings: 5000000000 shifted right by 32 is 1, by 33 is 0
+    computeSubsidy btc 6929999 `shouldBe` 1
+    computeSubsidy btc 6930000 `shouldBe` 0
+  it "has the checkpoint of block 33333 on bitcoin" $ do
+    validCP btc 33333 "000000002dd5588a74784eaa7ab0507a18ad16a236e7b1ce69f00d7ddfb5d0a6" `shouldBe` True
+    validCP btc 33333 "000000002dd5588a74784eaa7ab0507a18ad16a236e7b1ce69f00d7ddfb5d0a7" `shouldBe` False
+  it "enforces BIP94 on bitcoin testnet4 only" $ do
+    map (.bip94) [btc, btcTest, btcTest4, btcRegTest, bch, bchTest, bchTest4, bchRegTest]
+      `shouldBe` [False, False, True, False, False, False, False, False]
+    -- the first block of a period may be at most 600 seconds before its parent
+    validTimeWarp btcTest4 2016 10000 9400 `shouldBe` True
+    validTimeWarp btcTest4 2016 10000 9399 `shouldBe` False
+    validTimeWarp btc 2016 10000 9399 `shouldBe` True
+  it "computes the four retargets of the pow_tests of Bitcoin Core" $ do
+    let next lastTime lastBits firstTime =
+          calcNextWork btc (btc.genesisHeader :: BlockHeader) {timestamp = lastTime, bits = lastBits} firstTime
+    -- blocks 30240 to 32255, the first difficulty change
+    next 1262152739 0x1d00ffff 1261130161 `shouldBe` 0x1d00d86a
+    -- blocks 0 to 2015, capped at the proof-of-work limit
+    next 1233061996 0x1d00ffff 1231006505 `shouldBe` 0x1d00ffff
+    -- blocks 66528 to 68543, limited to a quarter of the timespan
+    next 1279297671 0x1c05a3f4 1279008237 `shouldBe` 0x1c0168fd
+    -- limited to four times the timespan
+    next 1269211443 0x1c387f6f 1263163443 `shouldBe` 0x1d00e1fd
+  it "computes the retarget of bitcoin testnet4 block 157248" $
+    -- first block of the period: bits 0x19037e43, time 1791203299. Last
+    -- block: time 1792638187. 1434888 s of 1209600 s is a factor of 1.18625,
+    -- and 0x037e43 * 1.18625 = 0x0424d1.
+    calcNextWork btcTest4 (btcTest4.genesisHeader :: BlockHeader) {timestamp = 1792638187, bits = 0x19037e43} 1791203299
+      `shouldBe` 0x190424d1
+  it "counts 2^255 hashes of work for a target of one" $
+    -- 2^256 / (1 + 1)
+    headerWork (btc.genesisHeader :: BlockHeader) {bits = 0x01010000}
+      `shouldBe` 57896044618658097711785492504343953926634992332820282019728792003956564819968
+
+activationSpec :: Spec
+activationSpec = describe "first block of each Bitcoin Cash difficulty rule" $ do
+  -- Expected bits come from a Python port of GetNextEDAWorkRequired and
+  -- GetNextCashWorkRequired of Bitcoin Cash Node.
+  it "uses the DAA for the block at the DAA height, and not for the block before" $ do
+    -- DAA from block 150. Blocks every 300 seconds at bits 0x1f00ffff.
+    -- Block 149 keeps the bits of its parent. Block 150 gets the DAA: 144
+    -- blocks of work in 43200 seconds, twice the rate, so half the target.
+    -- The DAA needs a parent at or above the retarget interval, as in
+    -- Bitcoin Cash Node, so the interval is 144 blocks here.
+    let net = (cashNet :: Network) {daaHeight = Just 150, targetTimespan = 144 * 600}
+        required n = withChain net (storeChain (evenlySpaced net 300 n 0x1f00ffff) >> requiredAfter net (net.genesisHeader.timestamp + 300 * (fromIntegral n + 1)))
+    required 148 `shouldBe` 0x1f00ffff
+    required 149 `shouldBe` 0x1e7fff80
+  it "uses the EDA for the block at the EDA height, and not for the block before" $ do
+    -- EDA from block 20. Blocks every three hours at bits 0x1f00ffff, so the
+    -- median time past moves 18 hours in six blocks, more than 12. Block 19
+    -- keeps the bits of its parent. Block 20 gets a target a quarter higher:
+    -- 0x00ffff + 0x003fff = 0x013ffe.
+    let net = (cashNet :: Network) {edaHeight = Just 20}
+        required n = withChain net (storeChain (evenlySpaced net 10800 n 0x1f00ffff) >> requiredAfter net (net.genesisHeader.timestamp + 10800 * (fromIntegral n + 1)))
+    required 18 `shouldBe` 0x1f00ffff
+    required 19 `shouldBe` 0x1f013ffe
+
+minimumWorkSpec :: Spec
+minimumWorkSpec = describe "minimum chain work" $ do
+  -- A regtest header at bits 0x207fffff has a target of 0x7fffff * 2^232,
+  -- so its work is 2^256 / (target + 1) = 2. Genesis has 2, block 1 has 4,
+  -- block 2 has 6, block 3 has 8 and so on.
+  let base = btcRegTest
+      t0 = base.genesisHeader.timestamp
+      b1 = mineOn base base.genesisHeader (t0 + 600) 0x207fffff
+      b2 = mineOn base b1 (t0 + 1200) 0x207fffff
+      b3 = mineOn base b2 (t0 + 1800) 0x207fffff
+      b4 = mineOn base b3 (t0 + 2400) 0x207fffff
+      -- other blocks on top of genesis, block 1 and block 2
+      fork0 = mineBlock base 1 (headerOn base.genesisHeader (t0 + 660) 0x207fffff)
+      fork1 = mineBlock base 1 (headerOn b1 (t0 + 1260) 0x207fffff)
+      fork2 = mineBlock base 1 (headerOn b2 (t0 + 1860) 0x207fffff)
+      -- the chain is known to have a work of 8, which block 3 reaches
+      net = (base :: Network) {minimumChainWork = 8}
+  it "has the work the test assumes" $
+    map headerWork [base.genesisHeader, b1] `shouldBe` [2, 2]
+  it "accepts a fork below the minimum chain work while the best block is below it too" $
+    withChain net (connectAll net [b1, b2] >> connectHeight net myTime fork0) `shouldBe` Right 1
+  it "refuses a fork whose chain has less than the minimum chain work once the best block has it" $ do
+    -- best block 3 with a work of 8. A second block 1 would have 4, a second block 2 would have 6.
+    withChain net (connectAll net [b1, b2, b3] >> connectHeight net myTime fork0)
+      `shouldBe` Left "Header chain has less work than the minimum chain work: 1"
+    withChain net (connectAll net [b1, b2, b3] >> connectHeight net myTime fork1)
+      `shouldBe` Left "Header chain has less work than the minimum chain work: 2"
+  it "accepts a fork whose chain has exactly the minimum chain work" $
+    -- a second block 3 has a work of 8
+    withChain net (connectAll net [b1, b2, b3] >> connectHeight net myTime fork2) `shouldBe` Right 3
+  it "accepts the next block of the best chain" $
+    withChain net (connectAll net [b1, b2, b3] >> connectHeight net myTime b4) `shouldBe` Right 4
+  it "applies no minimum on regtest, where it is zero" $
+    withChain base (connectAll base [b1, b2, b3] >> connectHeight base myTime fork0) `shouldBe` Right 1
+  it "has the minimum chain work of Bitcoin Core 32.1 and Bitcoin Cash Node on each network" $ do
+    -- nMinimumChainWork in kernel/chainparams.cpp of Bitcoin Core v32.1
+    btc.minimumChainWork `shouldBe` 0x0000000000000000000000000000000000000000145ec036acc5ba740052af1a0
+    btcTest.minimumChainWork `shouldBe` 0x0000000000000000000000000000000000000000000017f49f702147f10c0eb6
+    btcTest4.minimumChainWork `shouldBe` 0x000000000000000000000000000000000000000000000e346a558455ade8eca9
+    btcRegTest.minimumChainWork `shouldBe` 0
+    -- chainparamsconstants.h of Bitcoin Cash Node at 3d13ce8
+    bch.minimumChainWork `shouldBe` 0x0000000000000000000000000000000000000000030fd678912166474fe93f14
+    bchTest.minimumChainWork `shouldBe` 0x00000000000000000000000000000000000000000000011fdbbe582349040762
+    bchTest4.minimumChainWork `shouldBe` 0x000000000000000000000000000000000000000000000000bd5a1b5bda45b5da
+    bchRegTest.minimumChainWork `shouldBe` 0
+
+coreProofSpec :: Spec
+coreProofSpec = describe "merkle proofs made by Bitcoin Core 32.1" $ do
+  -- Output of gettxoutproof on a regtest block of seven transactions,
+  -- 307105bce8534c8829f50dbee4a0f5d5f702327443d7078853d0003b19099718. The
+  -- result of that call is a serialized merkle block.
+  let proofOfOne = fromJust $ decodeHex "00000020890b601aa1dcb84e3647ac08bba63d1b2f4c20f493fa83c81c96e113775e525996ec6f2e21c4e47055a7977fefa3567adcf9618591645e1aa004a366a7bd60d5ace5ec6affff7f2000000000070000000431094d2f5d072ffc7cee499023fb27b7910b7c0579f43d6ef46ae4a5ee78d21bacda1c3873e5bc3343400027c94c3ee281134ada869cbc15533593ededf6bd85ccac70b301ce3c55ba6c315c05dd255396d7c76add7ce5fd0780c741353d02c1d444e4de84cf6931a28901c210ad7d81a63e8e9c66ab239e00a0dceb06cb2fa3012b"
+      proofOfTwo = fromJust $ decodeHex "00000020890b601aa1dcb84e3647ac08bba63d1b2f4c20f493fa83c81c96e113775e525996ec6f2e21c4e47055a7977fefa3567adcf9618591645e1aa004a366a7bd60d5ace5ec6affff7f2000000000070000000631094d2f5d072ffc7cee499023fb27b7910b7c0579f43d6ef46ae4a5ee78d21bacda1c3873e5bc3343400027c94c3ee281134ada869cbc15533593ededf6bd85ccac70b301ce3c55ba6c315c05dd255396d7c76add7ce5fd0780c741353d02c1406b3b9a3292f7e0efcd4d4a63197c97d4ab4a7109e8e8ece3dfbd25db25fcece9cc6977b0609eb4c3a5bb98dc6e113a87136a2c2d75320d367ddaa32a20a0d680edfad428b72d1713a241614633c4f0ec6109b7c57cd8a42e6b4c6bd0d736cc02eb02"
+      tx3 = displayTxHash "c1023d3541c78007fde57cdd6ac7d7965325dd055c316cba553cce01b370accc"
+      tx5 = displayTxHash "d6a0202aa3da7d360d32752d2c6a13873a116edc98bba5c3b49e60b07769cce9"
+      parseMerkle bytes = runGetS deserialize bytes :: Either String MerkleBlock
+  it "reads the proof of the transaction at position 3" $ do
+    fmap (\m -> (headerHash m.header, m.txn)) (parseMerkle proofOfOne)
+      `shouldBe` Right ("307105bce8534c8829f50dbee4a0f5d5f702327443d7078853d0003b19099718", 7)
+    fmap (merkleBlockIndexedTxs btcRegTest) (parseMerkle proofOfOne) `shouldBe` Right (Right [(3, tx3)])
+  it "reads the proof of the transactions at positions 3 and 5" $
+    fmap (merkleBlockIndexedTxs btcRegTest) (parseMerkle proofOfTwo) `shouldBe` Right (Right [(3, tx3), (5, tx5)])
+  it "writes both proofs back to the same bytes" $ do
+    fmap (runPutS . serialize) (parseMerkle proofOfOne) `shouldBe` Right proofOfOne
+    fmap (runPutS . serialize) (parseMerkle proofOfTwo) `shouldBe` Right proofOfTwo

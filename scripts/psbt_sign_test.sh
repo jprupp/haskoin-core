@@ -1,32 +1,34 @@
 #!/usr/bin/env bash
 
+# End-to-end test of the PSBT signer against Bitcoin Core on regtest.
+#
+# For each kind of coin, Core makes a PSBT that spends one. This library
+# signs it. Core then finalizes it and accepts the transaction. The script
+# stops with an error at the first step that fails.
+#
+# Run it from the root of the repository. Last run against Bitcoin Core 32.1.
+
 . ./scripts/lib.sh
 
-cabal build
+stack build
 start_bitcoind
 
 create_wallet "miner"
-create_wallet "payer"
-create_wallet "signer"
+create_watch_wallet "signer"
 
 generate_blocks 200
 
+keys=$(new_key)
+read -r privkey1 pubkey1 <<< "$keys"
 
-address1=$(get_address)
-privkey1=$(btc -rpcwallet="miner" dumpprivkey $address1)
-pubkey1=$(btc -rpcwallet="miner" getaddressinfo $address1 | jq -r .pubkey)
+keys=$(new_key)
+read -r privkey2 pubkey2 <<< "$keys"
 
-address2=$(get_address)
-privkey2=$(btc -rpcwallet="miner" dumpprivkey $address2)
-pubkey2=$(btc -rpcwallet="miner" getaddressinfo $address2 | jq -r .pubkey)
-
-address3=$(get_address)
-pubkey3=$(btc -rpcwallet="miner" getaddressinfo $address3 | jq -r .pubkey)
+keys=$(new_key)
+read -r privkey3 pubkey3 <<< "$keys"
 
 sign () {
-    base64 -d |
-        cabal exec runghc -- ./scripts/PsbtSignTest.hs "$1" |
-        base64 -w0
+    psbt_tool sign "$1"
 }
 
 build () {
@@ -66,7 +68,7 @@ build () {
     funding_tx=$(btc -named finalizepsbt "psbt=$signed_funding_psbt" extract=true | jq -r .hex)
     funding_txid=$(btc sendrawtransaction $funding_tx)
 
-    import_descriptor signer "$signer_descriptor" &> /dev/null
+    import_descriptor signer "$signer_descriptor"
     generate_blocks 10
 
     signer_inputs=$(
@@ -79,9 +81,16 @@ build () {
             --arg addr $(get_address) \
             '{ ($addr): 0.8 }'
     )
+    # The signer wallet has no address of its own, so the miner gets the change
+    signer_options=$(
+        jq --null-input \
+            --arg addr $(get_address) \
+            '{ changeAddress: $addr }'
+    )
     btc -named -rpcwallet=signer walletcreatefundedpsbt \
         "inputs=$signer_inputs" \
-        "outputs=$signer_outputs" |
+        "outputs=$signer_outputs" \
+        "options=$signer_options" |
         jq -r .psbt
 }
 

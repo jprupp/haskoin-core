@@ -9,6 +9,7 @@
 module Haskoin.UtilSpec (spec) where
 
 import Control.Exception (ErrorCall, evaluate)
+import System.Timeout (timeout)
 import Control.Monad.Except (ExceptT, runExceptT)
 import Data.Aeson
 import Data.Aeson.Encoding (encodingToLazyByteString)
@@ -23,7 +24,7 @@ import Data.Either (isLeft)
 import Data.Foldable (toList)
 import Data.Int (Int32, Int64)
 import Data.IntMap qualified as IntMap
-import Data.List (permutations)
+import Data.List (isInfixOf, permutations)
 import Data.Maybe
 import Data.Sequence qualified as Seq
 import Data.Serialize qualified as S
@@ -80,7 +81,7 @@ spec = prepareContext $ \ctx ->
         bsToInteger "\x01\x00" `shouldBe` 256
         bsToInteger "\x00\x00\x01" `shouldBe` 1
         bsToInteger "" `shouldBe` 0
-      prop "bsToInteger . integerToBS" getPutInteger
+      prop "bsToInteger . integerToBS gives back a number that is not negative" bytesOfNonNegative
 
     describe "Hex" $ do
       it "encodes lower case and decodes either case" $ do
@@ -171,6 +172,20 @@ spec = prepareContext $ \ctx ->
       it "converts the 5-bit groups of the BIP 173 example to its 20-byte program" $
         fmap (B.pack . map fromIntegral) (convertBits False 5 8 [14, 20, 15, 7, 13, 26, 0, 25, 18, 6, 11, 13, 8, 21, 4, 20, 3, 17, 2, 29, 3, 12, 29, 3, 4, 15, 24, 20, 6, 14, 30, 22])
           `shouldBe` Just "\x75\x1e\x76\xe8\x19\x91\x96\xd4\x54\x94\x1c\x45\xd1\xb3\xa3\x23\xf1\x43\x3b\xd6"
+      it "refuses a digit that does not fit the width it is converted from" $
+        -- 256 needs nine bits. The BIP 173 reference returns None here.
+        convertBits True 8 5 [256] `shouldBe` Nothing
+      it "refuses a width that is zero, negative or too wide for a Word, instead of looping" $ do
+        -- The comparison is made inside the time limit, so that a result
+        -- that never ends cannot be forced outside it.
+        let refused frombits tobits digits =
+              timeout 100000 (evaluate (convertBits True frombits tobits digits == Nothing))
+        refused 8 0 [1] `shouldReturn` Just True
+        refused 8 (-1) [1] `shouldReturn` Just True
+        refused 0 8 [1] `shouldReturn` Just True
+        refused (-8) 5 [1] `shouldReturn` Just True
+        -- 60 + 8 bits do not fit the 64 bits of the accumulator
+        refused 60 8 [1] `shouldReturn` Just True
       prop "converting to 5 bits with padding and back gives the bytes" $
         forAll arbitraryBS $ \bs ->
           let groups = fromJust (convertBits True 8 5 (map fromIntegral (B.unpack bs)))
@@ -206,9 +221,46 @@ spec = prepareContext $ \ctx ->
         runGetS getInteger "\x00\xff\xff\xff\xff" `shouldBe` Right (-1)
         runGetS getInteger "\x01\x01\x00\x00\x00\x00\x00\x00\x00\x04\x00\x00\x00\x80" `shouldBe` Right 2147483648
         runGetS getInteger "\x01\xff\x00\x00\x00\x00\x00\x00\x00\x04\x01\x00\x00\x80" `shouldBe` Right (-2147483649)
+      -- A number has one encoding, the one putInteger writes. The cases
+      -- below are other ways to write a number that getInteger used to read.
+      it "getInteger refuses a tag byte other than 0 and 1" $
+        -- tag 2, then sign 0, length 1 and the byte 5
+        runGetS getInteger "\x02\x00\x00\x00\x00\x00\x00\x00\x00\x01\x05"
+          `shouldSatisfy` either ("tag" `isInfixOf`) (const False)
+      it "getInteger refuses a sign byte other than 0x01 and 0xff" $ do
+        -- 2^31 with the sign bytes 0x00 and 0x02
+        runGetS getInteger "\x01\x00\x00\x00\x00\x00\x00\x00\x00\x04\x00\x00\x00\x80"
+          `shouldSatisfy` either ("sign" `isInfixOf`) (const False)
+        runGetS getInteger "\x01\x02\x00\x00\x00\x00\x00\x00\x00\x04\x00\x00\x00\x80"
+          `shouldSatisfy` either ("sign" `isInfixOf`) (const False)
+      it "getInteger refuses a wide number with zero bytes at its top" $
+        -- 2^31 in five bytes, little-endian, the fifth being zero
+        runGetS getInteger "\x01\x01\x00\x00\x00\x00\x00\x00\x00\x05\x00\x00\x00\x80\x00"
+          `shouldSatisfy` either ("shortest" `isInfixOf`) (const False)
+      it "getInteger refuses the wide form of a number that fits 32 bits" $ do
+        -- 5, and -2^31, which both fit the form with a zero tag
+        runGetS getInteger "\x01\x01\x00\x00\x00\x00\x00\x00\x00\x01\x05"
+          `shouldSatisfy` either ("shortest" `isInfixOf`) (const False)
+        runGetS getInteger "\x01\xff\x00\x00\x00\x00\x00\x00\x00\x04\x00\x00\x00\x80"
+          `shouldSatisfy` either ("shortest" `isInfixOf`) (const False)
+      it "getInteger refuses a wide number of no bytes" $
+        runGetS getInteger "\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00"
+          `shouldSatisfy` either ("shortest" `isInfixOf`) (const False)
+      it "getInteger reads the smallest 32-bit number, -2^31" $
+        runGetS getInteger "\x00\x80\x00\x00\x00" `shouldBe` Right (-2147483648)
+      it "getInteger reads a number of 200,000 bytes in well under two seconds" $ do
+        -- 256^200000 - 1: every byte is 0xff. The old reader took 11 seconds.
+        let input = "\x01\x01\x00\x00\x00\x00\x00\x03\x0d\x40" <> B.replicate 200000 0xff
+            expected = 256 ^ (200000 :: Int) - 1 :: Integer
+        timeout 2000000 (evaluate (runGetS getInteger input == Right expected))
+          `shouldReturn` Just True
       prop "getInteger . putInteger" $ \i -> runGetS getInteger (runPutS (putInteger i)) === Right (i :: Integer)
       prop "getInteger . putInteger for wide numbers" $ \(i :: Integer) (k :: Int) ->
         let n = i * 2 ^ (abs k `mod` 256) in runGetS getInteger (runPutS (putInteger n)) === Right n
+      -- Versions before 0.20 wrote the chain work of a header with the
+      -- Integer instance of cereal. Headers stored then must still read.
+      prop "getInteger reads what the Integer instance of cereal writes" $ \(i :: Integer) (k :: Int) ->
+        let n = i * 2 ^ (abs k `mod` 256) in runGetS getInteger (S.encode n) === Right n
       it "putInt32be and putInt64be write two's complement, big-endian" $ do
         runPutS (putInt32be (-1)) `shouldBe` "\xff\xff\xff\xff"
         runPutS (putInt32be minBound) `shouldBe` "\x80\x00\x00\x00"
@@ -223,6 +275,13 @@ spec = prepareContext $ \ctx ->
         let m = IntMap.fromList [(2, 20), (1, 10 :: Word8)]
         runPutS (putIntMap (putWord8 . fromIntegral) putWord8 m) `shouldBe` "\x00\x00\x00\x00\x00\x00\x00\x02\x01\x0a\x02\x14"
         runGetS (getIntMap (fromIntegral <$> getWord8) getWord8) "\x00\x00\x00\x00\x00\x00\x00\x02\x01\x0a\x02\x14" `shouldBe` Right m
+      it "getIntMap refuses keys that are not in ascending order, such as a key given twice" $ do
+        -- two pairs with the key 1
+        runGetS (getIntMap (fromIntegral <$> getWord8) getWord8) "\x00\x00\x00\x00\x00\x00\x00\x02\x01\x0a\x01\x0b"
+          `shouldSatisfy` either ("ascending" `isInfixOf`) (const False)
+        -- the keys 2 then 1
+        runGetS (getIntMap (fromIntegral <$> getWord8) getWord8) "\x00\x00\x00\x00\x00\x00\x00\x02\x02\x14\x01\x0a"
+          `shouldSatisfy` either ("ascending" `isInfixOf`) (const False)
       it "putTwo and getTwo write a pair" $ do
         runPutS (putTwo putWord8 putWord16be (1, 2)) `shouldBe` "\x01\x00\x02"
         runGetS (getTwo getWord8 getWord16be) "\x01\x00\x02" `shouldBe` Right (1, 2)
@@ -234,6 +293,13 @@ spec = prepareContext $ \ctx ->
         unmarshal ctx (marshal ctx public) `shouldBe` Right public
         unmarshalLazy ctx (marshalLazy ctx public) `shouldBe` Right public
         (unmarshalLazy ctx "junk" :: Either String PublicKey) `shouldSatisfy` isLeft
+      it "unmarshal refuses bytes after the value, strict and lazy" $ do
+        -- the compressed public key of secret key 1, then one more byte
+        let bytes = fromJust (decodeHex "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ff")
+        (unmarshal ctx bytes :: Either String PublicKey)
+          `shouldSatisfy` either ("bytes left over" `isInfixOf`) (const False)
+        (unmarshalLazy ctx (BL.fromStrict bytes) :: Either String PublicKey)
+          `shouldSatisfy` either ("bytes left over" `isInfixOf`) (const False)
       it "marshalJSON and unmarshalJSON round trip, and refuse what is not the value" $ do
         unmarshalJSON ctx (marshalJSON ctx public) `shouldBe` Just public
         (unmarshalJSON ctx "\"junk\"" :: Maybe PublicKey) `shouldBe` Nothing
@@ -255,8 +321,9 @@ type ExceptT' a = ExceptTString a
 
 type ExceptTString a = ExceptT String IO a
 
-getPutInteger :: Integer -> Bool
-getPutInteger i = bsToInteger (integerToBS $ abs i) == abs i
+-- | integerToBS takes no negative number, so the absolute value is tested.
+bytesOfNonNegative :: Integer -> Bool
+bytesOfNonNegative i = bsToInteger (integerToBS $ abs i) == abs i
 
 fromToHex :: ByteString -> Bool
 fromToHex bs = decodeHex (encodeHex bs) == Just bs

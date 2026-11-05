@@ -44,7 +44,7 @@ import Data.Bits
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as B
 import Data.ByteString.Char8 qualified as C
-import Data.Char (isAscii, ord)
+import Data.Char (isAscii, isAsciiLower, isAsciiUpper, ord)
 import Data.List (elemIndex, foldl')
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -78,9 +78,30 @@ charset = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
 checkSumLength :: Int
 checkSumLength = 8
 
--- | Get the 32-bit number associated with this 'Cash32' character.
-base32char :: Char -> Maybe Word8
-base32char = fmap fromIntegral . (`elemIndex` charset)
+-- | An ASCII letter of either case.
+isAsciiLetter :: Char -> Bool
+isAsciiLetter c = isAsciiLower c || isAsciiUpper c
+
+-- | The longest data part of a 'CashAddr', in characters, checksum included.
+-- The largest hash is 64 bytes. With the version byte that is 65 bytes, or
+-- 520 bits, which take 104 characters of five bits. The checksum adds
+-- 'checkSumLength' characters: 104 + 8 = 112.
+maxCashAddrDataLength :: Int
+maxCashAddrDataLength = 112
+
+-- | The value of each byte as a 'Cash32' character, or 0xff for a byte that
+-- is not one. Only lowercase letters and digits are in the table.
+base32table :: ByteString
+base32table =
+  B.pack [maybe 0xff fromIntegral (elemIndex (toEnum i) charset) | i <- [0 .. 255]]
+
+-- | Turn lowercase 'Cash32' characters into their five-bit values. Fails if
+-- a byte is not a 'Cash32' character.
+base32values :: ByteString -> Maybe ByteString
+base32values dat = do
+  let values = B.map (B.index base32table . fromIntegral) dat
+  guard (B.all (/= 0xff) values)
+  return values
 
 -- | A 'CashAddr' string must be all lowercase or all uppercase. A mix of both
 -- must be rejected. Only ASCII is allowed, so no character from another
@@ -90,9 +111,14 @@ singleCase t = T.all isAscii t && (T.toUpper t == t || T.toLower t == t)
 
 -- | High-Level: decode 'CashAddr' string if it is valid for the
 -- provided 'Network'. Prefix may be omitted from the string.
+--
+-- A string longer than the prefix of the network, the colon and
+-- 'maxCashAddrDataLength' characters is refused before any other work. No
+-- valid address is longer, since the largest hash the format has is 64 bytes.
 cashAddrDecode :: Network -> CashAddr -> Maybe (CashVersion, ByteString)
 cashAddrDecode net ca = do
   epfx <- net.cashAddrPrefix
+  guard (T.length ca <= T.length epfx + 1 + maxCashAddrDataLength)
   guard (singleCase ca)
   let (cpfx, cdat) = T.breakOnEnd ":" (T.toLower ca)
   guard (T.null cpfx || T.init cpfx == epfx)
@@ -127,13 +153,18 @@ cash32encodeType pfx cv bs = do
   let len = B.length bs
   vb <- encodeVersionByte cv len
   let pl = vb `B.cons` bs
-  return (cash32encode pfx pl)
+  cash32encode pfx pl
 
 -- | Low-Level: decode 'Cash32' string. 'CashPrefix' must be part of the string.
 -- No version or hash length validation is performed. The data may be any
 -- sequence of five-bit groups, so bits left over after the last whole byte
 -- are dropped. 'cash32decodeType' is the layer that enforces canonical
 -- padding.
+--
+-- The prefix must be one or more letters, and the string has one colon, as
+-- in the decoder of Bitcoin Cash Node. There is no limit on the length here,
+-- since the data is arbitrary. The time and the memory grow in proportion to
+-- the length.
 cash32decode :: Cash32 -> Maybe (CashPrefix, ByteString)
 cash32decode text = do
   (pfx, groups) <- cash32decodeGroups text
@@ -150,7 +181,9 @@ cash32decodeGroups text = do
     if B.null pfx' || pfx' == C.singleton ':'
       then Nothing
       else Just (B.init pfx')
-  b32 <- B.pack <$> mapM base32char (C.unpack dat)
+  -- Letters only: no digit and no second colon. The text is lowercase here.
+  guard (C.all isAsciiLower pfx)
+  b32 <- base32values dat
   guard (B.length b32 >= checkSumLength)
   let px = B.map (.&. 0x1f) pfx
       pd = px <> B.singleton 0 <> b32
@@ -159,16 +192,22 @@ cash32decodeGroups text = do
   return (decodeUtf8 pfx, B.take (B.length b32 - checkSumLength) b32)
 
 -- | Low-Level: encode 'Cash32' string for 'CashPrefix' provided. Can encode
--- arbitrary data. No prefix or length validation is performed.
-cash32encode :: CashPrefix -> ByteString -> Cash32
-cash32encode pfx bs =
+-- arbitrary data, of any length.
+--
+-- The prefix must be one or more ASCII letters, which is what 'cash32decode'
+-- and Bitcoin Cash Node read back. It is written in lowercase, so that the
+-- string is never of mixed case. Any other prefix fails.
+cash32encode :: CashPrefix -> ByteString -> Maybe Cash32
+cash32encode prefix bs = do
+  guard (not (T.null prefix) && T.all isAsciiLetter prefix)
+  let pfx = T.toLower prefix
   let b32 = toBase32 bs
       px = B.map (.&. 0x1f) (encodeUtf8 pfx)
       pd = px <> B.singleton 0 <> b32 <> B.replicate checkSumLength 0
       cs = cash32Polymod pd
       c32 = B.map f (b32 <> cs)
       f = fromIntegral . ord . (charset !!) . fromIntegral
-   in pfx <> ":" <> decodeUtf8 c32
+  return (pfx <> ":" <> decodeUtf8 c32)
 
 -- | Convert base of 'ByteString' from eight bits per byte to five bits per
 -- byte, adding padding as necessary.

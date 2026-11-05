@@ -33,6 +33,12 @@ spec = do
       forM_ validAddresses testValidAddress
     it "rejects the BIP-173 and BIP-350 invalid address vectors" $
       forM_ invalidAddresses testInvalidAddress
+    it "rejects an uppercase address with a look-alike of an uppercase letter" $
+      -- U+212A KELVIN SIGN in place of K. Its lowercase form is the letter k,
+      -- so only a check for ASCII refuses it. The address is the first
+      -- valid vector of BIP 173.
+      segwitDecode "bc" "BC1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7\x212AV8F3T4"
+        `shouldBe` Nothing
     it "rejects an address with a non-ASCII look-alike character" $
       -- U+017F in place of s
       segwitDecode "tb" "tb1qrp33g0q5c5tx\x017Fp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3q0sl5k7"
@@ -80,10 +86,22 @@ spec = do
       bech32Encode Bech32 "HRP" [] `shouldBe` bech32Encode Bech32 "hrp" []
     it "rejects a human-readable part with a non-ASCII character" $
       bech32Encode Bech32 "b\x00e9" [] `shouldBe` Nothing
+    it "refuses a five-bit word above 31 instead of raising an error" $
+      -- UnsafeWord5 can hold any byte. Only 0 to 31 have a character.
+      bech32Encode Bech32 "bc" [UnsafeWord5 99] `shouldBe` Nothing
     it "rejects a string with a non-ASCII character" $
       isNothing (bech32Decode "a12uel5l\x00e9") `shouldBe` True
-    it "rejects a string longer than 90 characters" $
-      isNothing (bech32Decode ("a1" <> Text.replicate 89 "q")) `shouldBe` True
+    it "rejects a string longer than 90 characters" $ do
+      -- The vectors of BIP 173 and BIP 350 with a valid checksum and 91
+      -- characters, so that only the length can refuse them
+      isNothing (bech32Decode "an84characterslonghumanreadablepartthatcontainsthenumber1andtheexcludedcharactersbio1569pvx")
+        `shouldBe` True
+      isNothing (bech32Decode "an84characterslonghumanreadablepartthatcontainsthetheexcludedcharactersbioandnumber11d6pts4")
+        `shouldBe` True
+    it "accepts a string of exactly 90 characters" $
+      -- The valid vector of BIP 173 with an 83-character human-readable part
+      (fmap (\(enc, hrp, _) -> (enc, Text.length hrp)) (bech32Decode "an83characterlonghumanreadablepartthatcontainsthenumber1andtheexcludedcharactersbio1tt5tgs"))
+        `shouldBe` Just (Bech32, 83)
   describe "base conversion" $ do
     it "toBase32 splits bytes into five-bit groups and pads with zero bits" $
       -- 11111111 becomes 11111 and 11100
@@ -170,6 +188,9 @@ validChecksums =
     ( Bech32,
       "split1checkupstagehandshakeupstreamerranterredcaperred2y9e3w"
     ),
+    ( Bech32,
+      "?1ezyfcl"
+    ),
     ( Bech32m,
       "A1LQFN3A"
     ),
@@ -202,7 +223,23 @@ invalidChecksums =
     "1pzry9x0s0muk",
     "x1b4n0q5v",
     "li1dgmt3",
-    "de1lg7wt\xFF"
+    "de1lg7wt\xFF",
+    -- The rest of the invalid strings of BIP 173
+    "A1G7SGD8",
+    "10a06t8",
+    "1qzzfhee",
+    -- The invalid strings of BIP 350
+    "an84characterslonghumanreadablepartthatcontainsthetheexcludedcharactersbioandnumber11d6pts4",
+    "qyrz8wqd2c9m",
+    "1qyrz8wqd2c9m",
+    "y1b0jsk6g",
+    "lt1igcx5c0",
+    "in1muywd",
+    "mm1crxm3i",
+    "au1s5cgom",
+    "M1VUXWEZ",
+    "16plkw9",
+    "1p2gdwpf"
   ]
 
 validAddresses :: [(Text, Text)]
@@ -266,7 +303,12 @@ invalidAddresses =
     "bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7v8n0nx0muaewav253zgeav",
     "tb1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vq47Zagq",
     "bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7v07qwwzcrf",
-    "tb1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vpggkg4j"
+    "tb1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vpggkg4j",
+    -- The three addresses of witness version 1 and above that BIP 173 lists
+    -- as valid. They use the Bech32 checksum, and BIP 350 made them invalid.
+    "bc1pw508d6qejxtdg4y5r3zarvary0c5xw7kw508d6qejxtdg4y5r3zarvary0c5xw7k7grplx",
+    "BC1SW50QA3JX3S",
+    "bc1zw508d6qejxtdg4y5r3zarvaryvg6kdaj"
   ]
 
 hrpCaseVariants :: [Text]

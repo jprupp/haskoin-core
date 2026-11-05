@@ -17,6 +17,7 @@ import Data.Bytes.Put
 import Data.Bytes.Serial
 import Data.Default (def)
 import Data.Either (isLeft)
+import Data.List (isInfixOf)
 import Data.Maybe (fromJust, isJust, isNothing)
 import Data.Ord (comparing)
 import Data.String (fromString)
@@ -30,6 +31,7 @@ import Haskoin.Network.Constants
 import Haskoin.Script
 import Haskoin.Util
 import Haskoin.Util.Arbitrary
+import System.Timeout (timeout)
 import Test.HUnit
 import Test.Hspec
 import Test.Hspec.QuickCheck
@@ -112,6 +114,12 @@ spec = prepareContext $ \ctx -> do
     it "refuses a string longer than any extended key" $ do
       xPrvImport btc (T.replicate 113 "z") `shouldBe` Nothing
       xPubImport btc ctx (T.replicate 113 "z") `shouldBe` Nothing
+    it "refuses a string of a million characters at once, without decoding it" $ do
+      -- Decoding that much Base58 takes minutes. The length check comes first.
+      timeout 1000000 (evaluate (xPrvImport btc (T.replicate 1000000 "z")))
+        `shouldReturn` Just Nothing
+      timeout 1000000 (evaluate (xPubImport btc ctx (T.replicate 1000000 "z")))
+        `shouldReturn` Just Nothing
     it "refuses an extended key of another network" $ do
       xPrvImport btcTest xprv1Text `shouldBe` Nothing
       xPrvImport btc tprv1Text `shouldBe` Nothing
@@ -120,6 +128,17 @@ spec = prepareContext $ \ctx -> do
     it "imports the testnet form of a key on testnet" $ do
       fmap (.key) (xPrvImport btcTest tprv1Text) `shouldBe` Just (xprv1 ctx).key
       fmap (.key) (xPubImport btcTest ctx tpub1Text) `shouldBe` Just (xpub1 ctx).key
+    it "writes a key with the version bytes of each of the eight networks" $ do
+      -- xprv and xpub (0488ade4, 0488b21e) on the two main networks, tprv and
+      -- tpub (04358394, 043587cf) on the six others: chainparams.cpp of
+      -- Bitcoin Core and of Bitcoin Cash Node. The key is the master key of
+      -- BIP32 test vector 1.
+      forM_ [btc, bch] $ \net -> do
+        xPrvExport net (xprv1 ctx) `shouldBe` xprv1Text
+        xPubExport net ctx (xpub1 ctx) `shouldBe` xpub1Text
+      forM_ [btcTest, btcTest4, btcRegTest, bchTest, bchTest4, bchRegTest] $ \net -> do
+        xPrvExport net (xprv1 ctx) `shouldBe` tprv1Text
+        xPubExport net ctx (xpub1 ctx) `shouldBe` tpub1Text
     it "refuses an xpub given to the private key importer, and the reverse" $ do
       xPrvImport btc xpub1Text `shouldBe` Nothing
       xPubImport btc ctx xprv1Text `shouldBe` Nothing
@@ -127,12 +146,61 @@ spec = prepareContext $ \ctx -> do
       -- BIP32 test vector 5: private key 0
       (unmarshalJSON btc "\"xprv9s21ZrQH143K24Mfq5zL5MhWK9hUhhGbd45hLXo2Pq2oqzMMo63oStZzF93Y5wvzdUayhgkkFoicQZcP3y52uPPxFnfoLZB21Teqt1VvEHx\"" :: Maybe XPrvKey)
         `shouldBe` Nothing
-  describe "Master key" $
+  describe "Binary extended keys" $ do
+    -- The 78 bytes of the master keys of BIP32 test vector 1: version, depth
+    -- 0, parent 00000000, index 0, the chain code, then the key
+    let header = "000000000000000000873dff81c02f525623fd1fe5167eac3a55a049de3d314bb42ee227ffed37d508"
+        xpubBytes = hex ("0488b21e" <> header <> "0339a36013301597daef41fbe593a02cc513d0b55527ec2df1050e2e8ff49c85c2")
+        xprvBytes = hex ("0488ade4" <> header <> "00e8f32e723decf4051aefac8e2c93c9c5b214313817cdb01a1494b917c8436b35")
+    it "reads the 78 bytes of an extended public key" $
+      fmap (xPubExport btc ctx) (unmarshal (btc, ctx) xpubBytes) `shouldBe` Right xpub1Text
+    it "reads the 78 bytes of an extended private key" $
+      fmap (xPrvExport btc) (unmarshal btc xprvBytes) `shouldBe` Right xprv1Text
+    it "refuses an extended public key whose key is in the 65-byte form" $
+      -- the same key with its y coordinate, 110 bytes in all
+      ( unmarshal
+          (btc, ctx)
+          ( hex
+              ( "0488b21e"
+                  <> header
+                  <> "0439a36013301597daef41fbe593a02cc513d0b55527ec2df1050e2e8ff49c85c2\
+                     \3cbe7ded0e7ce6a594896b8f62888fdbc5c8821305e2ea42bf01e37300116281"
+              )
+          ) ::
+          Either String XPubKey
+      )
+        `shouldSatisfy` either ("compressed public key" `isInfixOf`) (const False)
+    it "refuses bytes after the 78 bytes of an extended key" $ do
+      (unmarshal (btc, ctx) (xpubBytes <> "\x00") :: Either String XPubKey)
+        `shouldSatisfy` either ("bytes left over" `isInfixOf`) (const False)
+      (unmarshal btc (xprvBytes <> "\x00") :: Either String XPrvKey)
+        `shouldSatisfy` either ("bytes left over" `isInfixOf`) (const False)
+  describe "Master key" $ do
     it "has depth 0, no parent and index 0" $ do
       let m = makeXPrvKey (fromJust (decodeHex m1))
       m.depth `shouldBe` 0
       m.parent `shouldBe` "00000000"
       m.index `shouldBe` 0
+    -- BIP32: the seed is "between 128 and 512 bits", that is 16 to 64 bytes
+    let badSeed = DerivationException "Invalid seed: its length must be between 16 and 64 bytes"
+    it "is made from the 16-byte seed of BIP32 test vector 1" $
+      xPrvExport btc (makeXPrvKey (hex "000102030405060708090a0b0c0d0e0f")) `shouldBe` xprv1Text
+    it "is made from the 64-byte seed of BIP32 test vector 2" $
+      xPrvExport
+        btc
+        ( makeXPrvKey
+            ( hex
+                "fffcf9f6f3f0edeae7e4e1dedbd8d5d2cfccc9c6c3c0bdbab7b4b1aeaba8a5a2\
+                \9f9c999693908d8a8784817e7b7875726f6c696663605d5a5754514e4b484542"
+            )
+        )
+        `shouldBe` "xprv9s21ZrQH143K31xYSDQpPDxsXRTUcvj2iNHm5NUtrGiGG5e2DtALGdso3pGz6ssrdK4PFmM8NSpSBHNqPqm55Qn3LqFtT2emdEXVYsCzC2U"
+    it "is not made from a seed of 15 bytes" $
+      evaluate (makeXPrvKey (B.replicate 15 1)) `shouldThrow` (== badSeed)
+    it "is not made from a seed of 65 bytes" $
+      evaluate (makeXPrvKey (B.replicate 65 1)) `shouldThrow` (== badSeed)
+    it "is not made from an empty seed" $
+      evaluate (makeXPrvKey B.empty) `shouldThrow` (== badSeed)
   describe "Showing an extended private key" $
     -- The master key of vector 1 has fingerprint 3442193e; its hardened
     -- child 7 has index 2^31 + 7 = 2147483655
@@ -159,6 +227,49 @@ spec = prepareContext $ \ctx -> do
       evaluate (prvSubKey ctx m 0x80000000) `shouldThrow` (== hardIndex)
       evaluate (hardSubKey ctx m 0x80000000) `shouldThrow` (== hardIndex)
       evaluate (pubSubKey ctx (deriveXPubKey ctx m) 0x80000000) `shouldThrow` (== hardIndex)
+    -- The depth is one byte, so a master key has descendants down to depth
+    -- 255 and no further
+    let steps n = concat (replicate n "/0")
+        depthOf (XPrv k _) = k.depth
+        depthOf (XPub k _) = k.depth
+    it "applyPath derives a path of 255 steps from a master key" $ do
+      fmap depthOf (applyPath ctx (fromString ("m" <> steps 255)) (XPrv m btc)) `shouldBe` Right 255
+      fmap depthOf (applyPath ctx (fromString ("M" <> steps 255)) (XPub (deriveXPubKey ctx m) btc)) `shouldBe` Right 255
+    it "applyPath gives an error value for a path of 256 steps from a master key" $ do
+      applyPath ctx (fromString ("m" <> steps 256)) (XPrv m btc)
+        `shouldBe` Left "applyPath: Maximum derivation depth exceeded"
+      applyPath ctx (fromString ("M" <> steps 256)) (XPrv m btc)
+        `shouldBe` Left "applyPath: Maximum derivation depth exceeded"
+      applyPath ctx (fromString ("M" <> steps 256)) (XPub (deriveXPubKey ctx m) btc)
+        `shouldBe` Left "applyPath: Maximum derivation depth exceeded"
+    it "applyPath gives an error value for one step from a key at depth 255" $
+      applyPath ctx "m/0" (XPrv atDepth255 btc)
+        `shouldBe` Left "applyPath: Maximum derivation depth exceeded"
+    it "tryDerivePath derives what derivePath derives" $
+      -- BIP32 test vector 1, chain m/0'/1
+      fmap (xPrvExport btc) (tryDerivePath ctx (Deriv :| 0 :/ 1 :: DerivPath) m)
+        `shouldBe` Right "xprv9wTYmMFdV23N2TdNG573QoEsfRrWKQgWeibmLntzniatZvR9BmLnvSxqu53Kw1UmYPxLgboyZQaXwTCg8MSY3H2EU4pWcQDnRnrVA1xe8fs"
+    it "tryDerivePath gives an error value for a path of 256 steps from a master key" $
+      tryDerivePath ctx (listToPath (replicate 256 0)) m
+        `shouldBe` Left "Maximum derivation depth exceeded"
+    it "tryDerivePubPath derives what derivePubPath derives" $
+      -- BIP32 test vector 2, chain m/0, from the master public key
+      fmap (xPubExport btc ctx) (tryDerivePubPath ctx (Deriv :/ 0) (xpub2 ctx))
+        `shouldBe` Right "xpub69H7F5d8KSRgmmdJg2KhpAK8SR3DjMwAdkxj3ZuxV27CprR9LgpeyGmXUbC6wb7ERfvrnKZjXoUmmDznezpbZb7ap6r1D3tgFxHmwMkQTPH"
+    it "tryDerivePubPath gives an error value for a path of 256 steps from a master key" $
+      tryDerivePubPath ctx (foldl (:/) Deriv (replicate 256 0)) (deriveXPubKey ctx m)
+        `shouldBe` Left "Maximum derivation depth exceeded"
+    it "derivePath throws a DerivationException for a path of 256 steps from a master key" $
+      evaluate (derivePath ctx (listToPath (replicate 256 0)) m) `shouldThrow` (== tooDeep)
+    it "the path constructors refuse an index of 2^31 or more" $ do
+      evaluate (Deriv :/ 0x80000000 :: DerivPath) `shouldThrow` (== hardIndex)
+      evaluate (Deriv :| 0x80000000 :: DerivPath) `shouldThrow` (== hardIndex)
+      evaluate (Deriv :| 0xffffffff :: HardPath) `shouldThrow` (== hardIndex)
+      evaluate (Deriv :/ 0xffffffff :: SoftPath) `shouldThrow` (== hardIndex)
+    it "the path constructors take the largest index, 2^31 - 1" $ do
+      pathToStr (Deriv :/ 0x7fffffff :: DerivPath) `shouldBe` "/2147483647"
+      pathToStr (Deriv :| 0x7fffffff :: DerivPath) `shouldBe` "/2147483647'"
+      pathToList (Deriv :| 0x7fffffff :: DerivPath) `shouldBe` [0xffffffff]
   describe "Child index" $ do
     let m = makeXPrvKey (fromJust (decodeHex m1))
     it "a hardened child stores its index with the hard bit set" $ do
@@ -221,16 +332,47 @@ spec = prepareContext $ \ctx -> do
   describe "Multisig derivation" $ do
     -- 2-of-2 of child 0 of vectors 1 and 2; sorted keys 027c4b09… then 02fc9e5a…
     it "deriveMSAddr gives the P2SH address of the sorted multisig script" $ do
-      let (addr, rdm) = deriveMSAddr ctx [xpub2 ctx, xpub1 ctx] 2 0
+      let Right (addr, rdm) = deriveMSAddr ctx [xpub2 ctx, xpub1 ctx] 2 0
       addrToText btc addr `shouldBe` Just "3ARSZ47cqQBb9y6QhTk6UoWHMwpruUryZp"
       encodeHex (marshal ctx rdm)
         `shouldBe` "5221027c4b09ffb985c298afe7e5813266cbfcb7780b480ac294b0b43dc21f2be3d13c\
                    \2102fc9e5af0ac8d9b3cecfe2a888e2117ba3d089d8585886c9c826b6b22a98d12ea52ae"
     it "deriveMSAddrs lists multisig addresses with their index" $ do
-      map lst3 (take 2 (deriveMSAddrs ctx [xpub1 ctx, xpub2 ctx] 2 0)) `shouldBe` [0, 1]
+      (map lst3 . take 2 <$> deriveMSAddrs ctx [xpub1 ctx, xpub2 ctx] 2 0) `shouldBe` Right [0, 1]
       -- 2-of-2 of child 1 of vectors 1 and 2
-      map addressAndIndex (take 1 (deriveMSAddrs ctx [xpub1 ctx, xpub2 ctx] 2 1))
-        `shouldBe` [(Just "3Pp8RkaJc8eNreFuTTTJ92QfXECQMXDEoE", 1)]
+      (map addressAndIndex . take 1 <$> deriveMSAddrs ctx [xpub1 ctx, xpub2 ctx] 2 1)
+        `shouldBe` Right [(Just "3Pp8RkaJc8eNreFuTTTJ92QfXECQMXDEoE", 1)]
+    it "deriveMSAddr gives the P2SH address of 15 keys, the most that fit" $
+      -- 1-of-15 of child 0 of m/0 to m/14 of vector 1. The redeem script is
+      -- 3 + 15 × 34 = 513 bytes. The address is the one that createmultisig
+      -- of Bitcoin Core 32.1 gives for these keys on regtest.
+      (addrToText btcRegTest . fst <$> deriveMSAddr ctx (accountKeys ctx 15) 1 0)
+        `shouldBe` Right (Just "2NFJxQqeqnzhLx9a1UBhpdgYVGxcd95Ka1b")
+    it "deriveMSAddr has no address for 16 keys, whose redeem script cannot be spent" $
+      -- 3 + 16 × 34 = 547 bytes, and a push holds at most 520. Bitcoin Core
+      -- answers "redeemScript exceeds size limit: 547 > 520".
+      (fst <$> deriveMSAddr ctx (accountKeys ctx 16) 1 0)
+        `shouldBe` Left "The redeem script is 547 bytes long, and a pay-to-script-hash redeem script can have at most 520"
+    it "deriveMSAddr has no address for 20 keys" $
+      -- 3 + 20 × 34 + 1 = 684 bytes
+      (fst <$> deriveMSAddr ctx (accountKeys ctx 20) 1 0)
+        `shouldBe` Left "The redeem script is 684 bytes long, and a pay-to-script-hash redeem script can have at most 520"
+    it "deriveMSAddrs and the path forms fail for 16 keys as deriveMSAddr does" $ do
+      let tooLong = Left "The redeem script is 547 bytes long, and a pay-to-script-hash redeem script can have at most 520"
+      (length . take 1 <$> deriveMSAddrs ctx (accountKeys ctx 16) 1 0) `shouldBe` tooLong
+      (fst <$> derivePathMSAddr ctx (accountKeys ctx 16) (Deriv :/ 1) 1 0) `shouldBe` tooLong
+      (length . take 1 <$> derivePathMSAddrs ctx (accountKeys ctx 16) (Deriv :/ 1) 1 0) `shouldBe` tooLong
+    it "deriveMSAddr gives an error value for a signature count the keys cannot meet" $ do
+      (fst <$> deriveMSAddr ctx [xpub1 ctx, xpub2 ctx] 3 0)
+        `shouldBe` Left "encodeOutput: multisig requires more signatures than it has keys"
+      (fst <$> deriveMSAddr ctx [xpub1 ctx, xpub2 ctx] 0 0)
+        `shouldBe` Left "encodeOutput: multisig must require at least one signature"
+      (fst <$> deriveMSAddr ctx [xpub1 ctx, xpub2 ctx] (-1) 0)
+        `shouldBe` Left "encodeOutput: multisig must require at least one signature"
+      (fst <$> deriveMSAddr ctx [] 1 0)
+        `shouldBe` Left "encodeOutput: multisig requires more signatures than it has keys"
+      (length . take 1 <$> deriveMSAddrs ctx [xpub1 ctx, xpub2 ctx] 3 0)
+        `shouldBe` Left "encodeOutput: multisig requires more signatures than it has keys"
   describe "Address derivation below a path" $ do
     -- vector 2: m/0/0 has public key 0205c889…ef8c
     it "derivePathAddr derives the address of a child below a soft path" $ do
@@ -243,11 +385,11 @@ spec = prepareContext $ \ctx -> do
         `shouldBe` [(Just "1NyMg76BQxDvV6vRsQugNS4ED2hpZCJtwK", 0)]
     it "derivePathMSAddr derives a multisig address below a soft path" $ do
       -- 2-of-2 of m/1/0 of vectors 1 and 2
-      let (addr, _) = derivePathMSAddr ctx [xpub1 ctx, xpub2 ctx] (Deriv :/ 1) 2 0
+      let Right (addr, _) = derivePathMSAddr ctx [xpub1 ctx, xpub2 ctx] (Deriv :/ 1) 2 0
       addrToText btc addr `shouldBe` Just "39HHTbxsnt5SrM4h2BtUgVRFzGYcavJ8M4"
     it "derivePathMSAddrs lists multisig addresses below the path with their index" $
-      map addressAndIndex (take 1 (derivePathMSAddrs ctx [xpub1 ctx, xpub2 ctx] (Deriv :/ 1) 2 0))
-        `shouldBe` [(Just "39HHTbxsnt5SrM4h2BtUgVRFzGYcavJ8M4", 0)]
+      (map addressAndIndex . take 1 <$> derivePathMSAddrs ctx [xpub1 ctx, xpub2 ctx] (Deriv :/ 1) 2 0)
+        `shouldBe` Right [(Just "39HHTbxsnt5SrM4h2BtUgVRFzGYcavJ8M4", 0)]
   describe "Path operations" $ do
     it "++/ appends two paths into a mixed path" $ do
       let p = (Deriv :| 44 :| 0 :: HardPath) ++/ (Deriv :/ 0 :/ 5 :: SoftPath)
@@ -288,6 +430,8 @@ spec = prepareContext $ \ctx -> do
         forAll arbitraryDerivPath $ \b ->
           compare a b == comparing (\p -> (length (pathToList p), pathToList p)) a b
   describe "Path parsing" $ do
+    -- BIP32 writes a hardened index with a subscript H, as in m/0H/1. Bitcoin
+    -- Core and BIP380 write an apostrophe or a small h.
     it "accepts the apostrophe, h and H as hardened markers" $ do
       parsePath "m/44h/0H/1'" `shouldBe` Just (ParsedPrv (Deriv :| 44 :| 0 :| 1))
       parseHard "m/44h/0H" `shouldBe` Just (Deriv :| 44 :| 0)
@@ -337,9 +481,16 @@ spec = prepareContext $ \ctx -> do
     it "refuses a literal of the wrong length" $
       evaluate ("0011223344" :: Fingerprint) `shouldThrow` anyErrorCall
   describe "bip32 subkey derivation using string path" $ do
-    it "either derivations" $ testApplyPath ctx
-    it "either derivations" $ testBadApplyPath ctx
-    it "dublic derivations" $ testDerivePubPath ctx
+    it "applyPath derives private and public keys along a path" $ testApplyPath ctx
+    it "applyPath refuses private derivations on a public key and hard public derivations" $ testBadApplyPath ctx
+    it "applyPath gives the keys of BIP32 test vector 1, chain m/0'/1" $ do
+      let exported (XPrv k n) = xPrvExport n k
+          exported (XPub k n) = xPubExport n ctx k
+      fmap exported (applyPath ctx "m/0'/1" (XPrv (xprv1 ctx) btc))
+        `shouldBe` Right "xprv9wTYmMFdV23N2TdNG573QoEsfRrWKQgWeibmLntzniatZvR9BmLnvSxqu53Kw1UmYPxLgboyZQaXwTCg8MSY3H2EU4pWcQDnRnrVA1xe8fs"
+      fmap exported (applyPath ctx "M/0'/1" (XPrv (xprv1 ctx) btc))
+        `shouldBe` Right "xpub6ASuArnXKPbfEwhqN6e3mwBcDTgzisQN1wXN9BJcM47sSikHjJf3UFHKkNAWbWMiGj7Wf5uMash7SyYq527Hqck2AxYysAA7xmALppuCkwQ"
+    it "public derivations" $ testDerivePubPath ctx
     it "private derivations" $ testDerivePrvPath ctx
     it "path parsing" testParsePath
     it "from json" testFromJsonPath
@@ -395,6 +546,15 @@ xpub2Text = "xpub661MyMwAqRbcFW31YEwpkMuc5THy2PSt5bDMsktWQcFF8syAmRUapSCGu8ED9W6
 xpub1, xpub2 :: Ctx -> XPubKey
 xpub1 ctx = fromJust (xPubImport btc ctx xpub1Text)
 xpub2 ctx = fromJust (xPubImport btc ctx xpub2Text)
+
+-- | The extended public keys m/0 to m/(n-1) of BIP 32 test vector 1.
+accountKeys :: Ctx -> Int -> [XPubKey]
+accountKeys ctx n =
+  [ deriveXPubKey ctx (prvSubKey ctx master (fromIntegral i))
+    | i <- [0 .. n - 1]
+  ]
+  where
+    master = makeXPrvKey (hex "000102030405060708090a0b0c0d0e0f")
 
 xprv1 :: Ctx -> XPrvKey
 xprv1 _ = fromJust (xPrvImport btc xprv1Text)

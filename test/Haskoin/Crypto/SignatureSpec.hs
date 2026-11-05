@@ -9,7 +9,9 @@ import Data.Aeson qualified as A
 import Data.Bits (testBit)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
+import Data.Aeson.Types qualified as A (parseEither)
 import Data.Either (isLeft)
+import Data.List (isInfixOf)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe
@@ -77,9 +79,45 @@ spec = prepareContext $ \ctx -> do
       decodeStrictSig ctx (hex "3006020100020101") `shouldBe` Nothing
     it "refuses a signature whose s is zero" $
       decodeStrictSig ctx (hex "3006020101020100") `shouldBe` Nothing
-    prop "refuses a signature whose s is above half the curve order" $
+    -- BIP 66 is about the encoding only. Low S is a relay rule of Bitcoin
+    -- Core (SCRIPT_VERIFY_LOW_S), not a consensus rule.
+    it "accepts a signature whose s is n - 1, above half the curve order" $ do
+      -- DER: 30 26 | 02 01 01 | 02 21 00 <n - 1>, 3 + 2 + 33 = 38 = 0x26 bytes
+      let der = hex "3026020101022100fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364140"
+      fmap (exportSig ctx) (decodeStrictSig ctx der) `shouldBe` Just der
+      fmap (isCanonicalHalfOrder ctx) (decodeStrictSig ctx der) `shouldBe` Just False
+    prop "accepts the high-S form of any signature" $
       forAll (arbitrarySignature ctx) $ \(_, _, s) ->
-        decodeStrictSig ctx (exportSig ctx (highSVariant ctx s)) == Nothing
+        decodeStrictSig ctx (exportSig ctx (highSVariant ctx s)) == Just (highSVariant ctx s)
+    it "accepts an r that needs a leading zero byte" $
+      -- r = 0x80 is written 00 80, since 80 alone would be negative
+      fmap (exportSig ctx) (decodeStrictSig ctx (hex "300702020080020101"))
+        `shouldBe` Just (hex "300702020080020101")
+    it "refuses a negative r or s" $ do
+      decodeStrictSig ctx (hex "3006020181020101") `shouldBe` Nothing
+      decodeStrictSig ctx (hex "3006020101020181") `shouldBe` Nothing
+    it "refuses an r or s with a leading zero byte that is not needed" $ do
+      decodeStrictSig ctx (hex "300702020001020101") `shouldBe` Nothing
+      decodeStrictSig ctx (hex "300702010102020001") `shouldBe` Nothing
+    it "refuses an r or s of no bytes" $ do
+      decodeStrictSig ctx (hex "30050200020101") `shouldBe` Nothing
+      decodeStrictSig ctx (hex "30050201010200") `shouldBe` Nothing
+    it "refuses an r or s that is not tagged as an integer" $ do
+      decodeStrictSig ctx (hex "3006030101020101") `shouldBe` Nothing
+      decodeStrictSig ctx (hex "3006020101030101") `shouldBe` Nothing
+    it "refuses a sequence whose length is not that of its content" $ do
+      decodeStrictSig ctx (hex "3005020101020101") `shouldBe` Nothing
+      decodeStrictSig ctx (hex "3007020101020101") `shouldBe` Nothing
+    it "refuses a byte after the sequence" $
+      decodeStrictSig ctx (hex "300602010102010100") `shouldBe` Nothing
+    it "refuses a length written in the long form" $
+      decodeStrictSig ctx (hex "308106020101020101") `shouldBe` Nothing
+    it "refuses no bytes at all" $
+      decodeStrictSig ctx "" `shouldBe` Nothing
+    it "refuses an r at the curve order, which BIP 66 allows but which can never verify" $
+      -- DER: 30 26 | 02 21 00 <n> | 02 01 01
+      decodeStrictSig ctx (hex "3026022100fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141020101")
+        `shouldBe` Nothing
   describe "Binary signature decoding" $ do
     it "decodes the smallest signature" $
       fmap (exportSig ctx) (unmarshal ctx (hex "3006020101020101"))
@@ -92,13 +130,24 @@ spec = prepareContext $ \ctx -> do
       (unmarshal ctx (hex "308106020101020101") :: Either String Sig) `shouldSatisfy` isLeft
     it "refuses a signature cut short" $
       (unmarshal ctx (hex "3006020101") :: Either String Sig) `shouldSatisfy` isLeft
+    it "refuses bytes after the signature" $
+      (unmarshal ctx (hex "300602010102010100ffff") :: Either String Sig)
+        `shouldSatisfy` either ("bytes left over" `isInfixOf`) (const False)
+    it "decodes a signature whose s is n - 1" $
+      fmap (exportSig ctx) (unmarshal ctx (hex "3026020101022100fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364140"))
+        `shouldBe` Right (hex "3026020101022100fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364140")
   describe "Signature JSON" $ do
-    prop "refuses a high-S signature, like the binary form" $
+    prop "reads a high-S signature, like the binary form" $
       forAll (arbitrarySignature ctx) $ \(_, _, s) ->
         (unmarshalJSON ctx (A.encode (encodeHex (exportSig ctx (highSVariant ctx s)))) :: Maybe Sig)
-          == Nothing
+          == Just (highSVariant ctx s)
+    it "refuses a signature whose r is zero, like the binary form" $
+      (unmarshalJSON ctx "\"3006020100020101\"" :: Maybe Sig) `shouldBe` Nothing
     it "refuses a signature that is not hex" $
       (unmarshalJSON ctx "\"zz\"" :: Maybe Sig) `shouldBe` Nothing
+    it "does not copy the text it refuses into its error message" $
+      (A.parseEither (unmarshalValue ctx) (A.String "zz-attacker-text") :: Either String Sig)
+        `shouldBe` Left "Error in $: Could not decode signature"
   describe "High-S signatures" $ do
     prop "are not in canonical half order" $
       forAll (arbitrarySignature ctx) $ \(_, _, s) ->
@@ -419,7 +468,7 @@ testP2WSHMulsig ctx =
     rdm = PayMulSig (toPubKey ctx <$> keys) 2
     sigIn =
       SigInput
-        (toP2WSH $ either error id $ encodeOutput ctx rdm)
+        (either error id $ toP2WSH =<< encodeOutput ctx rdm)
         100000000
         op0
         sigHashAll
@@ -510,7 +559,7 @@ testBip143p2shp2wpkhMulsig ctx =
       ]
     Just keys = traverse secHexKey rawKeys
     rdm = PayMulSig (toPubKey ctx <$> keys) 6
-    sigIn sh = SigInput (toP2WSH $ either error id $ encodeOutput ctx rdm) 987654321 op0 sh (Just rdm)
+    sigIn sh = SigInput (either error id $ toP2WSH =<< encodeOutput ctx rdm) 987654321 op0 sh (Just rdm)
     sigHashesA = [sigHashAll, sigHashNone, sigHashSingle]
     sigHashesB = setAnyoneCanPay <$> sigHashesA
     sigIns = sigIn <$> (sigHashesA <> sigHashesB)

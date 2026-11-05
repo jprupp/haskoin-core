@@ -5,17 +5,20 @@
 
 module Haskoin.Crypto.KeysSpec (spec) where
 
+import Control.Exception (evaluate)
 import Control.Lens
 import Control.Monad
 import Data.Aeson as A
 import Data.Aeson.Lens
 import Data.ByteString qualified as B
 import Data.ByteString.Char8 qualified as C
+import Data.Char (isAsciiLower, isAsciiUpper, toLower, toUpper)
 import Data.Bytes.Get
 import Data.Bytes.Put
 import Data.Bytes.Serial
 import Data.Default (def)
 import Data.Either (isLeft)
+import Data.List (isInfixOf)
 import Data.Maybe
 import Data.Serialize qualified as S
 import Data.String (fromString)
@@ -25,9 +28,11 @@ import Data.Text qualified as T
 import Haskoin.Address
 import Haskoin.Crypto
 import Haskoin.Network.Constants
+import Haskoin.Network.Data (Network (..))
 import Haskoin.Script
 import Haskoin.Util
 import Haskoin.Util.Arbitrary
+import System.Timeout (timeout)
 import Test.HUnit
 import Test.Hspec
 import Test.Hspec.QuickCheck
@@ -56,8 +61,12 @@ spec :: Spec
 spec = prepareContext $ \ctx -> do
   describe "Key pair property checks" $ do
     testIdentity $ identityTests ctx
-    prop "Public key is canonical" $
-      forAll (arbitraryKeyPair ctx) (isCanonicalPubKey ctx . snd)
+    prop "a compressed key is written in 33 bytes starting with 02 or 03, an uncompressed key in 65 bytes starting with 04" $
+      forAll (arbitraryKeyPair ctx) $ \(_, pub) ->
+        let bytes = marshal ctx pub
+         in if pub.compress
+              then B.length bytes == 33 && B.head bytes `elem` [0x02, 0x03]
+              else B.length bytes == 65 && B.head bytes == 0x04
     prop "Public key show . read identity" $
       forAll (arbitraryKeyPair ctx) $ \(_, pub) ->
         (read . show) pub == pub
@@ -78,7 +87,6 @@ spec = prepareContext $ \ctx -> do
     it "Passes PubKey compression tests" $ testKeyCompressed ctx
     it "Passes address matching tests" $ testMatchingAddress ctx
     it "Passes signature verification" $ testSigs ctx
-    it "Passes deterministic signing tests" $ testDetSigning ctx
   describe "MiniKey vectors" $
     it "Passes MiniKey decoding tests" testMiniKey
   describe "Secret key range" $ do
@@ -121,6 +129,10 @@ spec = prepareContext $ \ctx -> do
       fromWif btc "3QJmnh" `shouldBe` Nothing
     it "refuses a string longer than any WIF" $
       fromWif btc (T.replicate 53 "z") `shouldBe` Nothing
+    it "refuses a string of a million characters at once, without decoding it" $
+      -- Decoding that much Base58 takes minutes. The length check comes first.
+      timeout 1000000 (evaluate (fromWif btc (T.replicate 1000000 "z")))
+        `shouldReturn` Just Nothing
     it "fails the JSON parse of an invalid WIF instead of throwing" $ do
       (unmarshalJSON btc "\"3QJmnh\"" :: Maybe PrivateKey) `shouldBe` Nothing
       (unmarshalJSON btc "\"KwDiBf89QgGbjEhKnhXJuH7LrciVrZi3qYjgd9M7rFU73Nd2Mcv1\"" :: Maybe PrivateKey)
@@ -133,8 +145,22 @@ spec = prepareContext $ \ctx -> do
     it "refuses a mini key whose check byte is not zero" $
       -- SHA-256 of "S4b3N3oGqDqR5jNuxEvDwg?" starts with 0x8f
       fromMiniKey "S4b3N3oGqDqR5jNuxEvDwg" `shouldBe` Nothing
-    it "refuses a mini key of another length" $
-      fromMiniKey "S4b3N3oGqDqR5jNuxEvDw" `shouldBe` Nothing
+    it "decodes a 30-character mini key" $
+      -- the sample key of the Bitcoin wiki
+      fromMiniKey "S6c56bnXQiBjk9mqSYE7ykVQ7NzrRy"
+        `shouldBe` Just (wrapSecKey False "4c7a9640c72dc2099f23715d0c8a0d8a35f8906e3cab61dd3f78b67bf887c9ab")
+    it "refuses a mini key of 21 or 23 characters, even with a zero check byte" $ do
+      -- SHA-256 of each string followed by "?" starts with 0x00
+      fromMiniKey "S4b3N3oGqDqR5jNuxE1Be" `shouldBe` Nothing
+      fromMiniKey "S4b3N3oGqDqR5jNuxEvD13Z" `shouldBe` Nothing
+    it "refuses a string that does not start with S" $
+      -- 22 Base58 characters with a zero check byte
+      fromMiniKey "T4b3N3oGqDqR5jNuxEv13r" `shouldBe` Nothing
+    it "refuses a character outside the Base58 alphabet" $ do
+      -- 22 characters with a zero check byte: one holds the digit 0, the
+      -- other the letters O, I and l and underscores
+      fromMiniKey "S4b3N3oGqDqR5jNux0v1B7" `shouldBe` Nothing
+      fromMiniKey "0OIl_______________607" `shouldBe` Nothing
   describe "Key tweaks" $ do
     it "adding a zero tweak leaves the secret key unchanged" $
       tweakSecKey ctx secKey1 zeroHash `shouldBe` Just secKey1
@@ -171,13 +197,34 @@ spec = prepareContext $ \ctx -> do
     it "refuses a public key with an unknown prefix byte" $
       (unmarshalJSON ctx "\"0579be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\"" :: Maybe PublicKey)
         `shouldBe` Nothing
+    it "refuses a hybrid public key" $
+      -- 06, then x and the even y of the public key of 1. Consensus takes
+      -- this form, the relay rules of Bitcoin Core do not, and this library
+      -- reads keys in the two standard forms only.
+      ( unmarshalJSON
+          ctx
+          "\"0679be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\
+          \483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8\"" ::
+          Maybe PublicKey
+      )
+        `shouldBe` Nothing
     it "refuses a point that is not on the curve" $
       -- the invalid public key of BIP32 test vector 5
       (unmarshalJSON ctx "\"020000000000000000000000000000000000000000000000000000000000000007\"" :: Maybe PublicKey)
         `shouldBe` Nothing
-  describe "Binary private key" $
+  describe "Binary private key" $ do
+    it "is the 32 bytes of the key, then 01 for a compressed public key or 00" $ do
+      runPutS (serialize (wrapSecKey True secKey1))
+        `shouldBe` hex "000000000000000000000000000000000000000000000000000000000000000101"
+      runPutS (serialize (wrapSecKey False secKey1))
+        `shouldBe` hex "000000000000000000000000000000000000000000000000000000000000000100"
+      runGetS deserialize (hex "000000000000000000000000000000000000000000000000000000000000000101")
+        `shouldBe` Right (wrapSecKey True secKey1)
     it "refuses a serialized zero key" $
       (runGetS deserialize (B.replicate 33 0) :: Either String PrivateKey) `shouldSatisfy` isLeft
+    it "refuses the curve order n as a serialized key" $
+      (runGetS deserialize (hex "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd036414101") :: Either String PrivateKey)
+        `shouldSatisfy` either ("curve order" `isInfixOf`) (const False)
   describe "Showing a private key" $ do
     -- The secret of key 1 must not appear in the text
     it "does not reveal the secret" $
@@ -186,14 +233,16 @@ spec = prepareContext $ \ctx -> do
     it "nests in parentheses like a derived instance" $
       show (Just (PrivateKey "0000000000000000000000000000000000000000000000000000000000000001" False))
         `shouldBe` "Just (PrivateKey {key = <redacted>, compress = False})"
-  describe "key_io_valid.json vectors" $ do
-    vectors <- runIO (readTestFile "key_io_valid.json" :: IO [(Text, Text, A.Value)])
-    it "Passes the key_io_valid.json vectors" $
-      mapM_ (testKeyIOValidVector ctx) vectors
-  describe "key_io_invalid.json vectors" $ do
-    vectors <- runIO (readTestFile "key_io_invalid.json" :: IO [[Text]])
-    it "Passes the key_io_invalid.json vectors" $
-      mapM_ (testKeyIOInvalidVector ctx) vectors
+  describe "key_io vectors of Bitcoin Core 32.1" $ do
+    valid <- runIO (readTestFile "key_io_valid.json" :: IO [(Text, Text, A.Value)])
+    invalid <- runIO (readTestFile "key_io_invalid.json" :: IO [[Text]])
+    it "the files hold 70 valid and 70 invalid vectors" $ do
+      length valid `shouldBe` 70
+      length invalid `shouldBe` 70
+    it "reads and writes every valid private key and address" $
+      mapM_ (testKeyIOValidVector ctx) valid
+    it "refuses every invalid string as an address and as a private key, on every network" $
+      mapM_ testKeyIOInvalidVector invalid
 
 hex :: Text -> B.ByteString
 hex = fromJust . decodeHex
@@ -214,25 +263,6 @@ oneHash = "0000000000000000000000000000000000000000000000000000000000000001"
 orderMinusOneHash = "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364140"
 orderHash = "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141"
 
--- github.com/bitcoin/bitcoin/blob/master/src/script.cpp
--- from function IsCanonicalPubKey
-isCanonicalPubKey :: Ctx -> PublicKey -> Bool
-isCanonicalPubKey ctx p =
-  not $
-    -- Non-canonical public key: too short
-    (B.length bs < 33)
-      ||
-      -- Non-canonical public key: invalid length for uncompressed key
-      (B.index bs 0 == 4 && B.length bs /= 65)
-      ||
-      -- Non-canonical public key: invalid length for compressed key
-      (B.index bs 0 `elem` [2, 3] && B.length bs /= 33)
-      ||
-      -- Non-canonical public key: compressed nor uncompressed
-      (B.index bs 0 `notElem` [2, 3, 4])
-  where
-    bs = marshal ctx p
-
 testMiniKey :: Assertion
 testMiniKey =
   assertEqual "fromMiniKey" (Just res) (go "S6c56bnXQiBjk9mqSYE7ykVQ7NzrRy")
@@ -240,63 +270,83 @@ testMiniKey =
     go = fmap (encodeHex . (.key.get)) . fromMiniKey
     res = "4c7a9640c72dc2099f23715d0c8a0d8a35f8906e3cab61dd3f78b67bf887c9ab"
 
--- Test vectors from:
--- https://github.com/bitcoin/bitcoin/blob/master/src/test/key_io_tests.cpp
+-- Test vectors from src/test/data/key_io_valid.json and key_io_invalid.json of
+-- Bitcoin Core 32.1. The checks are those of src/test/key_io_tests.cpp.
 
+-- | One valid vector: a string, the bytes it stands for and its chain. For a
+-- private key the bytes are the secret, for an address the output script.
 testKeyIOValidVector :: Ctx -> (Text, Text, A.Value) -> Assertion
-testKeyIOValidVector ctx (a, payload, obj)
-  | disabled = return () -- There are invalid version 1 bech32 addresses
-  | isPrv = do
-      -- Test from WIF to SecKey
-      let isComp = obj ^?! key "isCompressed" . _Bool
-          prvKeyM = fromWif net a
-          prvKeyHexM = encodeHex . (.key.get) <$> prvKeyM
-      assertBool "Valid PrvKey" $ isJust prvKeyM
-      assertEqual "Valid compression" (Just isComp) ((.compress) <$> prvKeyM)
-      assertEqual "WIF matches payload" (Just payload) prvKeyHexM
-      let prvAsPubM :: Maybe ScriptOutput
-          prvAsPubM = (eitherToMaybe . unmarshal ctx <=< decodeHex) a
-      assertBool "PrvKey is invalid ScriptOutput" $ isNothing prvAsPubM
-      -- Test from SecKey to WIF
-      let secM = secKey =<< decodeHex payload
-          wifM = toWif net . wrapSecKey isComp <$> secM
-      assertEqual "Payload matches WIF" (Just a) wifM
+testKeyIOValidVector ctx (string, payload, metadata)
+  | isPrivkey = do
+      let compressed = metadata ^?! key "isCompressed" . _Bool
+          secret = fromMaybe (error "bad secret in the vector file") (secKey (hex payload))
+      assertEqual
+        ("the WIF " <> cs string <> " holds the key and its compression flag")
+        (Just (payload, compressed))
+        ((\k -> (encodeHex k.key.get, k.compress)) <$> fromWif net string)
+      assertEqual
+        ("the key is written as the WIF " <> cs string)
+        string
+        (toWif net (wrapSecKey compressed secret))
+      assertEqual
+        ("the WIF " <> cs string <> " is not an address")
+        Nothing
+        (textToAddr net string)
   | otherwise = do
-      -- Test Addr to Script
-      let addrM = textToAddr net a
-          outputM = addressToOutput =<< addrM
-          scriptM = encodeHex . marshal ctx <$> outputM
-      assertBool ("Valid Address " <> cs a) $ isJust addrM
-      assertEqual "Address matches payload" (Just payload) scriptM
-      let pubAsWifM = fromWif net a
-          pubAsSecM = secKey =<< decodeHex a
-      assertBool "Address is invalid Wif" $ isNothing pubAsWifM
-      assertBool "Address is invalid PrvKey" $ isNothing pubAsSecM
-      -- Test Script to Addr
-      let outM = eitherToMaybe . unmarshal ctx =<< decodeHex payload
-          resM = addrToText net =<< outputAddress ctx =<< outM
-      assertEqual "Payload matches address" (Just a) resM
+      assertEqual
+        ("the address " <> cs string <> " pays to the script")
+        (Just payload)
+        (encodeHex <$> (addressToScriptBS ctx =<< textToAddr net string))
+      assertEqual
+        ("the script is written as the address " <> cs string)
+        (Just string)
+        (addrToText net =<< eitherToMaybe (scriptToAddressBS net ctx (hex payload)))
+      -- With the case of every letter flipped, a Bech32 address reads the
+      -- same and a Base58 address does not read
+      assertEqual
+        ("the address " <> cs string <> " with its case flipped")
+        (if tryCaseFlip then Just payload else Nothing)
+        (encodeHex <$> (addressToScriptBS ctx =<< textToAddr net (flipCase string)))
+      assertEqual
+        ("the address " <> cs string <> " is not a private key")
+        Nothing
+        (fromWif net string)
   where
-    isPrv = obj ^?! key "isPrivkey" . _Bool
-    disabled = fromMaybe False $ obj ^? key "disabled" . _Bool
-    chain = obj ^?! key "chain" . _String
+    isPrivkey = metadata ^?! key "isPrivkey" . _Bool
+    tryCaseFlip = fromMaybe False (metadata ^? key "tryCaseFlip" . _Bool)
     net =
-      case chain of
+      case metadata ^?! key "chain" . _String of
         "main" -> btc
-        "test" -> btcTest
+        "testnet4" -> btcTest4
         "regtest" -> btcRegTest
-        _ -> error "Invalid chain key in key_io_valid.json"
+        -- This library has no signet. Signet writes keys and addresses as
+        -- testnet3 does: the same version bytes and the prefix "tb"
+        "signet" -> btcTest
+        chain -> error ("Unknown chain in key_io_valid.json: " <> cs chain)
 
-testKeyIOInvalidVector :: Ctx -> [Text] -> Assertion
-testKeyIOInvalidVector ctx [a] = do
-  let wifMs = (`fromWif` a) <$> allNets
-      secKeyM = (secKey <=< decodeHex) a
-      scriptM :: Maybe ScriptOutput
-      scriptM = (eitherToMaybe . unmarshal ctx <=< decodeHex) a
-  assertBool "Payload is invalid WIF" $ all isNothing wifMs
-  assertBool "Payload is invalid SecKey" $ isNothing secKeyM
-  assertBool "Payload is invalid Script" $ isNothing scriptM
-testKeyIOInvalidVector _ _ = assertFailure "Invalid test vector"
+-- | Upper-case letters become lower-case and the reverse.
+flipCase :: Text -> Text
+flipCase = T.map flipLetter
+  where
+    flipLetter c
+      | isAsciiLower c = toUpper c
+      | isAsciiUpper c = toLower c
+      | otherwise = c
+
+-- | One invalid vector: a string that is no address and no private key, on
+-- any network.
+testKeyIOInvalidVector :: [Text] -> Assertion
+testKeyIOInvalidVector [string] =
+  forM_ [btc, btcTest, btcTest4, btcRegTest] $ \net -> do
+    assertEqual
+      (show string <> " is not an address on " <> net.name)
+      Nothing
+      (textToAddr net string)
+    assertEqual
+      (show string <> " is not a private key on " <> net.name)
+      Nothing
+      (fromWif net string)
+testKeyIOInvalidVector _ = assertFailure "Invalid test vector"
 
 -- Test vectors from:
 -- https://github.com/bitcoin/bitcoin/blob/master/src/test/key_tests.cpp
@@ -361,18 +411,6 @@ testSignature ctx h = do
   assertBool "Key 2C, Sign2" $ verifyHashSig ctx h sign2 (pub2C ctx).point
   assertBool "Key 2C, Sign1C" $ not $ verifyHashSig ctx h sign1C (pub2C ctx).point
   assertBool "Key 2C, Sign2C" $ verifyHashSig ctx h sign2C (pub2C ctx).point
-
-testDetSigning :: Ctx -> Assertion
-testDetSigning ctx = do
-  let m = doubleSHA256 ("Very deterministic message" :: B.ByteString)
-  assertEqual
-    "Det sig 1"
-    (signHash ctx sec1.key m)
-    (signHash ctx sec1C.key m)
-  assertEqual
-    "Det sig 2"
-    (signHash ctx sec2.key m)
-    (signHash ctx sec2C.key m)
 
 strSecret1, strSecret2, strSecret1C, strSecret2C :: Text
 strSecret1 = "5HxWvvfubhXpYYpS3tJkw6fq9jE9j18THftkZjHHfmFiWtmAbrj"

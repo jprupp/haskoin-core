@@ -54,6 +54,8 @@ storage.
 - **A script interpreter.** `verifyStdTx` recognises the standard templates. It
   is not a consensus check.
 - **Signet, output descriptors, Miniscript and MuSig2.**
+- **Schnorr transaction signatures, `SIGHASH_UTXOS` and token outputs of Bitcoin
+  Cash.** An input or an output that uses them does not decode or verify.
 - **BIP-324 encrypted transport.**
 - **BIP-39 word lists other than English.**
 
@@ -224,6 +226,10 @@ have `Marshal` or `MarshalJSON` instances instead.
 The first argument depends on the type. For example, it is a `Ctx` for
 `PublicKey`, a `Network` for `XPrvKey` and a `(Network, Ctx)` pair for `XPubKey`.
 
+`unmarshal` fails when bytes are left over after the value, and `decodeTx` does
+the same for a transaction. `runGetS deserialize` reads a value from the start of
+the bytes and ignores the rest.
+
 ### Hash byte order
 
 `TxHash` and `BlockHash` show as hexadecimal in reversed byte order. This is the
@@ -379,8 +385,9 @@ let keyA = wrapPubKey True "02ff12471208c14bd580709cb2358d98975247d8765f92bc25ea
     -- BIP-67 sorts the keys, so that all signers build the same script.
     multisig = sortMulSig ctx (PayMulSig [keyA, keyB] 2)
 
-print (addrToText btc (payToScriptAddress ctx multisig))
--- => Just "39bgKC7RFbpoCRbtD5KEdkYKtNyhpsNa3Z"
+-- The address can fail, because a P2SH redeem script holds at most 520 bytes.
+print (addrToText btc <$> payToScriptAddress ctx multisig)
+-- => Right (Just "39bgKC7RFbpoCRbtD5KEdkYKtNyhpsNa3Z")
 
 -- OP_RETURN is 6a, then the push of 5 bytes, then "hello".
 print (encodeHex (marshal ctx (DataCarrier ["hello"])))
@@ -399,6 +406,11 @@ holds any script, as a list of `ScriptOp` values, so use that type for the other
 `payToWitnessScriptAddress` and `payToNestedScriptAddress` give the P2WSH and
 P2SH-P2WSH addresses of a script.
 
+The three functions return `Either`. A P2SH redeem script holds at most 520
+bytes, which is a multisig of 15 compressed keys. Coins sent to a longer script
+could never be spent, so `payToScriptAddress` refuses it. A P2WSH script holds up
+to 10,000 bytes, so a multisig of 16 to 20 keys needs P2WSH.
+
 ### Building and signing a transaction
 
 ```haskell
@@ -406,10 +418,13 @@ P2SH-P2WSH addresses of a script.
 let key = derivePath ctx ("m/84'/0'/0'/0/0" :: DerivPath) master
     address = xPubWitnessAddr ctx (deriveXPubKey ctx key)
 
--- The coin to spend. This one is made up. It holds 100,000 satoshi.
+-- The coin to spend, and the transaction that paid it. Both are made up.
+-- The coin holds 100,000 satoshi.
 coinScript <- maybe (fail "no output script") pure (addressToOutput address)
-let coin = OutPoint "1111111111111111111111111111111111111111111111111111111111111111" 0
-    amount = 100000
+let amount = 100000
+    fundingInput = TxIn (OutPoint "1111111111111111111111111111111111111111111111111111111111111111" 0) "" 0xffffffff
+    funding = Tx 2 [fundingInput] [TxOut amount (marshal ctx coinScript)] [] 0
+    coin = OutPoint (txHash funding) 0
 
 -- Pay 99,000 satoshi. The 1,000 satoshi left over are the fee.
 unsigned <-
@@ -426,7 +441,7 @@ print (verifyStdTx btc ctx signed [(coinScript, amount, coin)])
 print (txVirtualSize signed)
 -- => 110
 print (txHash signed)
--- => "9e13216934e939575ec03fa9fe13178508b1dcd614b7a18cbf6211bc91afc29e"
+-- => "9a079e6b7939909415b7b027a19e093bc539dac5a2ed50df8beb0942ec821848"
 
 -- This hexadecimal form is what you broadcast.
 print (encodeHex (runPutS (serialize signed)))
@@ -482,7 +497,7 @@ main = do
   print (guessTxSize [InputWitnessPKHash] outputs)
   -- => 141
   print (guessTxFee feeRate [InputWitnessPKHash] outputs)
-  -- => 705
+  -- => Right 705
 
   -- The result is the chosen coins and the change to send back to yourself.
   -- True keeps searching the rest of the list for a smaller solution.
@@ -497,6 +512,11 @@ inputs and two outputs.
 
 `chooseCoins` takes the coins in the order of the list, so sort them the way you
 prefer first. The output list must include the change output.
+
+The change can be smaller than the `dustThreshold` of its output kind, down to
+one satoshi. Nodes do not relay such an output, so leave that change to the fee.
+`chooseCoins` refuses a selection above `maxStandardTxWeight`, which nodes do not
+relay either.
 
 The estimates are upper bounds, because they count 72 bytes per signature. The
 kinds include `InputPKHash`, `InputWitnessPKHash` and `InputTaproot`. See
@@ -514,9 +534,9 @@ import qualified Haskoin.Transaction.Psbt as Psbt
 -- Creator: start from the unsigned transaction.
 let created = psbtOf unsigned
 
--- Updater: attach the coin that each input spends.
-    coinOutput = TxOut amount (marshal ctx coinScript)
-    updated = created {Psbt.inputs = map (insertWitnessUtxo coinOutput) created.inputs}
+-- Updater: attach the transaction that paid each coin. The signer checks the
+-- amount of the coin against it.
+    updated = created {Psbt.inputs = map (insertNonWitnessUtxo funding) created.inputs}
 
 -- This base64 text is what you pass to the signers.
 let shared = encodePsbtBase64 updated
@@ -539,7 +559,17 @@ Some other useful functions:
 - `xPrvSigner` signs from an extended private key, following the derivation
   records of the inputs.
 - `combinePsbt` merges the copies that different signers return.
-- `insertNonWitnessUtxo` attaches the previous transaction of a legacy coin.
+- `insertWitnessUtxo` attaches a coin without the transaction that paid it. That
+  is enough for a Taproot coin. For a SegWit version 0 coin, the amount is then a
+  claim that the signature does not cover for the other inputs, and a signer can
+  be led to burn coins as fee (CVE-2020-14199). `keySigner` and `xPrvSigner`
+  therefore refuse such a coin. Set `requirePreviousTx = False` on the `Signer`
+  to accept it.
+- `psbtFee` and `inputCoins` give the fee and the coins as the signer checks
+  them. Show those to the user, not amounts read from the fields yourself.
+- `psbtTransaction` refuses a PSBT whose inputs are not all final.
+  `psbtPartialTransaction` gives the transaction of a PSBT that is still being
+  signed.
 - `insertInputRedeemScript` and `insertInputWitnessScript` attach the scripts of
   P2SH and P2WSH coins.
 - `withVersion Version2` converts a PSBT to version 2. `addInput` and `addOutput`
@@ -553,7 +583,7 @@ let key = derivePath ctx ("m/86'/0'/0'/0/0" :: DerivPath) master
     -- Nothing means that the output has no script tree.
     output = taprootScriptOutput ctx (TaprootOutput internalKey Nothing)
 
-print (addrToText btc =<< outputAddress ctx output)
+print (addrToText btc =<< outputAddress btc ctx output)
 -- => Just "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr"
 
 -- Spend a made-up coin of 100,000 satoshi by its key path.
@@ -575,6 +605,9 @@ To commit to scripts, pass a `MAST` in place of `Nothing`. `signTx` only signs k
 path spends. `signPsbt` also signs a script path when the leaf is a single key
 check, `<key> OP_CHECKSIG`. For other scripts, build the witness yourself with
 `taprootSigHash` and `encodeTaprootWitness`.
+
+`checkTapTree` tells whether every leaf of a tree can be spent. A leaf can be at
+most 128 levels deep, and its version must be one that BIP 341 allows.
 
 ### SLIP-39 secret sharing
 
@@ -605,8 +638,9 @@ print (Slip39.combineMnemonics "passphrase" (take 1 shares))
 ```
 
 A wrong passphrase is not an error. It returns a different secret, as the
-specification requires. A SLIP-39 share is not a BIP-39 mnemonic, and one cannot
-be converted into the other.
+specification requires. The passphrase must be printable ASCII, which the
+specification requires too. A SLIP-39 share is not a BIP-39 mnemonic, and one
+cannot be converted into the other.
 
 `Scheme` can also describe two levels. For example, `Scheme 2 [(1, 1), (2, 3),
 (3, 5)]` needs two of the three groups, each with its own member threshold.
@@ -656,6 +690,11 @@ work, difficulty, timestamps, versions and checkpoints. It runs in any monad wit
 a `BlockHeaders` instance. `StateT HeaderMemory` is the in-memory one. Write your
 own instance to keep headers in a database.
 
+Once the best block has the `minimumChainWork` of the network, a fork with less
+work is refused. Below that work nothing bounds the side chains a peer can send,
+so a node that is still syncing should not keep headers from a peer it does not
+trust.
+
 This example needs the [mtl](https://hackage.haskell.org/package/mtl) package.
 
 ```haskell
@@ -677,7 +716,9 @@ print chain.best.height
 ```
 
 `buildMerkleRoot` and `buildPartialMerkle` compute Merkle trees.
-`extractMatches` checks a partial tree from a `merkleblock` message.
+`extractMatches` checks a partial tree from a `merkleblock` message against its
+Merkle root. The header and the number of transactions are claims of the sender,
+which the caller must check.
 
 ### Peer-to-peer messages
 
@@ -695,8 +736,9 @@ print (runGetS (getMessage btc) bytes)
 ```
 
 `getMessage` checks the network magic and the checksum, and bounds the payload by
-`maxMessageSize`. Read the 24-byte `MessageHeader` first to learn how many more
-bytes to take from the socket.
+the `maxPayloadSize` of its command. Read the 24-byte `MessageHeader` first to
+learn how many more bytes to take from the socket, and refuse a length above
+`maxPayloadSize net command` before you read them.
 
 `Message` has a constructor for each message type. `bloomCreate`, `bloomInsert`
 and `bloomContains` build BIP-37 filters for `filterload`.
@@ -727,16 +769,22 @@ test network before you use it on mainnet.
 - **Randomness.** Create keys and mnemonics with a cryptographic source, such as
   `getEntropy` from the entropy package. Never use `System.Random`.
 - **Secrets in logs.** `PrivateKey` and `XPrvKey` show as `<redacted>` and have no
-  `Read` instance. `toWif` and `xPrvExport` write a key out on purpose.
+  `Read` instance. `toWif` and `xPrvExport` write a key out on purpose. A bare
+  `SecKey`, such as the `key` field of a `PrivateKey`, still shows its bytes. The
+  errors of `fromMnemonic` and `mnemonicToSeed` name the position of a bad word,
+  never the word.
 - **Secrets in memory.** Keys live in the GHC heap. The library cannot wipe them,
   and the garbage collector can copy them.
 - **Review before you sign.** `signPsbt` checks that a PSBT is sound, but not that
-  it pays who you expect. Show the outputs and the fee to the user first.
+  it pays who you expect. Show the outputs and `psbtFee` to the user first. By
+  default the signer wants the previous transaction of every SegWit version 0
+  coin, because an amount in a witness output alone is a claim.
 - **Signature hash types.** By default `signPsbt` signs only `SIGHASH_ALL` and
   `SIGHASH_DEFAULT`, because the other types leave part of the transaction
   unsigned. To accept others, set `acceptedSigHashes` on the `Signer`.
-- **Verification.** `verifyStdTx` checks signatures on standard templates and
-  that outputs do not exceed inputs. It does not apply the consensus rules.
+- **Verification.** `verifyStdTx` checks the signatures of the standard templates
+  by the rules that nodes relay by, and that outputs do not exceed inputs. It is
+  not a script interpreter and does not apply every consensus rule.
 - **Untrusted text.** The cost of `decodeBase58` and `decodeBase58Check` grows
   with the square of the input length. Limit the length of input you pass to them
   directly. The address and key decoders of the library already do.

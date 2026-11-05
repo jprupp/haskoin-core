@@ -3,6 +3,7 @@
 
 module Haskoin.Address.CashAddrSpec (spec) where
 
+import Control.Exception (evaluate)
 import Control.Monad
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as B
@@ -10,9 +11,11 @@ import Data.ByteString.Char8 qualified as Char8
 import Data.Maybe
 import Data.String.Conversions
 import Data.Text (Text)
+import Data.Text qualified as T
 import Haskoin.Address
 import Haskoin.Network.Constants
 import Haskoin.Util
+import System.Timeout (timeout)
 import Test.HUnit
 import Test.Hspec
 
@@ -151,6 +154,26 @@ spec = do
     it "rejects the prefix of another network" $
       cashAddrDecode bch "bchtest:qpm2qsznhks23z7629mms6s4cwef74vcwvqcw003ap"
         `shouldBe` Nothing
+    it "rejects another prefix in front of the data of a valid address" $
+      -- The data and the checksum are those of the mainnet address, so only
+      -- the comparison of the prefix text can refuse it
+      cashAddrDecode bch "xyz:qpm2qsznhks23z7629mms6s4cwef74vcwvy22gdx6a"
+        `shouldBe` Nothing
+    it "rejects a hash that is longer than its version byte says" $
+      -- Version byte 0x00 says 20 bytes, and 24 follow. The checksum is
+      -- valid (Python transcription of the Bitcoin Cash Node encoder).
+      cashAddrDecode bch "bitcoincash:qpm2qsznhks23z7629mms6s4cwef74vcwvqsyqcy689j2373"
+        `shouldBe` Nothing
+    it "decodes the longest address, with a 64-byte hash" $
+      -- 11 characters of prefix, the colon, 104 of data and 8 of checksum
+      cashAddrDecode bch "bitcoincash:quqqzqsrqszsvpcgpy9qkrqdpc83qygjzv2p29shrqv35xcur50p7gppyg3jgffxyu5zj23t9skjutesxyerxdp4xcmnswf68v7r603lr3frdfp5"
+        `shouldBe` Just (0, B.pack [0 .. 63])
+    it "rejects a string one character longer than the longest address" $
+      cashAddrDecode bch "bitcoincash:quqqzqsrqszsvpcgpy9qkrqdpc83qygjzv2p29shrqv35xcur50p7gppyg3jgffxyu5zj23t9skjutesxyerxdp4xcmnswf68v7r603lr3frdfp5q"
+        `shouldBe` Nothing
+    it "rejects a string of megabytes at once" $
+      timeout 2000000 (evaluate (cashAddrDecode bch ("bitcoincash:" <> T.replicate 20000000 "q")))
+        `shouldReturn` Just Nothing
     it "rejects an address of another network given without prefix" $
       cashAddrDecode bch "qpm2qsznhks23z7629mms6s4cwef74vcwvqcw003ap"
         `shouldBe` Nothing
@@ -190,9 +213,26 @@ spec = do
       cashAddrEncode btc 0 hash20 `shouldBe` Nothing
   describe "cash32 low level" $ do
     it "cash32encode writes the prefix, the data and the checksum" $ do
-      cash32encode "prefix" "" `shouldBe` "prefix:x64nx6hz"
+      cash32encode "prefix" "" `shouldBe` Just "prefix:x64nx6hz"
       cash32encode "bitcoincash" (B.cons 0 hash20)
-        `shouldBe` "bitcoincash:qpm2qsznhks23z7629mms6s4cwef74vcwvy22gdx6a"
+        `shouldBe` Just "bitcoincash:qpm2qsznhks23z7629mms6s4cwef74vcwvy22gdx6a"
+    it "cash32encode writes an uppercase prefix in lowercase, so that the string is of one case" $
+      -- 21 zero bytes
+      cash32encode "BitcoinCash" (B.replicate 21 0)
+        `shouldBe` Just "bitcoincash:qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqfnhks603"
+    it "cash32encode refuses a prefix that is not made of letters" $ do
+      cash32encode "" "" `shouldBe` Nothing
+      cash32encode "pre1fix" "" `shouldBe` Nothing
+      cash32encode "a:b" "" `shouldBe` Nothing
+      cash32encode "pre-fix" "" `shouldBe` Nothing
+      -- U+212A KELVIN SIGN lowers to the letter k
+      cash32encode "\x212A" "" `shouldBe` Nothing
+    it "cash32decode refuses a prefix with a digit, a second colon or another character" $ do
+      -- Each string has a valid checksum for its prefix. Bitcoin Cash Node
+      -- refuses all three.
+      cash32decode "pre1fix:fe8gx7xv" `shouldBe` Nothing
+      cash32decode "a:b:wdr5stq6" `shouldBe` Nothing
+      cash32decode "pre-fix:c0c507qj" `shouldBe` Nothing
     it "cash32decode needs a prefix" $ do
       cash32decode "x64nx6hz" `shouldBe` Nothing
       cash32decode ":x64nx6hz" `shouldBe` Nothing

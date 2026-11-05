@@ -114,6 +114,14 @@ data PushDataType
 -- a push that breaks this invariant fails with an 'error' call, because no
 -- byte sequence can represent it. Build pushes with 'opPushData' to get the
 -- minimal encoding.
+--
+-- 'OP_INVALIDOPCODE' holds a byte that has no opcode of its own. The parser
+-- only builds it for such a byte. Built by hand with the byte of a defined
+-- opcode, such as 0xac, it is a second value for that opcode: it is not equal
+-- to 'OP_CHECKSIG', it serializes to the same byte, and it reads back as
+-- 'OP_CHECKSIG'. Code that looks for an opcode, such as the removal of
+-- 'OP_CODESEPARATOR' in 'Haskoin.Script.SigHash.txSigHash', does not see it.
+-- Do not build one for a byte that has a constructor.
 data ScriptOp
   = -- Pushing Data
     OP_PUSHDATA

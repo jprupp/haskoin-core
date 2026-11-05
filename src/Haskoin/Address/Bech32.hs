@@ -175,6 +175,9 @@ checksumLength = 6
 bech32Encode :: Bech32Encoding -> HRP -> [Word5] -> Maybe Bech32
 bech32Encode enc hrp dat = do
   guard $ checkHRP hrp
+  -- The constructor of 'Word5' can hold any byte, and only 0 to 31 have a
+  -- character.
+  guard $ all (\(UnsafeWord5 w) -> w <= 31) dat
   let dat' = dat ++ bech32CreateChecksum enc (T.toLower hrp) dat
       rest = map (charset !) dat'
       result = T.concat [T.toLower hrp, T.pack "1", T.pack rest]

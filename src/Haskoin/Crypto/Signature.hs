@@ -25,20 +25,18 @@ module Haskoin.Crypto.Signature
   )
 where
 
-import Control.Monad (guard, unless, when)
+import Control.Monad (unless, when)
 import Crypto.Secp256k1
 import Data.Aeson
 import Data.Aeson.Encoding
 import Data.Binary (Binary (..))
 import Data.ByteString (ByteString)
-import Data.ByteString qualified as B
 import Data.ByteString.Lazy qualified as L
 import Data.Bytes.Get
 import Data.Bytes.Put
 import Data.Bytes.Serial
 import Data.Maybe (fromMaybe)
 import Data.Serialize (Serialize (..))
-import Data.Text qualified as T
 import Haskoin.Crypto.Hash
 import Haskoin.Util.Helpers
 import Haskoin.Util.Marshal
@@ -81,27 +79,33 @@ instance Marshal Ctx Sig where
 instance MarshalJSON Ctx Sig where
   marshalValue ctx = String . encodeHex . exportSig ctx
   marshalEncoding ctx = hexEncoding . L.fromStrict . exportSig ctx
-  -- Decoding is as strict as the binary form: low-S and non-zero components.
+  -- Decoding applies the same rules as the binary form, 'decodeStrictSig'.
+  -- The error message does not repeat the text. The text comes from outside
+  -- and can be of any length.
   unmarshalValue ctx =
     withText "Sig" $ \t ->
       case decodeHex t >>= decodeStrictSig ctx of
-        Nothing -> fail $ "Could not decode signature: " <> T.unpack t
+        Nothing -> fail "Could not decode signature"
         Just s -> return s
 
--- | Is canonical half order: the s component is not above half the curve
--- order, the only form 'verifySig' accepts.
+-- | Is the s component at most half the curve order? This is the low-S rule
+-- that Bitcoin Core applies to the transactions it relays:
+-- @SCRIPT_VERIFY_LOW_S@ is one of its standard flags. It is not a consensus
+-- rule, so a block may hold a signature with a high s. The decoders of this
+-- module do not apply it. Check it with this function where the relay rules
+-- matter. 'signHash' always makes a signature that passes.
 isCanonicalHalfOrder :: Ctx -> Sig -> Bool
 isCanonicalHalfOrder = isLowS
 
--- | Decode signature strictly.
+-- | Decode a signature from its strict DER encoding, the encoding that BIP 66
+-- made a consensus rule (@IsValidSignatureEncoding@ in Bitcoin Core, without
+-- the hash type byte).
+--
+-- A signature whose r or s is zero, or not below the curve order, is refused
+-- as well. BIP 66 allows such an encoding, but the signature can never
+-- verify. 'importSig' applies both rules.
+--
+-- A high s is accepted, since BIP 66 allows it and such signatures are in the
+-- block chain. Use 'isCanonicalHalfOrder' for the low-S relay rule.
 decodeStrictSig :: Ctx -> ByteString -> Maybe Sig
-decodeStrictSig ctx bs = do
-  g <- importSig ctx bs
-  -- <http://www.secg.org/sec1-v2.pdf Section 4.1.4>
-  -- 4.1.4.1 (r and s can not be zero)
-  let compact = exportCompactSig ctx g
-  let zero = B.replicate 32 0
-  guard $ B.take 32 compact.get /= zero
-  guard $ (B.take 32 . B.drop 32) compact.get /= zero
-  guard $ isCanonicalHalfOrder ctx g
-  return g
+decodeStrictSig = importSig

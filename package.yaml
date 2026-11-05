@@ -47,6 +47,7 @@ dependencies:
   - text >= 1.2.3.0
   - time >= 1.9.3
   - transformers >= 0.5.6.2
+  - unicode-data >= 0.2
   - unicode-transforms >= 0.4
   - unordered-containers >= 0.2.10.0
   - vector >= 0.12.1.2

@@ -251,13 +251,19 @@ dropSumLabels c f tag =
     }
 
 -- | Convert from one power-of-two base to another, as long as it fits in a
--- 'Word'. With padding, leftover bits fill one more output digit and the
--- conversion always succeeds. Without padding, the conversion fails when the
--- leftover bits could hold a whole input digit, or when they are not all
--- zero. That is the rule Bitcoin Core applies. It rejects strings that are
--- not the canonical encoding of their payload.
+-- 'Word'. With padding, leftover bits fill one more output digit. Without
+-- padding, the conversion fails when the leftover bits could hold a whole
+-- input digit, or when they are not all zero. That is the rule Bitcoin Core
+-- applies. It rejects strings that are not the canonical encoding of their
+-- payload.
+--
+-- The conversion also fails for a digit that does not fit the width it is
+-- converted from, as the reference code of BIP 173 does, and for widths that
+-- are not positive or whose sum is above the 64 bits of a 'Word'.
 convertBits :: Bool -> Int -> Int -> [Word] -> Maybe [Word]
 convertBits pad frombits tobits i
+  | frombits < 1 || tobits < 1 || frombits + tobits > 64 = Nothing
+  | any (>= 1 `shiftL` frombits) i = Nothing
   | pad = Just . reverse $ if xbits == 0 then xout else leftover : xout
   | xbits >= frombits = Nothing
   | leftover /= 0 = Nothing
@@ -325,15 +331,49 @@ putInteger n
     lo = fromIntegral (minBound :: Int32)
     hi = fromIntegral (maxBound :: Int32)
 
+-- | Read an 'Integer' that 'putInteger' wrote. A number has one encoding, and
+-- any other way to write it is refused:
+--
+-- * the tag byte is 0x00 for a number that fits 32 bits, and 0x01 otherwise
+-- * the sign byte of the wide form is 0x01, or 0xff for a negative number
+-- * the bytes of the wide form are the shortest that hold the number, so the
+--   last one is not zero
+--
+-- This is the encoding that 'putInteger' has always written, so stored data
+-- reads as before. The bytes are read in one piece and turned into a number
+-- in close to linear time, so a long number cannot stall the reader.
 getInteger :: (MonadGet m) => m Integer
 getInteger =
   getWord8 >>= \case
-    0 -> fromIntegral <$> getInt32be
-    _ -> do
-      sign <- getWord8
-      bytes <- getList getWord8
-      let v = roll bytes
-      return $! if sign == 0x01 then v else -v
+    0x00 -> fromIntegral <$> getInt32be
+    0x01 -> do
+      sign <-
+        getWord8 >>= \case
+          0x01 -> return 1
+          0xff -> return (-1)
+          _ -> fail "getInteger: the sign byte is not 0x01 or 0xff"
+      bytes <- getLengthBytes
+      let n = sign * littleEndianToInteger bytes
+      when (B.null bytes || B.last bytes == 0x00 || fitsInt32 n) $
+        fail "getInteger: the number is not in its shortest form"
+      return n
+    _ -> fail "getInteger: the tag byte is not 0x00 or 0x01"
+  where
+    fitsInt32 n =
+      n >= fromIntegral (minBound :: Int32) && n <= fromIntegral (maxBound :: Int32)
+
+-- | The number that a string of bytes spells, least significant byte first.
+-- The string is split in halves and the two numbers are joined. Adding one
+-- byte at a time would move the whole number at every step, which takes time
+-- that grows with the square of the length.
+littleEndianToInteger :: ByteString -> Integer
+littleEndianToInteger bs
+  | B.length bs <= 8 = B.foldr (\byte n -> n `shiftL` 8 .|. toInteger byte) 0 bs
+  | otherwise = low .|. (high `shiftL` (8 * B.length lowBytes))
+  where
+    (lowBytes, highBytes) = B.splitAt (B.length bs `div` 2) bs
+    low = littleEndianToInteger lowBytes
+    high = littleEndianToInteger highBytes
 
 putMaybe :: (MonadPut m) => (a -> m ()) -> Maybe a -> m ()
 putMaybe f Nothing = putWord8 0x00
@@ -372,11 +412,6 @@ unroll = unfoldr step
     step 0 = Nothing
     step i = Just (fromIntegral i, i `shiftR` 8)
 
-roll :: (Integral a, Bits a) => [Word8] -> a
-roll = foldr unstep 0
-  where
-    unstep b a = a `shiftL` 8 .|. fromIntegral b
-
 nrBits :: (Ord a, Integral a) => a -> Int
 nrBits k =
   let expMax = until (\e -> 2 ^ e > k) (* 2) 1
@@ -389,9 +424,17 @@ nrBits k =
           mid = (lo + hi) `div` 2
    in findNr (expMax `div` 2) expMax
 
--- | Read as a list of pairs of int and element.
+-- | Read a map as a count and that many pairs of key and element. The keys
+-- must come in ascending order, each one once, which is how 'putIntMap'
+-- writes them. A key given twice is refused. It used to be read, and the
+-- second element silently replaced the first.
 getIntMap :: (MonadGet m) => m Int -> m a -> m (IntMap a)
-getIntMap i m = IntMap.fromList <$> getList (getTwo i m)
+getIntMap i m = do
+  pairs <- getList (getTwo i m)
+  let keys = map fst pairs
+  unless (and (zipWith (<) keys (drop 1 keys))) $
+    fail "getIntMap: the keys are not in ascending order"
+  return (IntMap.fromDistinctAscList pairs)
 
 putIntMap :: (MonadPut m) => (Int -> m ()) -> (a -> m ()) -> IntMap a -> m ()
 putIntMap f g = putList (putTwo f g) . IntMap.toAscList

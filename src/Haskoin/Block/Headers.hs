@@ -84,7 +84,7 @@ module Haskoin.Block.Headers
 where
 
 import Control.DeepSeq
-import Control.Monad (mzero, unless, when)
+import Control.Monad (guard, mzero, unless, when)
 import Control.Monad.Except (ExceptT (..), runExceptT, throwError)
 import Control.Monad.State.Strict as State (StateT, get, gets, lift, modify)
 import Control.Monad.Trans.Maybe
@@ -135,13 +135,20 @@ data BlockNode = BlockNode
     -- | skip magic block hash
     skip :: !BlockHash
   }
-  deriving (Show, Read, Generic, Hashable, NFData)
+  deriving (Show, Read, Generic, NFData)
+
+-- | Hashes the header only, so that two nodes that are equal hash alike.
+instance Hashable BlockNode where
+  hashWithSalt salt = hashWithSalt salt . (.header)
 
 instance Serial BlockNode where
   deserialize = do
     header <- deserialize
     height <- getWord32le
     work <- getInteger
+    -- Chain work is a 256-bit unsigned number in Bitcoin Core.
+    when (work < 0 || work >= 2 ^ (256 :: Int)) $
+      fail "BlockNode: chain work out of range"
     if height == 0
       then do
         let skip = headerHash header
@@ -224,11 +231,15 @@ genesisMap net =
 addBlockHeaderMemory :: BlockNode -> HeaderMemory -> HeaderMemory
 addBlockHeaderMemory bn s = s {blocks = addBlockToMap bn s.blocks}
 
--- | Get block header from memory block map.
+-- | Get block header from memory block map. The map is keyed by eight bytes
+-- of the hash, so the node found there is returned only when its header has
+-- the hash that was asked for.
 getBlockHeaderMemory :: BlockHash -> HeaderMemory -> Maybe BlockNode
 getBlockHeaderMemory bh s = do
   bs <- shortBlockHash bh `HashMap.lookup` s.blocks
-  eitherToMaybe . runGetS deserialize $ fromShort bs
+  node <- eitherToMaybe . runGetS deserialize $ fromShort bs
+  guard (headerHash node.header == bh)
+  return node
 
 -- | Calculate short block hash taking eight non-zero bytes from the 16-byte
 -- hash. This function will take the bytes that are not on the zero-side of the
@@ -298,6 +309,23 @@ genesisNode net =
 -- before it and makes the last of them the best block when it has the most
 -- work. Return 'Left' on failure with error information, otherwise the new
 -- nodes with the newest one first.
+--
+-- A header that is already in the store is not validated again: its stored
+-- node is returned, as @AcceptBlockHeader@ does in Bitcoin Core.
+--
+-- What bounds the headers a peer can add to the store:
+--
+-- * Once the best block has reached a checkpoint, a new header at or below
+--   that height is refused.
+-- * Once the best block has the 'minimumChainWork' of the network, a new
+--   header whose chain has less work is refused. Such a header can only fork
+--   from far below the tip, where proof of work was cheap.
+--
+-- Neither applies while the node is still syncing below them. Bitcoin Core
+-- stores no header from a peer before its chain has shown the minimum work.
+-- This function has no such phase, so a caller that syncs from untrusted
+-- peers should not keep headers for good before the best block has that
+-- work.
 connectBlocks ::
   (BlockHeaders m) =>
   Network ->
@@ -357,6 +385,19 @@ connectHeader ::
   BlockHeader ->
   m (Either String BlockNode)
 connectHeader net t best bh =
+  getBlockHeader (headerHash bh) >>= \case
+    Just known -> return (Right known)
+    Nothing -> connectNewHeader net t best bh
+
+-- | Validate a header that is not in the store yet, and add it.
+connectNewHeader ::
+  (BlockHeaders m) =>
+  Network ->
+  Timestamp ->
+  BlockNode ->
+  BlockHeader ->
+  m (Either String BlockNode)
+connectNewHeader net t best bh =
   runExceptT $ do
     par <-
       maybeToExceptT
@@ -417,6 +458,11 @@ validBlock net t bb par pars bh sk requiredBits = do
   unless (validTimeWarp net ng par.header.timestamp nt) $
     Left $
       "Block timestamp too early for retarget: " ++ show nt
+  -- Once the best chain has the minimum chain work, a header with less can
+  -- only be on a fork from far below the tip.
+  unless (aw >= net.minimumChainWork || bb.work < net.minimumChainWork) $
+    Left $
+      "Header chain has less work than the minimum chain work: " ++ show ng
   unless (afterLastCP net (bb.height) ng) $
     Left $
       "Rewriting pre-checkpoint chain: " ++ show ng
@@ -527,9 +573,13 @@ bip34 net height hsh
   | height /= net.bip34Height = True
   | otherwise = maybe True (== hsh) net.bip34Hash
 
--- | Check if the provided block height and version are valid. The version is
--- a signed 32-bit number in Bitcoin Core, so values with the top bit set are
--- negative and count as below version 2.
+-- | Check if the provided block height and version are valid. The three
+-- conditions are independent, as in @ContextualCheckBlockHeader@ of Bitcoin
+-- Core and Bitcoin Cash Node: a version below 2 is refused from the BIP34
+-- height, below 3 from the BIP66 height and below 4 from the BIP65 height,
+-- whatever the order of those heights on the network. The version is a
+-- signed 32-bit number, so values with the top bit set are negative and
+-- count as below version 2.
 validVersion ::
   Network ->
   -- | new child height
@@ -537,11 +587,12 @@ validVersion ::
   -- | new child version
   Word32 ->
   Bool
-validVersion net height version
-  | signedVersion < 2 = height < net.bip34Height
-  | signedVersion < 3 = height < net.bip66Height
-  | signedVersion < 4 = height < net.bip65Height
-  | otherwise = True
+validVersion net height version =
+  not
+    ( (signedVersion < 2 && height >= net.bip34Height)
+        || (signedVersion < 3 && height >= net.bip66Height)
+        || (signedVersion < 4 && height >= net.bip65Height)
+    )
   where
     signedVersion = fromIntegral version :: Int32
 
@@ -957,18 +1008,15 @@ headerWork bh
 diffInterval :: Network -> Word32
 diffInterval net = net.targetTimespan `div` net.targetSpacing
 
--- | Compare two blocks to get the best: the one with more accumulated work,
--- then the higher one. When both are equal the first argument is kept, so
--- callers pass the block they already have first and the block that was seen
--- first stays the best.
+-- | Compare two blocks to get the best: the one with more accumulated work.
+-- When the work is equal the first argument is kept, whatever the heights,
+-- so callers pass the block they already have first and the block that was
+-- seen first stays the best. This is the order of
+-- @CBlockIndexWorkComparator@ in Bitcoin Core: chain work, then arrival.
 chooseBest :: BlockNode -> BlockNode -> BlockNode
 chooseBest b1 b2
-  | b1.work == b2.work =
-      if b1.height >= b2.height
-        then b1
-        else b2
-  | b1.work > b2.work = b1
-  | otherwise = b2
+  | b2.work > b1.work = b2
+  | otherwise = b1
 
 -- | Get list of blocks for a block locator: the ten blocks below the best, then
 -- blocks at exponentially growing distances, then genesis. This is
