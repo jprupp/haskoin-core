@@ -4,6 +4,7 @@
 module Haskoin.Crypto.Keys.MnemonicSpec (spec) where
 
 import Control.Monad (forM_, zipWithM_)
+import Crypto.Hash (SHA256 (..), hashWith)
 import Data.Bits (shiftR, (.&.))
 import Data.ByteString qualified as BS
 import Data.Either (fromRight)
@@ -13,6 +14,8 @@ import Data.Maybe (fromJust)
 import Data.Serialize (Serialize, encode)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding qualified as E
+import Data.Text.IO qualified as TIO
 import Data.Vector qualified as V
 import Data.Word (Word32, Word64)
 import Haskoin (btc)
@@ -26,6 +29,12 @@ import Test.QuickCheck hiding ((.&.))
 spec :: Spec
 spec =
   describe "mnemonic" $ do
+    -- data/bip39_wordlist.txt is bip-0039/english.txt of the BIPs repository,
+    -- and data/bip39_vectors.json the vectors.json of python-mnemonic, which
+    -- the BIP points to; its English vectors are also written out below as
+    -- trezorVectors
+    wordListFile <- runIO (TIO.readFile "data/bip39_wordlist.txt")
+    vectorsFile <- runIO (readTestFile "bip39_vectors.json" :: IO (M.Map Text [(Text, Mnemonic, Text, Text)]))
     it "entropy to mnemonic sentence" toMnemonicTest
     it "mnemonic sentence to entropy" fromMnemonicTest
     it "mnemonic sentence to seed" mnemonicToSeedTest
@@ -89,6 +98,48 @@ spec =
       M.size wordListMap `shouldBe` 2048
       M.lookup "abandon" wordListMap `shouldBe` Just 0
       M.lookup "zoo" wordListMap `shouldBe` Just 2047
+    it "has the published English word list, by its SHA-256" $
+      -- sha256sum of bip-0039/english.txt in the BIPs repository, one word
+      -- per line with a newline after each
+      show (hashWith SHA256 (E.encodeUtf8 (T.unlines (V.toList wordList))))
+        `shouldBe` "2f5eed53a4727b4bf8880d8f3f199efc90e58503646d9ff8eff3a2ed3b24dbda"
+    it "has the word list of the data directory, word for word" $
+      V.toList wordList `shouldBe` T.lines wordListFile
+    it "has the 24 English vectors of the published file, as written out here" $ do
+      M.lookup "english" vectorsFile `shouldBe` Just trezorVectors
+      length trezorVectors `shouldBe` 24
+    it "accepts the 24-word sentence of Trezor's firmware tests" $
+      -- 22 times "abstract", then "artefact electric"; the entropy is the
+      -- 11-bit index of each word in a row, 6 for abstract, 36 and 572
+      fmap encodeHex (fromMnemonic (T.unwords (replicate 22 "abstract" ++ ["artefact", "electric"])))
+        `shouldBe` Right "00e01c0380700e01c0380700e01c0380700e01c0380700e01c0380700e01c33a"
+    it "refuses each old vector sentence with a word put in front, as Trezor's firmware does" $
+      -- 13, 19 or 25 words
+      forM_ mss $ \m ->
+        fromMnemonic ("above " <> m) `shouldBe` Left ("fromMnemonic: wrong number of words: " <> show (length (T.words m) + 1))
+    it "refuses each old vector sentence without its first word, as Trezor's firmware does" $
+      -- 11, 17 or 23 words
+      forM_ mss $ \m ->
+        fromMnemonic (T.unwords (drop 1 (T.words m))) `shouldBe` Left ("fromMnemonic: wrong number of words: " <> show (length (T.words m) - 1))
+    it "refuses the wrong-checksum sentence of python-mnemonic's tests" $
+      fromMnemonic "bless cloud wheel regular tiny venue bird web grief security dignity zoo"
+        `shouldSatisfy` either ("fromMnemonic: checksum failed:" `isPrefixOf`) (const False)
+    it "refuses the sentences of the JavaScript library's custom word list, naming their words" $
+      -- bitcoinjs/bip39 tests them against a word list of its own
+      fromMnemonic "aband0n aband0n aband0n aband0n aband0n aband0n aband0n aband0n aband0n aband0n aband0n ab0ut"
+        `shouldBe` Left "fromMnemonic: words not in the list: aband0n aband0n aband0n aband0n aband0n aband0n aband0n aband0n aband0n aband0n aband0n ab0ut"
+    it "gives 15 and 21 words for 20 and 28 bytes of entropy, with their seeds and keys" $
+      -- The published vectors have no 15- or 21-word case. These were
+      -- computed with an independent Python implementation of BIP39 from
+      -- hashlib: the checksum is the first 5 or 7 bits of the SHA-256 of
+      -- the entropy, the seed is PBKDF2-HMAC-SHA512 of the sentence with
+      -- 2048 rounds and the salt "mnemonic" ++ "TREZOR", and the key is
+      -- the BIP32 master key of the seed.
+      forM_ fifteenAndTwentyOneWordVectors $ \(entTxt, mnem, seedTxt, xprvTxt) -> do
+        let ent = fromJust (decodeHex entTxt)
+        toMnemonic ent `shouldBe` Right mnem
+        fmap encodeHex (mnemonicToSeed "TREZOR" mnem) `shouldBe` Right seedTxt
+        fmap (xPrvExport btc . makeXPrvKey) (mnemonicToSeed "TREZOR" mnem) `shouldBe` Right xprvTxt
 
 -- | The first Trezor sentence, for 16 zero bytes of entropy.
 abandon12 :: Mnemonic
@@ -154,6 +205,9 @@ trezorVectorTests =
     assertEqual "mnemonicToSeed" (Right seed) $ mnemonicToSeed "TREZOR" mnem
     assertEqual "xPrv" xprv $ makeXPrvKey seed
 
+-- The next three lists are the English vectors of an earlier vectors.json
+-- of python-mnemonic, whose random cases (from the 13th on) were replaced
+-- later; Trezor's firmware still tests the sentences as valid.
 ents :: [Text]
 ents =
   [ "00000000000000000000000000000000",
@@ -346,6 +400,32 @@ invalidMss =
     "beyond stage sleep clip because twist token leaf atom beauty genius food\
     \ business side grid unable middle armed observe pair crouch tonight away\
     \ zoo"
+  ]
+
+-- | Entropy, sentence, seed with the passphrase "TREZOR" and master key for
+-- 20 and 28 bytes of entropy, which the published vectors do not cover.
+fifteenAndTwentyOneWordVectors :: [(Text, Mnemonic, Text, Text)]
+fifteenAndTwentyOneWordVectors =
+  [ ( "0000000000000000000000000000000000000000",
+      "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon address",
+      "fa08713f46bf5cb48728ceb70e3aae1bc53c5cb7b4e29c5610261d1cbb7be3bed4d805256fec515754d2be35974fc5da678168e9d9bb0cb70948026923b0def3",
+      "xprv9s21ZrQH143K2nE8x21M7hF4msPN7WC7b6yCn1usVKBA9myCGie4yQCqsw479qmbjXeeRZgMjnNwvWweSCbBeUSPADo2aZbfpkTvJ8de1Qi"
+    ),
+    ( "ffffffffffffffffffffffffffffffffffffffff",
+      "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrist",
+      "bfee6f9d2bcfa1331bd6482a24abca521e5f7e769498b9a0146672194c7356e4e409be22bc379c8b64fee2aa24b54d3ec20d10a083eaa5d1d6b4b365941ad37c",
+      "xprv9s21ZrQH143K4YQcGfMEpbEoWtj4dJ8aSkUPCXEbg3kWsR8kcdcmhGK3y4swwdjUpyGBfWT9bpizzQJrznSRuFx9K4FKeoNEYT45rLY11Hc"
+    ),
+    ( "00000000000000000000000000000000000000000000000000000000",
+      "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon admit",
+      "e7dadc189d2e8d07ac278d9ec98a1d2d327e4a6b7df494c00cbf2cbf2d3543dac7000fc72d4ada8d9997dc8db388ff22c6d79f604a7455f2df5534a28eee04c6",
+      "xprv9s21ZrQH143K3CXWs34yKD87zsm1AVExnEEUnH8rKWqWVguXRprSz8bFFZDbKY7oai19nPTZ68HnW8xX62HFr8WxsNL4CEYmGLcTxAyKNHd"
+    ),
+    ( "ffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo veteran",
+      "4aa0af4ca02ef1d9fa675cd02aa06d318425564e7fadd3d51b6165cc56d77398f28d8522073cd036c2a4a24a83e919211c84500d96cb120084e613ff5fcd96c1",
+      "xprv9s21ZrQH143K4DvgrFvRv4J7m2qehW4MCdmLfRrpAJQFzgVFGi8L9QaapqJPQLyX9SAeGWATu6vXNYmo542LR8yMf4W7DMF1Xgsp96RYWDy"
+    )
   ]
 
 -- Vectors from https://github.com/trezor/python-mnemonic/blob/master/vectors.json
