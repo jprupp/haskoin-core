@@ -111,7 +111,7 @@ dependency. Use the [latest version from Hackage](https://hackage.haskell.org/pa
 ```yaml
 resolver: nightly-2026-10-28
 extra-deps:
-  - haskoin-core-1.5.1
+  - haskoin-core-1.6.0
   - base16-2.0
   - secp256k1-haskell-2.0.0
 ```
@@ -613,7 +613,7 @@ most 128 levels deep, and its version must be one that BIP 341 allows.
 
 [SLIP-39](https://github.com/satoshilabs/slips/blob/master/slip-0039.md) splits a
 secret into mnemonic shares, and a threshold of shares rebuilds it. It is
-available from version 1.5.2. The `Haskoin` module does not re-export it, so
+available from version 1.6.0. The `Haskoin` module does not re-export it, so
 import it yourself.
 
 ```haskell
