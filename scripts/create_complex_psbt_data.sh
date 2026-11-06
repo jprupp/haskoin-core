@@ -1,16 +1,30 @@
 #!/usr/bin/env bash
 
+# Makes the data of data/complex_psbt.json again: a transaction that spends
+# coins of every kind, signed by Bitcoin Core one wallet at a time.
+#
+# Usage: ./scripts/create_complex_psbt_data.sh [OUTPUT_FILE]
+#
+# Run it from the root of the repository. The keys are new at every run, so
+# the PSBTs differ from the ones in the repository. Last run against Bitcoin
+# Core 32.1.
+
 . ./scripts/lib.sh
 
+output_file=${1:-/tmp/psbt_vectors.json}
+
+stack build
 start_bitcoind
 
+# Each wallet leaves its signatures as partial signatures. Without
+# finalize=false, Core would finalize the inputs it can complete alone.
 sign_psbt () {
-    btc -rpcwallet=$1 -named walletprocesspsbt "psbt=$2" sign=true | jq -r .psbt
+    btc -rpcwallet=$1 -named walletprocesspsbt "psbt=$2" sign=true finalize=false | jq -r .psbt
 }
 
 get_priv_key () {
-    address=$(get_address)
-    btc -rpcwallet="miner" dumpprivkey $address
+    keys=$(new_key)
+    cut -d' ' -f1 <<< "$keys"
 }
 
 get_canonical_descriptor () {
@@ -46,7 +60,7 @@ setup_p2pkh () {
     privkey=$(get_priv_key)
     private_descriptor=$(get_canonical_descriptor "pkh($privkey)")
     public_descriptor=$(get_public_descriptor $private_descriptor)
-    import_descriptor "p2pkh" "$private_descriptor" &> /dev/null
+    import_descriptor "p2pkh" "$private_descriptor"
     get_descriptor_address $public_descriptor
 }
 
@@ -58,7 +72,7 @@ setup_p2sh_p2pk () {
     privkey=$(get_priv_key)
     private_descriptor=$(get_canonical_descriptor "sh(pk($privkey))")
     public_descriptor=$(get_public_descriptor $private_descriptor)
-    import_descriptor "p2sh-pk" "$private_descriptor" &> /dev/null
+    import_descriptor "p2sh-pk" "$private_descriptor"
     get_descriptor_address $public_descriptor
 }
 
@@ -68,26 +82,23 @@ echo "Setting up p2sh-ms wallets"
 
 setup_p2sh_ms () {
 
-    address1=$(get_address)
-    privkey1=$(btc -rpcwallet="miner" dumpprivkey $address1)
-    pubkey1=$(btc -rpcwallet="miner" getaddressinfo $address1 | jq -r .pubkey)
+    keys=$(new_key)
+    read -r privkey1 pubkey1 <<< "$keys"
 
-    address2=$(get_address)
-    privkey2=$(btc -rpcwallet="miner" dumpprivkey $address2)
-    pubkey2=$(btc -rpcwallet="miner" getaddressinfo $address2 | jq -r .pubkey)
+    keys=$(new_key)
+    read -r privkey2 pubkey2 <<< "$keys"
 
-    address3=$(get_address)
-    privkey3=$(btc -rpcwallet="miner" dumpprivkey $address3)
-    pubkey3=$(btc -rpcwallet="miner" getaddressinfo $address3 | jq -r .pubkey)
+    keys=$(new_key)
+    read -r privkey3 pubkey3 <<< "$keys"
 
     private_descriptor_1=$(get_canonical_descriptor "sh(sortedmulti(2,$privkey1,$pubkey2,$pubkey3))")
-    import_descriptor "p2sh-ms-1" "$private_descriptor_1" &> /dev/null
+    import_descriptor "p2sh-ms-1" "$private_descriptor_1"
 
     private_descriptor_2=$(get_canonical_descriptor "sh(sortedmulti(2,$pubkey1,$privkey2,$pubkey3))")
-    import_descriptor "p2sh-ms-2" "$private_descriptor_2" &> /dev/null
+    import_descriptor "p2sh-ms-2" "$private_descriptor_2"
 
     private_descriptor_3=$(get_canonical_descriptor "sh(sortedmulti(2,$pubkey1,$pubkey2,$privkey3))")
-    import_descriptor "p2sh-ms-3" "$private_descriptor_3" &> /dev/null
+    import_descriptor "p2sh-ms-3" "$private_descriptor_3"
 
     public_descriptor=$(get_public_descriptor $private_descriptor_1)
     get_descriptor_address $public_descriptor
@@ -101,7 +112,7 @@ setup_p2sh_wsh_pk () {
     privkey=$(get_priv_key)
     private_descriptor=$(get_canonical_descriptor "sh(wsh(pk($privkey)))")
     public_descriptor=$(get_public_descriptor $private_descriptor)
-    import_descriptor "p2sh-wsh-pk" "$private_descriptor" &> /dev/null
+    import_descriptor "p2sh-wsh-pk" "$private_descriptor"
     get_descriptor_address $public_descriptor
 }
 
@@ -111,26 +122,23 @@ echo "Setting up p2sh-wsh-ms wallets"
 
 setup_p2sh_wsh_ms () {
 
-    address1=$(get_address)
-    privkey1=$(btc -rpcwallet="miner" dumpprivkey $address1)
-    pubkey1=$(btc -rpcwallet="miner" getaddressinfo $address1 | jq -r .pubkey)
+    keys=$(new_key)
+    read -r privkey1 pubkey1 <<< "$keys"
 
-    address2=$(get_address)
-    privkey2=$(btc -rpcwallet="miner" dumpprivkey $address2)
-    pubkey2=$(btc -rpcwallet="miner" getaddressinfo $address2 | jq -r .pubkey)
+    keys=$(new_key)
+    read -r privkey2 pubkey2 <<< "$keys"
 
-    address3=$(get_address)
-    privkey3=$(btc -rpcwallet="miner" dumpprivkey $address3)
-    pubkey3=$(btc -rpcwallet="miner" getaddressinfo $address3 | jq -r .pubkey)
+    keys=$(new_key)
+    read -r privkey3 pubkey3 <<< "$keys"
 
     private_descriptor_1=$(get_canonical_descriptor "sh(wsh(sortedmulti(2,$privkey1,$pubkey2,$pubkey3)))")
-    import_descriptor "p2sh-wsh-ms-1" "$private_descriptor_1" &> /dev/null
+    import_descriptor "p2sh-wsh-ms-1" "$private_descriptor_1"
 
     private_descriptor_2=$(get_canonical_descriptor "sh(wsh(sortedmulti(2,$pubkey1,$privkey2,$pubkey3)))")
-    import_descriptor "p2sh-wsh-ms-2" "$private_descriptor_2" &> /dev/null
+    import_descriptor "p2sh-wsh-ms-2" "$private_descriptor_2"
 
     private_descriptor_3=$(get_canonical_descriptor "sh(wsh(sortedmulti(2,$pubkey1,$pubkey2,$privkey3)))")
-    import_descriptor "p2sh-wsh-ms-3" "$private_descriptor_3" &> /dev/null
+    import_descriptor "p2sh-wsh-ms-3" "$private_descriptor_3"
 
     public_descriptor=$(get_public_descriptor $private_descriptor_1)
     get_descriptor_address $public_descriptor
@@ -144,7 +152,7 @@ setup_p2wpkh () {
     privkey=$(get_priv_key)
     private_descriptor=$(get_canonical_descriptor "wpkh($privkey)")
     public_descriptor=$(get_public_descriptor $private_descriptor)
-    import_descriptor "p2wpkh" "$private_descriptor" &> /dev/null
+    import_descriptor "p2wpkh" "$private_descriptor"
     get_descriptor_address $public_descriptor
 }
 
@@ -156,7 +164,7 @@ setup_p2wsh_pk () {
     privkey=$(get_priv_key)
     private_descriptor=$(get_canonical_descriptor "wsh(pk($privkey))")
     public_descriptor=$(get_public_descriptor $private_descriptor)
-    import_descriptor "p2wsh-pk" "$private_descriptor" &> /dev/null
+    import_descriptor "p2wsh-pk" "$private_descriptor"
     get_descriptor_address $public_descriptor
 }
 
@@ -166,26 +174,23 @@ echo "Setting up p2wsh-ms wallets"
 
 setup_p2wsh_ms () {
 
-    address1=$(get_address)
-    privkey1=$(btc -rpcwallet="miner" dumpprivkey $address1)
-    pubkey1=$(btc -rpcwallet="miner" getaddressinfo $address1 | jq -r .pubkey)
+    keys=$(new_key)
+    read -r privkey1 pubkey1 <<< "$keys"
 
-    address2=$(get_address)
-    privkey2=$(btc -rpcwallet="miner" dumpprivkey $address2)
-    pubkey2=$(btc -rpcwallet="miner" getaddressinfo $address2 | jq -r .pubkey)
+    keys=$(new_key)
+    read -r privkey2 pubkey2 <<< "$keys"
 
-    address3=$(get_address)
-    privkey3=$(btc -rpcwallet="miner" dumpprivkey $address3)
-    pubkey3=$(btc -rpcwallet="miner" getaddressinfo $address3 | jq -r .pubkey)
+    keys=$(new_key)
+    read -r privkey3 pubkey3 <<< "$keys"
 
     private_descriptor_1=$(get_canonical_descriptor "wsh(sortedmulti(2,$privkey1,$pubkey2,$pubkey3))")
-    import_descriptor "p2wsh-ms-1" "$private_descriptor_1" &> /dev/null
+    import_descriptor "p2wsh-ms-1" "$private_descriptor_1"
 
     private_descriptor_2=$(get_canonical_descriptor "wsh(sortedmulti(2,$pubkey1,$privkey2,$pubkey3))")
-    import_descriptor "p2wsh-ms-2" "$private_descriptor_2" &> /dev/null
+    import_descriptor "p2wsh-ms-2" "$private_descriptor_2"
 
     private_descriptor_3=$(get_canonical_descriptor "wsh(sortedmulti(2,$pubkey1,$pubkey2,$privkey3))")
-    import_descriptor "p2wsh-ms-3" "$private_descriptor_3" &> /dev/null
+    import_descriptor "p2wsh-ms-3" "$private_descriptor_3"
 
     public_descriptor=$(get_public_descriptor $private_descriptor_1)
     get_descriptor_address $public_descriptor
@@ -313,7 +318,7 @@ add_summary_field "combined_psbt" $combined_psbt
 add_summary_field "complete_psbt" $complete_psbt
 add_summary_field "final_tx" $final_tx
 
-echo $summary_entries | jq '. | from_entries' > /tmp/psbt_vectors.json
-echo "Done."
+echo $summary_entries | jq '. | from_entries' > "$output_file"
+echo "Done. The PSBTs are in $output_file"
 
 stop_bitcoind

@@ -1,3 +1,6 @@
+{-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE OverloadedRecordDot #-}
+
 -- |
 -- Module      : Haskoin.Test.Message
 -- Copyright   : No rights reserved
@@ -30,31 +33,45 @@ arbitraryMessageHeader =
     <*> arbitrary
     <*> arbitraryCheckSum32
 
--- | Arbitrary 'SendCompact'.
+-- | Arbitrary 'SendCompact', with the versions 1 and 2 of BIP 152 and any
+-- other number.
 arbitrarySendCompact :: Gen SendCompact
-arbitrarySendCompact = SendCompact <$> arbitrary <*> elements [1, 2]
+arbitrarySendCompact = SendCompact <$> arbitrary <*> oneof [elements [1, 2], arbitrary]
 
--- | Strictly increasing block positions.
+-- | Strictly increasing block positions, none above the given one. The
+-- first and the last possible position each come up often.
+arbitraryPositionsUpTo :: Word32 -> Gen [Word32]
+arbitraryPositionsUpTo largest =
+  nub . sort <$> listOf (frequency [(1, elements [0, largest]), (8, choose (0, largest))])
+
+-- | Strictly increasing block positions of up to 32 bits.
 arbitraryPositions :: Gen [Word32]
-arbitraryPositions = nub . sort <$> listOf arbitrary
+arbitraryPositions = arbitraryPositionsUpTo maxBound
 
--- | Arbitrary 'CompactBlock'.
+-- | Arbitrary 'CompactBlock' that a peer of the network can send: positions
+-- within the 'maxCompactBlockIndex' of the network, and transactions as
+-- 'arbitraryNetworkTx' makes them.
 arbitraryCompactBlock :: Network -> Ctx -> Gen CompactBlock
 arbitraryCompactBlock net ctx = do
-  positions <- arbitraryPositions
+  positions <- arbitraryPositionsUpTo net.maxCompactBlockIndex
   CompactBlock
     <$> arbitraryBlockHeader
     <*> arbitrary
     <*> listOf (choose (0, maxShortId))
-    <*> mapM (\i -> PrefilledTx i <$> arbitraryTx net ctx) positions
+    <*> mapM (\i -> PrefilledTx i <$> arbitraryNetworkTx net ctx) positions
 
--- | Arbitrary 'GetBlockTxn'.
+-- | Arbitrary 'GetBlockTxn' with positions of up to 32 bits.
 arbitraryGetBlockTxn :: Gen GetBlockTxn
 arbitraryGetBlockTxn = GetBlockTxn <$> arbitraryBlockHash <*> arbitraryPositions
 
--- | Arbitrary 'BlockTxn'.
+-- | Arbitrary 'GetBlockTxn' that a peer of the network can send.
+arbitraryNetworkGetBlockTxn :: Network -> Gen GetBlockTxn
+arbitraryNetworkGetBlockTxn net =
+  GetBlockTxn <$> arbitraryBlockHash <*> arbitraryPositionsUpTo net.maxCompactBlockIndex
+
+-- | Arbitrary 'BlockTxn' that a peer of the network can send.
 arbitraryBlockTxn :: Network -> Ctx -> Gen BlockTxn
-arbitraryBlockTxn net ctx = BlockTxn <$> arbitraryBlockHash <*> listOf (arbitraryTx net ctx)
+arbitraryBlockTxn net ctx = BlockTxn <$> arbitraryBlockHash <*> listOf (arbitraryNetworkTx net ctx)
 
 -- | Arbitrary 'GetCFilters'.
 arbitraryGetCFilters :: Gen GetCFilters
@@ -99,7 +116,7 @@ arbitraryMessage net ctx =
       MNotFound <$> arbitraryNotFound,
       MGetBlocks <$> arbitraryGetBlocks,
       MGetHeaders <$> arbitraryGetHeaders,
-      MTx <$> arbitraryTx net ctx,
+      MTx <$> arbitraryNetworkTx net ctx,
       MBlock <$> arbitraryBlock net ctx,
       MMerkleBlock <$> arbitraryMerkleBlock,
       MHeaders <$> arbitraryHeaders,
@@ -116,7 +133,7 @@ arbitraryMessage net ctx =
       MFeeFilter <$> arbitraryFeeFilter,
       MSendCompact <$> arbitrarySendCompact,
       MCompactBlock <$> arbitraryCompactBlock net ctx,
-      MGetBlockTxn <$> arbitraryGetBlockTxn,
+      MGetBlockTxn <$> arbitraryNetworkGetBlockTxn net,
       MBlockTxn <$> arbitraryBlockTxn net ctx,
       MGetCFilters <$> arbitraryGetCFilters,
       MCFilter <$> arbitraryCFilter,

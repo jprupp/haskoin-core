@@ -83,12 +83,18 @@ data SigHashFlag
     SIGHASH_FORKID
   | -- | new inputs can be added
     SIGHASH_ANYONECANPAY
-  deriving (Eq, Ord, Show, Read, Generic)
+  deriving (Eq, Ord, Show, Read, Generic, Bounded)
 
 instance NFData SigHashFlag
 
 instance Hashable SigHashFlag
 
+-- | 'fromEnum' gives the value of the flag in a hash type byte, and 'toEnum'
+-- reads it back. The values are not consecutive, so the functions that list
+-- flags walk the constructors in their order instead of counting: @[minBound
+-- ..]@ is the five flags. 'toEnum' of a number that is no flag, 'succ' of the
+-- last flag and 'pred' of the first raise an error, as they do for any
+-- enumeration.
 instance Enum SigHashFlag where
   fromEnum SIGHASH_ALL = 0x01
   fromEnum SIGHASH_NONE = 0x02
@@ -101,6 +107,33 @@ instance Enum SigHashFlag where
   toEnum 0x40 = SIGHASH_FORKID
   toEnum 0x80 = SIGHASH_ANYONECANPAY
   toEnum _ = error "Not a valid sighash flag"
+  succ flag
+    | flag == maxBound = error "succ: SIGHASH_ANYONECANPAY is the last sighash flag"
+    | otherwise = sigHashFlags !! (flagPosition flag + 1)
+  pred flag
+    | flag == minBound = error "pred: SIGHASH_ALL is the first sighash flag"
+    | otherwise = sigHashFlags !! (flagPosition flag - 1)
+  enumFrom flag = enumFromTo flag maxBound
+  enumFromTo from to = map (sigHashFlags !!) [flagPosition from .. flagPosition to]
+  enumFromThen from next
+    | next >= from = enumFromThenTo from next maxBound
+    | otherwise = enumFromThenTo from next minBound
+  enumFromThenTo from next to =
+    map (sigHashFlags !!) [flagPosition from, flagPosition next .. flagPosition to]
+
+-- | The flags in the order of their constructors.
+sigHashFlags :: [SigHashFlag]
+sigHashFlags =
+  [ SIGHASH_ALL,
+    SIGHASH_NONE,
+    SIGHASH_SINGLE,
+    SIGHASH_FORKID,
+    SIGHASH_ANYONECANPAY
+  ]
+
+-- | The position of a flag in 'sigHashFlags'.
+flagPosition :: SigHashFlag -> Int
+flagPosition flag = length (takeWhile (/= flag) sigHashFlags)
 
 -- | Data type representing the different ways a transaction can be signed.
 -- When producing a signature, a hash of the transaction is used as the message
@@ -214,7 +247,18 @@ sigHashGetForkId (SigHash n) = fromIntegral $ n `shiftR` 8
 -- contains 'OP_CODESEPARATOR', the caller must pass the part after the last
 -- 'OP_CODESEPARATOR' executed before the signature check, as consensus
 -- defines it. Any 'OP_CODESEPARATOR' left in that part is removed here, as
--- @FindAndDelete@ does in Bitcoin Core.
+-- @SerializeScriptCode@ does in Bitcoin Core.
+--
+-- Bitcoin Core makes a second change to the script before it hashes a legacy
+-- input: @FindAndDelete@ removes every push of the signature being checked.
+-- This function does not do that. The standard output scripts never hold a
+-- signature, so nothing is lost for them. A caller that verifies another
+-- legacy script must remove the pushes of the signature from the script
+-- first.
+--
+-- The hash type is written as four bytes, as Bitcoin Core writes the
+-- @nHashType@ it is given. A signature only carries the low byte, so a
+-- 'SigHash' above 0xff gives a digest that no signature can match.
 --
 -- On a network with a fork id, such as Bitcoin Cash, every signature must use
 -- the fork id digest of 'txSigHashForkId', so the 'SigHash' must carry the
@@ -298,6 +342,27 @@ buildOutputs txos i sh
 -- executed before the signature check. Unlike 'txSigHash', nothing is removed
 -- from that part, as BIP 143 specifies.
 --
+-- The last field of the digest is the hash type as four bytes. On a network
+-- without a fork id it is the 'SigHash' as given, which is what
+-- @SignatureHash@ of Bitcoin Core writes. A signature only carries the low
+-- byte, so a 'SigHash' above 0xff gives a digest that no signature can
+-- match. On a network with a fork id it is the low byte with the fork id of
+-- the network in the three bytes above it.
+--
+-- What is not supported on Bitcoin Cash, where Bitcoin Cash Node is the
+-- reference:
+--
+-- * @SIGHASH_UTXOS@ (0x20), which adds a hash of all the coins spent to the
+--   digest. 'isSigHashUnknown' treats the bit as undefined, so 'decodeTxSig'
+--   refuses such a signature.
+--
+-- * Coins that hold tokens. Their digest also covers the token data, and
+--   their output script starts with the prefix byte 0xef, which
+--   'Haskoin.Script.Standard.decodeOutput' does not read. A signature made
+--   here for such a coin is not valid.
+--
+-- * Schnorr signatures, see 'TxSignature'.
+--
 -- Fails when the input index is not an index of the transaction.
 txSigHashForkId ::
   Network ->
@@ -326,8 +391,11 @@ txSigHashForkId net tx out v i sh
     putWord32le (tx.inputs !! i).sequence
     serialize hashOutputs
     putWord32le tx.locktime
-    putWord32le $ fromIntegral $ sigHashAddNetworkId net sh
+    putWord32le $ fromIntegral hashType
   where
+    hashType = case net.sigHashForkId of
+      Just forkId -> sigHashAddForkId sh forkId
+      Nothing -> sh
     hashPrevouts
       | not (anyoneCanPay sh) =
           doubleSHA256 . runPutS $ mapM_ (serialize . (.outpoint)) tx.inputs
@@ -353,13 +421,34 @@ txSigHashForkId net tx out v i sh
 -- is serialized as one byte at the end of an ECDSA 'Sig'. All signatures in
 -- transaction inputs are of type 'TxSignature'.
 --
--- The binary form is as strict as the @DERSIG@, @LOW_S@ and @STRICTENC@ flags
--- of Bitcoin Core: strict DER, a low S value, non-zero components, a defined
--- hash type byte ('isSigHashUnknown'), the 'SIGHASH_FORKID' flag exactly on
--- the networks that have a fork id, and nothing after the hash type byte.
--- These are the policy rules every node applies to new transactions. Inputs
--- mined before BIP 66 and the low-S rule may hold signatures that this form
--- rejects, so it is not a parser for the whole chain history.
+-- This is the form of a signature that nodes relay. The binary and JSON
+-- forms, and 'decodeTxSig', apply the three signature rules of the standard
+-- script flags of Bitcoin Core, and one rule of the network:
+--
+-- * @DERSIG@: strict DER, as BIP 66 defines it, with r and s between 1 and
+--   the curve order minus 1.
+--
+-- * @LOW_S@: s is at most half the curve order.
+--
+-- * @STRICTENC@: the hash type byte is defined ('isSigHashUnknown').
+--
+-- * The 'SIGHASH_FORKID' flag is set exactly on the networks that have a
+--   fork id.
+--
+-- Nothing may follow the hash type byte.
+--
+-- Only the first rule is a consensus rule, and only since BIP 66. A block
+-- can therefore hold signatures that do not decode: one with a high S, one
+-- with an undefined hash type byte, and, before BIP 66 activated, one in a
+-- looser DER form. An input with such a signature fails
+-- 'Haskoin.Script.Standard.decodeInput', and has no
+-- 'Haskoin.Address.inputAddress'. This type is not a parser for the whole
+-- chain history. 'Haskoin.Crypto.Signature.decodeStrictSig' reads a
+-- signature under BIP 66 alone.
+--
+-- On Bitcoin Cash, a signature of 64 bytes followed by the hash type byte is
+-- a Schnorr signature, which Bitcoin Cash Node accepts in @OP_CHECKSIG@.
+-- This type only holds ECDSA signatures, so those do not decode either.
 data TxSignature
   = TxSignature
       { sig :: !Sig,
@@ -380,6 +469,8 @@ instance Marshal (Network, Ctx) TxSignature where
       empty = return TxSignatureEmpty
       decode = do
         sig <- marshalGet ctx
+        unless (isCanonicalHalfOrder ctx sig) $
+          fail "Non-canonical signature: S value is unnecessarily high"
         sh <- fromIntegral <$> getWord8
         when (isSigHashUnknown sh) $
           fail "Non-canonical signature: unknown hashtype byte"
@@ -406,7 +497,9 @@ encodeTxSig :: Network -> Ctx -> TxSignature -> ByteString
 encodeTxSig net ctx = runPutS . marshalPut (net, ctx)
 
 -- | Parse a signature with its hash type byte, under the rules listed at
--- 'TxSignature'. The empty string is 'TxSignatureEmpty'.
+-- 'TxSignature': strict DER, a low S, a defined hash type, and the fork id
+-- flag that the network asks for. The empty string is 'TxSignatureEmpty'. A
+-- signature that is valid by consensus alone does not decode.
 decodeTxSig :: Network -> Ctx -> ByteString -> Either String TxSignature
 decodeTxSig net ctx =
   runGetS $ do

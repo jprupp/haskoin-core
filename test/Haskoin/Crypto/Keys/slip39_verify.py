@@ -409,6 +409,29 @@ def check_wordlist():
     print("word list: ok")
 
 
+# Why each invalid vector is refused, by its number, from its description.
+# Vectors 21 to 35 are vectors 2 to 16 with 256-bit secrets.
+REFUSALS = {
+    2: "checksum",            # invalid checksum
+    3: "padding",             # invalid padding
+    5: "member count",        # one share of a 2-of-3 split
+    6: "common parameters",   # different identifiers
+    7: "common parameters",   # different iteration exponents
+    8: "common parameters",   # mismatching group thresholds
+    9: "common parameters",   # mismatching group counts
+    10: "group threshold",    # group threshold greater than the group count
+    11: "duplicate member",   # duplicate member indices
+    12: "member threshold",   # mismatching member thresholds
+    13: "digest",             # invalid digest
+    14: "group count",        # insufficient number of groups, case 1
+    15: "group count",        # insufficient number of groups, case 2
+    16: "member count",       # enough groups, too few members in one
+    39: "too short",          # insufficient length
+    40: "length",             # invalid master secret length
+}
+REFUSALS.update({number + 19: reason for number, reason in list(REFUSALS.items()) if number <= 16})
+
+
 def check_vectors():
     with open(os.path.join(DATA, "slip39_vectors.json")) as f:
         vectors = json.load(f)
@@ -418,9 +441,14 @@ def check_vectors():
             check(secret.hex() == secret_hex, description)
             check(xprv_of_seed(secret) == xprv, description + " (xprv)")
         else:
+            number = int(description.split(".")[0])
             try:
                 combine(mnemonics, b"TREZOR")
-            except Refused:
+            except Refused as refusal:
+                # A vector must be refused for the reason its description
+                # gives, not for any reason
+                check(str(refusal) == REFUSALS[number],
+                      f"{description} (refused for '{refusal}', not for '{REFUSALS[number]}')")
                 continue
             check(False, description + " (not refused)")
     # A share made by an early reference version with a passphrase outside

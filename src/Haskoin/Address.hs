@@ -64,6 +64,7 @@ module Haskoin.Address
     p2wpkhAddr,
     p2shAddr,
     p2wshAddr,
+    p2shP2wpkhAddr,
     inputAddress,
     outputAddress,
     addressToScript,
@@ -82,7 +83,7 @@ where
 
 import Control.Applicative (Alternative ((<|>)))
 import Control.DeepSeq (NFData)
-import Control.Monad (guard, when, (<=<))
+import Control.Monad (guard, mfilter, when, (<=<))
 import Crypto.Secp256k1
 import Data.Aeson (ToJSON (toJSON), withText)
 import Data.Aeson.Encoding (text)
@@ -99,6 +100,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Word (Word8)
 import GHC.Generics (Generic)
+import GHC.Read (expectP)
 import Haskoin.Address.Base58
 import Haskoin.Address.Bech32
 import Haskoin.Address.CashAddr
@@ -108,6 +110,17 @@ import Haskoin.Network.Data
 import Haskoin.Script.Common
 import Haskoin.Script.Standard
 import Haskoin.Util
+import Text.Read
+  ( Lexeme (Ident, Punc),
+    Read (readListPrec, readPrec),
+    ReadPrec,
+    lexP,
+    parens,
+    pfail,
+    prec,
+    readListPrecDefault,
+    reset,
+  )
 
 -- | Address format for Bitcoin and Bitcoin Cash.
 --
@@ -115,7 +128,18 @@ import Haskoin.Util
 -- Build those addresses with 'witnessAddress' and 'cashAddress', which check
 -- the version and the payload length, and which return the dedicated
 -- constructor when one exists. This keeps every address with a single
--- representation, so two equal addresses always compare equal.
+-- representation, so two addresses with the same text are always equal.
+--
+-- Two different addresses can still pay the same script. A token-aware
+-- CashAddr (type 2 or 3) locks coins with the script of its plain form (type
+-- 0 or 1), and the two are not equal. To find what an address was paid, look
+-- it up by the script of 'addressToOutput', not by the address.
+--
+-- A value does not know its network. 'textToAddr' and the JSON parser only
+-- return addresses of the network they are given. The constructors, 'Read'
+-- and the binary form do not check that, so a value from one of those can be
+-- of a kind its chain does not have. 'addrToText' gives 'Nothing' for such a
+-- value.
 data Address
   = -- | pay to public key hash (regular)
     PubKeyAddress
@@ -157,7 +181,40 @@ data Address
         bytes :: !ByteString
       }
   deriving
-    (Eq, Ord, Generic, Show, Read, Hashable, NFData)
+    (Eq, Ord, Generic, Show, Hashable, NFData)
+
+-- | Reads the text that 'Show' writes. The two generic kinds go through
+-- 'witnessAddress' and 'cashAddress', so a version or a length that those
+-- refuse does not read, and neither does a value that has a dedicated
+-- constructor.
+instance Read Address where
+  readPrec =
+    parens . prec 11 $ do
+      Ident name <- lexP
+      expectP (Punc "{")
+      addr <- case name of
+        "PubKeyAddress" -> PubKeyAddress <$> field "hash160"
+        "ScriptAddress" -> ScriptAddress <$> field "hash160"
+        "WitnessPubKeyAddress" -> WitnessPubKeyAddress <$> field "hash160"
+        "WitnessScriptAddress" -> WitnessScriptAddress <$> field "hash256"
+        "Script32Address" -> Script32Address <$> field "hash256"
+        "OtherWitnessAddress" -> generic isWitnessAddress witnessAddress
+        "OtherCashAddress" -> generic isCashAddress cashAddress
+        _ -> pfail
+      expectP (Punc "}")
+      return addr
+    where
+      field :: (Read a) => String -> ReadPrec a
+      field name = do
+        expectP (Ident name)
+        expectP (Punc "=")
+        reset readPrec
+      generic isKind build = do
+        v <- field "version"
+        expectP (Punc ",")
+        b <- field "bytes"
+        maybe pfail return (mfilter isKind (build v b))
+  readListPrec = readListPrecDefault
 
 -- | Match a SegWit address with a witness version other than zero. Use
 -- 'witnessAddress' to build one.
@@ -422,6 +479,11 @@ hashBytes = runPutS . serialize
 -- has no text form on the network, such as a SegWit address on Bitcoin Cash,
 -- is a programming error and throws an 'error'. A loud failure is better than
 -- a silent @null@ in the output.
+--
+-- An address from 'outputAddress', 'scriptToAddress', 'scriptToAddressBS',
+-- 'textToAddr' or the JSON parser of the same network always has a text form
+-- there. One from a constructor or from the binary form may not. Check such
+-- a value with 'addrToText' before encoding it.
 instance MarshalJSON Network Address where
   marshalValue net = toJSON . addrTextOrError net
   marshalEncoding net = text . addrTextOrError net
@@ -477,6 +539,16 @@ addrToCash net = \case
   _ -> Nothing
 
 -- | Parse 'Base58', 'Bech32' or 'CashAddr' address, depending on network.
+--
+-- The text must be the address and nothing else. White space around it is
+-- refused, where Bitcoin Core skips it around a 'Base58' address, so trim
+-- text that comes from a user.
+--
+-- A result is a well-formed address of the network. It is not always one
+-- that can be paid. A CashAddr of a type above 3, or with a hash that is not
+-- 20 or 32 bytes long, decodes to an address that has no output script, and
+-- Bitcoin Cash Node refuses it as a destination. 'addressToOutput' tells:
+-- it gives 'Nothing' for those.
 textToAddr :: Network -> Text -> Maybe Address
 textToAddr net txt =
   cashToAddr net txt <|> bech32ToAddr net txt <|> base58ToAddr net txt
@@ -539,7 +611,7 @@ pubKeyWitnessAddr ctx pk = do
 pubKeyCompatWitnessAddr :: Ctx -> PublicKey -> Maybe Address
 pubKeyCompatWitnessAddr ctx pk = do
   guard pk.compress
-  return . payToScriptAddress ctx . PayWitnessPKHash $ pubKeyHash ctx pk
+  return . p2shP2wpkhAddr $ pubKeyHash ctx pk
 
 -- | Obtain a standard pay-to-public-key-hash (P2PKH) address from a 'Hash160'.
 p2pkhAddr :: Hash160 -> Address
@@ -558,23 +630,60 @@ p2shAddr = ScriptAddress
 p2wshAddr :: Hash256 -> Address
 p2wshAddr = WitnessScriptAddress
 
+-- | Obtain the backwards-compatible SegWit P2SH-P2WPKH address of the
+-- 'Hash160' of a compressed public key. It is the pay-to-script-hash address
+-- of the witness program @OP_0@ followed by the push of the 20-byte hash,
+-- which is 22 bytes long.
+p2shP2wpkhAddr :: Hash160 -> Address
+p2shP2wpkhAddr h =
+  p2shAddr . addressHash $ B.pack [0x00, 0x14] <> hashBytes h
+
 -- | Compute a standard pay-to-script-hash (P2SH) address for an output script.
-payToScriptAddress :: Ctx -> ScriptOutput -> Address
-payToScriptAddress ctx = p2shAddr . addressHash . marshal ctx
+--
+-- Fails when the redeem script is longer than 'maxRedeemScriptSize' (520)
+-- bytes. Consensus limits a push to that size, and the redeem script is a
+-- push of the spending input, so coins sent to such an address could never be
+-- spent. A multisig of compressed keys fits up to 15 keys. Use
+-- 'payToWitnessScriptAddress' or 'payToNestedScriptAddress' for more.
+--
+-- Also fails for a value that 'encodeOutput' cannot write, such as a multisig
+-- that requires more signatures than it has keys.
+payToScriptAddress :: Ctx -> ScriptOutput -> Either String Address
+payToScriptAddress ctx =
+  fmap p2shAddr . p2shScriptHash <=< encodeOutput ctx
 
 -- | Compute a SegWit pay-to-witness-script-hash (P2WSH) address for an output
 -- script.
-payToWitnessScriptAddress :: Ctx -> ScriptOutput -> Address
-payToWitnessScriptAddress ctx = p2wshAddr . sha256 . marshal ctx
+--
+-- Fails when the witness script is longer than 'maxWitnessScriptSize'
+-- (10,000) bytes, which consensus could never execute, and for a value that
+-- 'encodeOutput' cannot write. The relay policy of Bitcoin Core is stricter
+-- than consensus: it does not relay the spend of a witness script above 3,600
+-- bytes, nor one with an uncompressed key. This function does not check
+-- either.
+payToWitnessScriptAddress :: Ctx -> ScriptOutput -> Either String Address
+payToWitnessScriptAddress ctx =
+  fmap p2wshAddr . p2wshScriptHash <=< encodeOutput ctx
 
--- | Compute a backwards-compatible SegWit P2SH-P2WSH address.
-payToNestedScriptAddress :: Ctx -> ScriptOutput -> Address
-payToNestedScriptAddress ctx =
-  p2shAddr . addressHash . marshal ctx . PayWitnessScriptHash . sha256 . marshal ctx
+-- | Compute a backwards-compatible SegWit P2SH-P2WSH address: the
+-- pay-to-script-hash address of the witness program of the script. Fails as
+-- 'payToWitnessScriptAddress' does.
+payToNestedScriptAddress :: Ctx -> ScriptOutput -> Either String Address
+payToNestedScriptAddress ctx out = do
+  h <- p2wshScriptHash =<< encodeOutput ctx out
+  payToScriptAddress ctx (PayWitnessScriptHash h)
 
 -- | Get the output script that locks coins sent to an address. Token-aware
 -- CashAddr addresses use the same script as their plain counterparts. Other
 -- CashAddr kinds have no known script, so the result is 'Nothing'.
+--
+-- The function does not know the network. It gives the script of a SegWit
+-- address or of a 256-bit script hash address whatever chain the caller
+-- works on. An address read with 'textToAddr' or from JSON always belongs to
+-- its network. An address built with a constructor, or read from its binary
+-- form, may not: check it with 'addrToText' of the network before paying it.
+-- On Bitcoin, anyone who sees the redeem script can spend the script of a
+-- 'Script32Address', and Bitcoin Cash does not have SegWit.
 addressToOutput :: Address -> Maybe ScriptOutput
 addressToOutput =
   \case
@@ -605,39 +714,65 @@ addressToScript ctx addr =
 addressToScriptBS :: Ctx -> Address -> Maybe ByteString
 addressToScriptBS ctx addr = (runPutS . serialize) <$> addressToScript ctx addr
 
--- | Decode an output script into an 'Address' if it has such representation.
-scriptToAddress :: Ctx -> Script -> Either String Address
-scriptToAddress ctx =
-  maybeToEither e . outputAddress ctx <=< decodeOutput ctx
+-- | Decode an output script into the 'Address' it has on a network, if it
+-- has one there. See 'outputAddress'.
+scriptToAddress :: Network -> Ctx -> Script -> Either String Address
+scriptToAddress net ctx =
+  maybeToEither e . outputAddress net ctx <=< decodeOutput ctx
   where
     e = "Could not decode address"
 
--- | Decode a serialized script into an 'Address'.
-scriptToAddressBS :: Ctx -> ByteString -> Either String Address
-scriptToAddressBS ctx =
-  maybeToEither e . outputAddress ctx <=< unmarshal ctx
+-- | Decode a serialized script into the 'Address' it has on a network, if it
+-- has one there. See 'outputAddress'.
+scriptToAddressBS :: Network -> Ctx -> ByteString -> Either String Address
+scriptToAddressBS net ctx =
+  maybeToEither e . outputAddress net ctx <=< unmarshal ctx
   where
     e = "Could not decode address"
 
--- | Get the 'Address' of a 'ScriptOutput'. A pay-to-public-key output has no
--- address. Its coins are not spendable with the input script of the P2PKH
--- address of the same key, so reporting that address would mislead.
-outputAddress :: Ctx -> ScriptOutput -> Maybe Address
-outputAddress _ =
+-- | Get the 'Address' that a 'ScriptOutput' has on a network.
+--
+-- A pay-to-public-key output has no address. Its coins are not spendable with
+-- the input script of the P2PKH address of the same key, so reporting that
+-- address would mislead.
+--
+-- An output only has an address on a network that defines its kind. A
+-- witness program has none on a network without SegWit, such as Bitcoin
+-- Cash. A 256-bit script hash (@OP_HASH256@, a push of 32 bytes, @OP_EQUAL@)
+-- has one on the Bitcoin Cash networks only. On Bitcoin that script is a
+-- plain hash lock, which Bitcoin Core reports as non-standard. Every address
+-- this function returns has a text form on the network, so 'addrToText' and
+-- the JSON encoder succeed for it.
+outputAddress :: Network -> Ctx -> ScriptOutput -> Maybe Address
+outputAddress net _ =
   \case
     PayPKHash h -> Just $ PubKeyAddress h
     PayScriptHash h -> Just $ ScriptAddress h
-    PayWitnessPKHash h -> Just $ WitnessPubKeyAddress h
-    PayWitnessScriptHash h -> Just $ WitnessScriptAddress h
-    PayWitness v d -> witnessAddress v d
-    PayScript32Hash h -> Just $ Script32Address h
+    PayWitnessPKHash h -> witness $ Just (WitnessPubKeyAddress h)
+    PayWitnessScriptHash h -> witness $ Just (WitnessScriptAddress h)
+    PayWitness v d -> witness $ witnessAddress v d
+    PayScript32Hash h -> script32 $ Just (Script32Address h)
     _ -> Nothing
+  where
+    -- SegWit addresses exist where the network has a Bech32 prefix.
+    witness a = guard (isJust net.bech32Prefix) >> a
+    -- Pay-to-script-hash with a 256-bit hash exists where the network has
+    -- CashAddr.
+    script32 a = guard (isJust net.cashAddrPrefix) >> a
 
--- | Infer the 'Address' of a 'ScriptInput'.
+-- | Infer the 'Address' that a 'ScriptInput' spends from. It is the address
+-- of the public key or of the redeem script that the input carries.
+--
+-- 'decodeInput' only returns a redeem script in the form 'encodeOutput'
+-- writes, so for a decoded input this is the hash of the redeem script bytes
+-- of the input. There is no address for a redeem script above
+-- 'maxRedeemScriptSize' bytes, since no valid input can carry one. The
+-- function does not look at the output being spent, so it is a guess that a
+-- caller should confirm against that output when it has it.
 inputAddress :: Ctx -> ScriptInput -> Maybe Address
 inputAddress ctx =
   \case
     (RegularInput (SpendPKHash _ key)) -> Just $ pubKeyAddr ctx key
-    (ScriptHashInput _ rdm) -> Just $ payToScriptAddress ctx rdm
-    (NestedWitnessInput rdm) -> Just $ payToScriptAddress ctx rdm
+    (ScriptHashInput _ rdm) -> eitherToMaybe $ payToScriptAddress ctx rdm
+    (NestedWitnessInput rdm) -> eitherToMaybe $ payToScriptAddress ctx rdm
     _ -> Nothing

@@ -65,17 +65,24 @@ module Haskoin.Network.Common
     stringToCommand,
     putVarInt,
     getVarIntList,
+    getVarIntListMax,
     putVarIntList,
     getVarIntBytes,
     putVarIntBytes,
     maxListSize,
+    maxInvSize,
+    maxAddrSize,
+    maxHeadersSize,
+    maxLocatorSize,
+    maxFilterHashes,
   )
 where
 
 import Control.DeepSeq
-import Control.Monad (forM_, liftM2, replicateM, unless, when)
+import Control.Monad (forM_, liftM2, unless, when)
 import Data.Binary (Binary (..))
 import Data.Bits (shiftL, shiftR, (.&.), (.|.))
+import Data.Int (Int32, Int64)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as B
 import Data.Bytes.Get
@@ -102,8 +109,9 @@ newtype Addr = Addr
   deriving (Eq, Show, Generic)
   deriving newtype (NFData)
 
+-- | A message with more than 'maxAddrSize' entries fails the parse.
 instance Serial Addr where
-  deserialize = Addr <$> getVarIntList action
+  deserialize = Addr <$> getVarIntListMax "addr" maxAddrSize action
     where
       action = liftM2 (,) getWord32le deserialize
 
@@ -193,7 +201,10 @@ data NetworkAddressV2 = NetworkAddressV2
 
 -- | An entry fails to parse when its address is longer than 'maxAddrV2Size'
 -- or does not have the length its network requires. Entries of unknown
--- networks are kept with their bytes.
+-- networks are kept with their bytes. So are Tor v2 entries, whatever their
+-- length: BIP 155 says that clients "MUST ignore them on receive", and
+-- Bitcoin Core skips them without failing the message. A caller must not
+-- relay a Tor v2 entry.
 instance Serial NetworkAddressV2 where
   deserialize = do
     time <- getWord32le
@@ -203,7 +214,10 @@ instance Serial NetworkAddressV2 where
     when (len > maxAddrV2Size) $
       fail ("addrv2 address too long: " ++ show len)
     address <- getByteString (fromIntegral len)
-    forM_ (addressNetworkLength network) $ \expected ->
+    let required
+          | network == AddrTorV2 = Nothing
+          | otherwise = addressNetworkLength network
+    forM_ required $ \expected ->
       unless (B.length address == expected) $
         fail $
           unwords
@@ -240,8 +254,10 @@ newtype AddrV2 = AddrV2
   deriving (Eq, Show, Generic)
   deriving newtype (NFData)
 
+-- | A message with more than 'maxAddrSize' entries fails the parse, as BIP
+-- 155 asks ("Clients SHOULD reject messages with more addresses").
 instance Serial AddrV2 where
-  deserialize = AddrV2 <$> getVarIntList deserialize
+  deserialize = AddrV2 <$> getVarIntListMax "addrv2" maxAddrSize deserialize
   serialize (AddrV2 xs) = putVarIntList serialize xs
 
 instance Binary AddrV2 where
@@ -252,12 +268,20 @@ instance Serialize AddrV2 where
   get = deserialize
   put = serialize
 
--- | Prefix of an IPv4-mapped IPv6 address.
+-- | Prefix of an IPv4-mapped IPv6 address, @::ffff:0:0/96@.
 ipv4Prefix :: ByteString
 ipv4Prefix = B.replicate 10 0 <> B.pack [0xff, 0xff]
 
+-- | Prefix of a Tor v2 address wrapped in IPv6 by OnionCat,
+-- @fd87:d87e:eb43::/48@.
+onionCatPrefix :: ByteString
+onionCatPrefix = B.pack [0xfd, 0x87, 0xd8, 0x7e, 0xeb, 0x43]
+
 -- | The 'addrv2' form of an 'addr' entry. An IPv4-mapped address becomes an
--- 'AddrIPv4' entry with four address bytes. Any other address is IPv6.
+-- 'AddrIPv4' entry with four address bytes, and an OnionCat address an
+-- 'AddrTorV2' entry with ten, since BIP 155 forbids sending either under the
+-- IPv6 network. Any other address is IPv6. Tor v2 is no longer in use, and
+-- BIP 155 says such entries must not be relayed.
 toNetworkAddressV2 :: NetworkAddressTime -> NetworkAddressV2
 toNetworkAddressV2 (t, NetworkAddress s (HostAddress bs)) =
   NetworkAddressV2 {time = t, services = s, network, address, port}
@@ -268,15 +292,26 @@ toNetworkAddressV2 (t, NetworkAddress s (HostAddress bs)) =
         .|. fromIntegral (B.index bs 17)
     (network, address)
       | B.take 12 ip == ipv4Prefix = (AddrIPv4, B.drop 12 ip)
+      | B.take 6 ip == onionCatPrefix = (AddrTorV2, B.drop 6 ip)
       | otherwise = (AddrIPv6, ip)
 
 -- | The 'addr' form of an 'addrv2' entry. Only IPv4 and IPv6 entries have
--- one. Tor, I2P and CJDNS addresses do not fit the 'addr' message.
+-- one. Tor, I2P and CJDNS addresses do not fit the 'addr' message. An IPv6
+-- entry that holds an IPv4-mapped or an OnionCat address has none either:
+-- BIP 155 says to ignore those on receive, and Bitcoin Core reads them as
+-- invalid addresses, because the same peer would otherwise be known under
+-- two networks. An entry whose address does not have the length of its
+-- network has no 'addr' form.
 fromNetworkAddressV2 :: NetworkAddressV2 -> Maybe NetworkAddressTime
 fromNetworkAddressV2 a =
   case a.network of
-    AddrIPv4 -> Just (entry (ipv4Prefix <> a.address))
-    AddrIPv6 -> Just (entry a.address)
+    AddrIPv4
+      | B.length a.address == 4 -> Just (entry (ipv4Prefix <> a.address))
+    AddrIPv6
+      | B.length a.address == 16
+          && B.take 12 a.address /= ipv4Prefix
+          && B.take 6 a.address /= onionCatPrefix ->
+          Just (entry a.address)
     _ -> Nothing
   where
     entry ip = (a.time, NetworkAddress a.services (HostAddress (ip <> portBytes)))
@@ -340,8 +375,9 @@ newtype GetData = GetData
   deriving (Eq, Show, Generic)
   deriving newtype (NFData)
 
+-- | A message with more than 'maxInvSize' entries fails the parse.
 instance Serial GetData where
-  deserialize = GetData <$> getVarIntList deserialize
+  deserialize = GetData <$> getVarIntListMax "getdata" maxInvSize deserialize
 
   serialize (GetData xs) = do
     putVarInt $ length xs
@@ -365,8 +401,9 @@ newtype Inv = Inv
   deriving (Eq, Show, Generic)
   deriving newtype (NFData)
 
+-- | A message with more than 'maxInvSize' entries fails the parse.
 instance Serial Inv where
-  deserialize = Inv <$> getVarIntList deserialize
+  deserialize = Inv <$> getVarIntListMax "inv" maxInvSize deserialize
 
   serialize (Inv xs) = do
     putVarInt $ length xs
@@ -496,12 +533,17 @@ data NetworkAddress = NetworkAddress
   }
   deriving (Eq, Show, Generic, NFData)
 
+-- | The socket address of a 'HostAddress': IPv4 for an IPv4-mapped address,
+-- IPv6 otherwise.
 hostToSockAddr :: HostAddress -> SockAddr
 hostToSockAddr (HostAddress bs) =
   case runGetS getSockAddr bs of
     Left e -> error e
     Right x -> x
 
+-- | The 'HostAddress' of an IPv4 or IPv6 socket address. Any other kind of
+-- socket address, such as a Unix socket, is an error: check the address
+-- first when it does not come from a TCP connection.
 sockToHostAddress :: SockAddr -> HostAddress
 sockToHostAddress = HostAddress . runPutS . putSockAddr
 
@@ -802,7 +844,52 @@ getVarIntList element = do
   VarInt count <- deserialize
   when (count > maxListSize) $
     fail ("List count too large: " ++ show count)
-  replicateM (fromIntegral count) element
+  getElements count element
+
+-- | Read the given number of elements, in a loop that keeps nothing but the
+-- elements read so far.
+getElements :: (MonadGet m) => Word64 -> m a -> m [a]
+getElements count element = go count []
+  where
+    go 0 acc = return (reverse acc)
+    go n acc = do
+      x <- element
+      go (n - 1) (x : acc)
+
+-- | Read a list like 'getVarIntList', and fail when its count is above the
+-- given limit. The count is checked right after it is read, before any
+-- element. The name is that of the message, for the error text.
+getVarIntListMax :: (MonadGet m) => String -> Word64 -> m a -> m [a]
+getVarIntListMax name limit element = do
+  VarInt count <- deserialize
+  when (count > limit) $
+    fail (name ++ ": too many entries: " ++ show count ++ ", the limit is " ++ show limit)
+  getElements count element
+
+-- | Largest number of entries in an @inv@ or a @getdata@ message. Bitcoin
+-- Core and Bitcoin Cash Node punish a peer that sends more (@MAX_INV_SZ@).
+maxInvSize :: Word64
+maxInvSize = 50000
+
+-- | Largest number of entries in an @addr@ or an @addrv2@ message
+-- (@MAX_ADDR_TO_SEND@, and BIP 155).
+maxAddrSize :: Word64
+maxAddrSize = 1000
+
+-- | Largest number of headers in a @headers@ message
+-- (@MAX_HEADERS_RESULTS@).
+maxHeadersSize :: Word64
+maxHeadersSize = 2000
+
+-- | Largest number of hashes in the locator of a @getheaders@ or a
+-- @getblocks@ message (@MAX_LOCATOR_SZ@).
+maxLocatorSize :: Word64
+maxLocatorSize = 101
+
+-- | Largest number of filter hashes in a @cfheaders@ message (BIP 157:
+-- "FilterHashesLength MUST NOT be greater than 2,000").
+maxFilterHashes :: Word64
+maxFilterHashes = 2000
 
 -- | Write a list with its element count as a 'VarInt' in front.
 putVarIntList :: (MonadPut m) => (a -> m ()) -> [a] -> m ()
@@ -811,13 +898,17 @@ putVarIntList element xs = do
   mapM_ element xs
 
 -- | Read bytes that start with their count as a 'VarInt'. A count above
--- 'maxListSize' fails the parse.
+-- 'maxListSize' fails the parse. A count of zero gives the one shared empty
+-- byte string, so that a long run of empty items, as a peer can put in a
+-- witness, costs a list cell each and no more.
 getVarIntBytes :: (MonadGet m) => m ByteString
 getVarIntBytes = do
   VarInt count <- deserialize
   when (count > maxListSize) $
     fail ("Byte count too large: " ++ show count)
-  getByteString (fromIntegral count)
+  if count == 0
+    then return B.empty
+    else getByteString (fromIntegral count)
 
 -- | Write bytes with their count as a 'VarInt' in front.
 putVarIntBytes :: (MonadPut m) => ByteString -> m ()
@@ -851,22 +942,27 @@ maxUserAgentLength = 256
 -- the first message it will send is a 'Version' message. The other node
 -- will similarly respond with it's own 'Version' message.
 data Version = Version
-  { -- | protocol version
-    version :: !Word32,
+  { -- | protocol version. Signed, as @int nVersion@ in Bitcoin Core, so a
+    -- peer that sends ffffffff has version -1 and not a huge one.
+    version :: !Int32,
     -- | features supported by this connection
     services :: !Word64,
-    -- | unix timestamp
-    timestamp :: !Word64,
+    -- | unix timestamp, signed as @int64_t nTime@ in Bitcoin Core
+    timestamp :: !Int64,
     -- | network address of remote node
     addrRecv :: !NetworkAddress,
     -- | network address of sending node
     addrSend :: !NetworkAddress,
     -- | random nonce to detect connection to self
     nonce :: !Word64,
-    -- | user agent string
+    -- | user agent string: up to 'maxUserAgentLength' bytes that the peer
+    -- chose. They are not checked to be text. Bitcoin Core passes them
+    -- through @SanitizeString@ before it logs or shows them, and a caller
+    -- should do the same.
     userAgent :: !VarString,
-    -- | height of the last block in sending node
-    startHeight :: !Word32,
+    -- | height of the last block in sending node, signed as
+    -- @int starting_height@ in Bitcoin Core
+    startHeight :: !Int32,
     -- | relay transactions flag (BIP-37)
     relay :: !Bool
   }
@@ -878,14 +974,14 @@ data Version = Version
 instance Serial Version where
   deserialize =
     Version
-      <$> getWord32le
+      <$> (fromIntegral <$> getWord32le)
       <*> getWord64le
-      <*> getWord64le
+      <*> (fromIntegral <$> getWord64le)
       <*> deserialize
       <*> deserialize
       <*> getWord64le
       <*> userAgent
-      <*> getWord32le
+      <*> (fromIntegral <$> getWord32le)
       <*> (go =<< isEmpty)
     where
       go True = return True
@@ -897,14 +993,14 @@ instance Serial Version where
         return ua
 
   serialize (Version v s t ar as n ua sh r) = do
-    putWord32le v
+    putWord32le (fromIntegral v)
     putWord64le s
-    putWord64le t
+    putWord64le (fromIntegral t)
     serialize ar
     serialize as
     putWord64le n
     serialize ua
-    putWord32le sh
+    putWord32le (fromIntegral sh)
     putBool r
 
 instance Binary Version where
@@ -975,10 +1071,10 @@ data MessageCommand
 instance Show MessageCommand where
   showsPrec _ = shows . commandToString
 
+-- | Reads what 'Show' writes, for any bytes: the name as a byte string
+-- literal. A 'Reject' message can name a command with bytes outside ASCII.
 instance Read MessageCommand where
-  readPrec = do
-    String str <- lexP
-    return (stringToCommand (cs str))
+  readPrec = stringToCommand <$> readPrec
 
 -- | A command is twelve bytes on the wire: its name in printable ASCII, then
 -- NUL bytes. The parse fails for a byte outside printable ASCII in the name or

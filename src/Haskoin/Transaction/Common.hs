@@ -36,6 +36,7 @@ module Haskoin.Transaction.Common
     txHashToHex,
     nosigTxHash,
     hasWitness,
+    decodeTx,
     parseLegacyTx,
     nullOutPoint,
   )
@@ -180,26 +181,40 @@ txWeight tx =
 -- | The virtual size of the transaction in virtual bytes, as BIP 141
 -- defines it: the weight divided by four, rounded up. Fees are charged by
 -- virtual byte.
+--
+-- Bitcoin Core charges a transaction that is dense in signature operations
+-- for 5 virtual bytes per operation when that is more than this size
+-- (@GetVirtualTransactionSize@ in @policy/policy.cpp@). This function does
+-- not count signature operations.
 txVirtualSize :: Tx -> Int
 txVirtualSize tx = (txWeight tx + 3) `div` 4
 
 -- | Whether any input of the transaction has a witness, as @HasWitness@
 -- tells in Bitcoin Core. A transaction whose stacks are all empty has
--- none.
+-- none. Only the stacks of the inputs count: the witness list has one
+-- stack per input, and a stack beyond the inputs belongs to no input and
+-- is not written.
 hasWitness :: Tx -> Bool
-hasWitness = any (not . null) . (.witness)
+hasWitness tx = any (not . null) (take (length tx.inputs) tx.witness)
+
+-- | Read a transaction from bytes that hold the transaction and nothing
+-- else, as @DecodeHexTx@ requires in Bitcoin Core. 'deserialize' reads a
+-- transaction from the front of a longer input, as a block needs it to,
+-- and so it does not notice bytes that follow. Use this function for a
+-- transaction that arrives on its own.
+decodeTx :: ByteString -> Either String Tx
+decodeTx = runGetS $ do
+  tx <- deserialize
+  done <- isEmpty
+  unless done $ fail "Trailing bytes after transaction"
+  return tx
 
 -- | A transaction from its hex. The hex must hold the transaction and
 -- nothing else, as @DecodeHexTx@ requires in Bitcoin Core.
 instance IsString Tx where
   fromString =
-    fromMaybe e . (eitherToMaybe . runGetS whole <=< decodeHex) . cs
+    fromMaybe e . (eitherToMaybe . decodeTx <=< decodeHex) . cs
     where
-      whole = do
-        tx <- deserialize
-        done <- isEmpty
-        unless done $ fail "Trailing bytes after transaction"
-        return tx
       e = error "Could not read transaction from hex string"
 
 instance Serial Tx where
@@ -302,14 +317,18 @@ parseWitnessData n = replicateM n (getVarIntList getVarIntBytes)
 putWitnessData :: (MonadPut m) => WitnessData -> m ()
 putWitnessData = mapM_ (putVarIntList putVarIntBytes)
 
+-- | The witness of the JSON form has one stack per input, or none at all:
+-- a stack without an input would not be part of the transaction.
 instance FromJSON Tx where
-  parseJSON = withObject "Tx" $ \o ->
-    Tx
-      <$> o .: "version"
-      <*> o .: "inputs"
-      <*> o .: "outputs"
-      <*> (mapM (mapM f) =<< o .: "witnessdata")
-      <*> o .: "locktime"
+  parseJSON = withObject "Tx" $ \o -> do
+    version <- o .: "version"
+    inputs <- o .: "inputs"
+    outputs <- o .: "outputs"
+    witness <- mapM (mapM f) =<< o .: "witnessdata"
+    locktime <- o .: "locktime"
+    unless (null witness || length witness == length inputs) $
+      fail "The witness data must have one stack per input, or none"
+    return Tx {..}
     where
       f = maybe mzero return . decodeHex
 

@@ -11,6 +11,11 @@
 -- Portability : POSIX
 --
 -- Mnemonic keys (BIP-39). Only English dictionary.
+--
+-- The sentence and the passphrase may come from an untrusted source, so the
+-- work done on them is bounded. A word longer than any word of the list is
+-- never normalised, and a passphrase must be in the Stream-Safe Text Format
+-- of Unicode. No error text holds a word of the sentence.
 module Haskoin.Crypto.Keys.Mnemonic
   ( -- * Mnemonic Sentences
     Entropy,
@@ -32,10 +37,10 @@ import Data.Bits (shiftL, shiftR)
 import Data.ByteArray qualified as BA
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as B
+import Data.Char (isAscii)
 import Data.List
 import Data.Map.Strict qualified as M
 import Data.Maybe
-import Data.String.Conversions (cs)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as E
@@ -43,18 +48,29 @@ import Data.Text.Normalize (NormalizationMode (NFKD), normalize)
 import Data.Vector (Vector, (!))
 import Data.Vector qualified as V
 import Haskoin.Util
+import Unicode.Char qualified as UC
 
 -- | Random data used to create a mnemonic sentence. Use a good entropy source.
 -- You will get your coins stolen if you don't. You have been warned.
+--
+-- This is a plain 'ByteString'. Its 'Show' instance prints the bytes, so
+-- keep it out of logs and error messages.
 type Entropy = ByteString
 
 -- | Human-readable mnemonic sentence.
+--
+-- This is a plain 'Text', and so is 'Passphrase'. The compiler does not
+-- tell the two apart, so mind the order of the arguments of
+-- 'mnemonicToSeed': the passphrase comes first. The 'Show' instance prints
+-- the sentence in full, so keep it out of logs and error messages.
 type Mnemonic = Text
 
--- | Optional passphrase for mnemnoic sentence.
+-- | Optional passphrase for mnemnoic sentence. It may hold any text that
+-- is in the Stream-Safe Text Format of Unicode, see 'mnemonicToSeed'.
 type Passphrase = Text
 
--- | Seed for a private key from a mnemonic sentence.
+-- | Seed for a private key from a mnemonic sentence. A plain 'ByteString',
+-- which 'Show' prints in full.
 type Seed = ByteString
 
 -- | Mnemonic key checksum.
@@ -75,6 +91,20 @@ maxEntropyBytes = 32
 -- | Word counts of the sentences BIP39 allows, for 128 to 256 bits of entropy.
 validWordCounts :: [Int]
 validWordCounts = [12, 15, 18, 21, 24]
+
+-- | The most letters of a word of the English list. NFKD never makes a
+-- text shorter, so a word of the sentence with more characters than this
+-- cannot be a word of the list, whatever its normal form is.
+maxWordLength :: Int
+maxWordLength = 8
+
+-- | The most combining characters a passphrase may hold in a row once it
+-- is normalised: the limit of the Stream-Safe Text Format of Unicode,
+-- definition UAX15-D3 of Unicode Standard Annex 15. The annex chose 30 as
+-- "significantly beyond what is required for any linguistic or technical
+-- usage".
+maxCombiningRun :: Int
+maxCombiningRun = 30
 
 -- | Provide initial 'Entropy' as a 'ByteString' of 16 to 32 bytes, in steps
 -- of 4 bytes, as BIP39 allows. Output a 'Mnemonic' sentence of 12 to 24 words.
@@ -97,8 +127,15 @@ toMnemonic ent = do
 -- 'mnemonicToSeed'. This outputs the original 'Entropy' used to generate a
 -- 'Mnemonic' sentence.
 --
--- The sentence is NFKD-normalised before its words are looked up, as BIP39
--- requires. Only sentences of 12, 15, 18, 21 or 24 words are accepted.
+-- Each word is NFKD-normalised before it is looked up, as BIP39 requires.
+-- Only sentences of 12, 15, 18, 21 or 24 words are accepted. The words may
+-- be separated by any amount of white space.
+--
+-- The sentence can come from an untrusted source, so the work is linear in
+-- its length: the words are counted first, and a word longer than any word
+-- of the list is refused without being normalised. An error names the
+-- position of a wrong word, counted from 1, and never the word itself or a
+-- checksum value, since the sentence is a secret and errors end up in logs.
 fromMnemonic :: Mnemonic -> Either String Entropy
 fromMnemonic ms = do
   when (T.null ms) $
@@ -111,14 +148,15 @@ fromMnemonic ms = do
       ms_cs_num = numCS cs_len ms_cs
       ent_cs_num = numCS cs_len $ calcCS cs_len ms_ent
   when (ent_cs_num /= ms_cs_num) $
-    Left $
-      "fromMnemonic: checksum failed: " ++ sh ent_cs_num ms_cs_num
+    Left "fromMnemonic: checksum failed"
   return ms_ent
   where
-    ms_words = T.words (normalize NFKD ms)
+    -- The sentence is split before anything is normalised. White space
+    -- stays white space under NFKD and nothing is reordered across it, so
+    -- the words are those of the normalised sentence.
+    ms_words = T.words ms
     word_count = length ms_words
     (ent_len, cs_len) = (word_count * 11) `quotRem` 32
-    sh cs_a cs_b = show cs_a ++ " /= " ++ show cs_b
 
 -- | Compute 'Checksum'.
 calcCS :: Int -> Entropy -> Checksum
@@ -132,36 +170,103 @@ numCS len =
       8 -> id
       x -> flip shiftR x
 
--- | Turn an arbitrary sequence of characters into a 512-bit 'Seed'. Use
--- 'mnemonicToSeed' to get a seed from a 'Mnemonic' sentence. Both inputs are
--- NFKD-normalised first, as BIP39 requires.
-anyToSeed :: Passphrase -> Mnemonic -> Seed
-anyToSeed pf ms =
+-- | The 512-bit 'Seed' of a sentence and a passphrase that are both in
+-- NFKD already: PBKDF2-HMAC-SHA512 of the sentence, salted with "mnemonic"
+-- followed by the passphrase, 2048 rounds.
+normalizedToSeed :: Passphrase -> Mnemonic -> Seed
+normalizedToSeed pf ms =
   fastPBKDF2_SHA512
     pbkdfParams
-    (E.encodeUtf8 (normalize NFKD ms))
-    ("mnemonic" `mappend` E.encodeUtf8 (normalize NFKD pf))
+    (E.encodeUtf8 ms)
+    ("mnemonic" `mappend` E.encodeUtf8 pf)
 
 -- | Get a 512-bit 'Seed' from a 'Mnemonic' sentence. Will validate checksum.
 -- 'Passphrase' can be used to protect the 'Mnemonic'. Use an empty string as
 -- 'Passphrase' if none is required. The sentence and the passphrase are
 -- NFKD-normalised as BIP39 requires, so a passphrase with accented letters
 -- gives the same seed here as in other wallets.
+--
+-- The passphrase can be of any length. It is refused when its normal form
+-- would hold more than 30 combining characters in a row, which no real
+-- text does. That is the limit of the Stream-Safe Text Format of Unicode
+-- (Unicode Standard Annex 15, UAX15-D3). Without it the time to normalise
+-- such a run grows with the square of its length, so that 32 KB of text
+-- from an untrusted source took half a minute.
 mnemonicToSeed :: Passphrase -> Mnemonic -> Either String Seed
 mnemonicToSeed pf ms = do
   ent <- fromMnemonic ms
+  -- The sentence is written again from its entropy, so it is in lower-case
+  -- ASCII with single spaces, which is its NFKD form
   mnm <- toMnemonic ent
-  return $ anyToSeed pf mnm
+  pf_nfkd <- normalizePassphrase pf
+  return $ normalizedToSeed pf_nfkd mnm
 
--- | Get indices of words in word list.
+-- | The NFKD form of a passphrase, or an error when the passphrase is not
+-- in the Stream-Safe Text Format.
+normalizePassphrase :: Passphrase -> Either String Passphrase
+normalizePassphrase pf
+  -- NFKD leaves ASCII as it is
+  | T.all isAscii pf = Right pf
+  | exceedsCombiningRun maxCombiningRun pf =
+      Left $
+        "mnemonicToSeed: the passphrase has more than "
+          ++ show maxCombiningRun
+          ++ " combining characters in a row"
+  | otherwise = Right (normalize NFKD pf)
+
+-- | Whether the NFKD form of a text holds more combining characters in a
+-- row than the limit. The text is not normalised as a whole to find out,
+-- since that is the costly step. Each character is decomposed on its own:
+-- normalising only reorders the combining characters inside a run, so the
+-- runs of the decomposed characters are as long as those of the normal
+-- form. A combining character is what the normaliser treats as one: a
+-- character with a canonical combining class other than zero.
+exceedsCombiningRun :: Int -> Text -> Bool
+exceedsCombiningRun limit = go 0 . T.unpack
+  where
+    go :: Int -> String -> Bool
+    go _ [] = False
+    go run (c : rest)
+      -- An ASCII character is its own decomposition and ends a run
+      | isAscii c = go 0 rest
+      | otherwise = case extend run (decomposition c) of
+          Nothing -> True
+          Just run' -> go run' rest
+    -- The length of the run at the end of the characters given, when the
+    -- run before them had the length given. Nothing when a run passes the
+    -- limit.
+    extend :: Int -> String -> Maybe Int
+    extend run [] = Just run
+    extend run (x : xs)
+      | not (UC.isCombining x) = extend 0 xs
+      | run >= limit = Nothing
+      | otherwise = extend (run + 1) xs
+    decomposition c = T.unpack (normalize NFKD (T.singleton c))
+
+-- | Get indices of words in word list. An error names the positions of the
+-- words that are not in the list, counted from 1.
 getIndices :: [Text] -> Either String [Int]
 getIndices ws
-  | null n = return $ catMaybes i
-  | otherwise = Left $ "fromMnemonic: words not in the list: " ++ cs w
+  | null missing = return $ catMaybes found
+  | otherwise = Left $ "fromMnemonic: " ++ wordsAt missing ++ " not in the list"
   where
-    i = map (`M.lookup` wordListMap) ws
-    n = elemIndices Nothing i
-    w = T.unwords $ map (ws !!) n
+    found = map wordIndex ws
+    missing = [n | (n, Nothing) <- zip [1 :: Int ..] found]
+
+-- | The index of a word of the sentence in the word list, looked up in its
+-- NFKD form. A word longer than any word of the list is not normalised.
+wordIndex :: Text -> Maybe Int
+wordIndex w
+  | T.compareLength w maxWordLength == GT = Nothing
+  | otherwise = M.lookup (normalize NFKD w) wordListMap
+
+-- | The start of a sentence about the words at the positions given: "word
+-- 3 is", "words 3 and 7 are", "words 1, 3 and 7 are".
+wordsAt :: [Int] -> String
+wordsAt positions = case reverse (map show positions) of
+  [] -> "no word is"
+  [one] -> "word " ++ one ++ " is"
+  final : before -> "words " ++ intercalate ", " (reverse before) ++ " and " ++ final ++ " are"
 
 -- | Turn a list of 11-bit numbers into a 'ByteString'
 indicesToBS :: [Int] -> Either String ByteString

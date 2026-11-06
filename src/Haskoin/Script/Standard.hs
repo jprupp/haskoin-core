@@ -33,10 +33,14 @@ module Haskoin.Script.Standard
     isPayScript32Hash,
     isDataCarrier,
     maxMultisigKeys,
+    maxRedeemScriptSize,
+    maxWitnessScriptSize,
     encodeOutput,
     decodeOutput,
     toP2SH,
     toP2WSH,
+    p2shScriptHash,
+    p2wshScriptHash,
     sortMulSig,
 
     -- * Standard Script Inputs
@@ -54,7 +58,7 @@ where
 
 import Control.Applicative ((<|>))
 import Control.DeepSeq
-import Control.Monad (unless)
+import Control.Monad (guard, unless)
 import Crypto.Secp256k1
 import Data.Aeson (ToJSON (..), Value (..), withText)
 import Data.Aeson.Encoding (Encoding, text)
@@ -165,8 +169,30 @@ isDataCarrier _ = False
 
 -- | The most keys a multisig output can have: @MAX_PUBKEYS_PER_MULTISIG@ of
 -- Bitcoin Core.
+--
+-- Twenty keys fit in a bare multisig output and in a pay-to-witness-script-hash
+-- output. They do not fit in a pay-to-script-hash output, whose redeem script
+-- is limited to 'maxRedeemScriptSize' bytes. That is 15 compressed keys
+-- (3 + 15 × 34 = 513 bytes) or 7 uncompressed keys (3 + 7 × 66 = 465 bytes).
 maxMultisigKeys :: Int
 maxMultisigKeys = 20
+
+-- | The largest redeem script a pay-to-script-hash output can have, in bytes.
+-- The redeem script is one push in the input script, and consensus limits a
+-- push to 520 bytes: @MAX_SCRIPT_ELEMENT_SIZE@ of Bitcoin Core. Coins sent to
+-- the hash of a larger script can never be spent.
+maxRedeemScriptSize :: Int
+maxRedeemScriptSize = 520
+
+-- | The largest witness script a pay-to-witness-script-hash output can have,
+-- in bytes: @MAX_SCRIPT_SIZE@ of Bitcoin Core, 10,000. The interpreter fails
+-- on a larger script, so coins sent to its hash can never be spent.
+--
+-- This is the consensus limit. The relay policy of Bitcoin Core is stricter:
+-- it only relays a spend whose witness script is at most 3,600 bytes
+-- (@MAX_STANDARD_P2WSH_SCRIPT_SIZE@). This library does not enforce that.
+maxWitnessScriptSize :: Int
+maxWitnessScriptSize = 10000
 
 -- | Tries to decode a 'ScriptOutput' from a 'Script'. This can fail if the
 -- script is not recognized as any of the standard output types.
@@ -179,6 +205,33 @@ maxMultisigKeys = 20
 -- anyone can spend it, so it must not be shown as the address it looks like.
 -- The counts of a multisig output are @OP_1@ to @OP_16@, or a one-byte push
 -- for 17 to 'maxMultisigKeys', and a key must fill its push exactly.
+--
+-- A 'ScriptOutput' describes what a script does, not its bytes. Two kinds of
+-- script decode to a value that 'encodeOutput' writes back as other bytes:
+-- a multisig whose keys are not direct pushes, and a data carrier whose data
+-- is not pushed in the shortest way. Bitcoin Core gives those the same type
+-- (@multisig@ and @nulldata@). So never hash or sign the result of
+-- @encodeOutput@ in place of a script that came from somewhere else. Hash
+-- and sign the bytes of that script. 'decodeInput' refuses a redeem script
+-- that would not come back as the same bytes.
+--
+-- Three kinds of script that the @Solver@ of Bitcoin Core classifies are not
+-- decoded here, because a 'PublicKey' holds a point of the curve:
+--
+-- * A pay-to-public-key output, or a multisig output, with a key of the
+--   hybrid form (first byte 0x06 or 0x07). The @Solver@ only checks the size
+--   and the first byte of a key. Such keys are valid by consensus and refused
+--   by the relay policy.
+--
+-- * The same outputs with a key of the right size that is not a point of the
+--   curve. Protocols that store data in bare multisig outputs make those.
+--
+-- * @OP_RETURN@ followed by @OP_RESERVED@, which the push-only test of
+--   Bitcoin Core counts as a push.
+--
+-- On Bitcoin Cash, an output that holds tokens starts with the token prefix
+-- byte 0xef and is not decoded. See 'Haskoin.Script.SigHash.txSigHashForkId'
+-- for what is not supported on that network.
 decodeOutput :: Ctx -> Script -> Either String ScriptOutput
 decodeOutput ctx s = case s.ops of
   -- Pay to PubKey
@@ -301,13 +354,48 @@ instance Marshal Ctx ScriptOutput where
       Right o -> return o
   marshalPut ctx = either error serialize . encodeOutput ctx
 
--- | Encode script as pay-to-script-hash script
-toP2SH :: Script -> ScriptOutput
-toP2SH = PayScriptHash . addressHash . runPutS . serialize
+-- | The pay-to-script-hash output of a redeem script. Fails for a script
+-- longer than 'maxRedeemScriptSize' bytes, which could never be spent.
+toP2SH :: Script -> Either String ScriptOutput
+toP2SH = fmap PayScriptHash . p2shScriptHash
 
--- | Encode script as a pay-to-witness-script-hash script
-toP2WSH :: Script -> ScriptOutput
-toP2WSH = PayWitnessScriptHash . sha256 . runPutS . serialize
+-- | The pay-to-witness-script-hash output of a witness script. Fails for a
+-- script longer than 'maxWitnessScriptSize' bytes, which could never be
+-- spent.
+toP2WSH :: Script -> Either String ScriptOutput
+toP2WSH = fmap PayWitnessScriptHash . p2wshScriptHash
+
+-- | The hash that a pay-to-script-hash output commits to: HASH160 of the
+-- serialized redeem script. Fails for a script longer than
+-- 'maxRedeemScriptSize' bytes.
+p2shScriptHash :: Script -> Either String Hash160
+p2shScriptHash script
+  | size > maxRedeemScriptSize =
+      Left $
+        "The redeem script is "
+          <> show size
+          <> " bytes long, and a pay-to-script-hash redeem script can have at most "
+          <> show maxRedeemScriptSize
+  | otherwise = Right (addressHash bytes)
+  where
+    bytes = runPutS (serialize script)
+    size = B.length bytes
+
+-- | The hash that a pay-to-witness-script-hash output commits to: SHA256 of
+-- the serialized witness script. Fails for a script longer than
+-- 'maxWitnessScriptSize' bytes.
+p2wshScriptHash :: Script -> Either String Hash256
+p2wshScriptHash script
+  | size > maxWitnessScriptSize =
+      Left $
+        "The witness script is "
+          <> show size
+          <> " bytes long, and a pay-to-witness-script-hash witness script can have at most "
+          <> show maxWitnessScriptSize
+  | otherwise = Right (sha256 bytes)
+  where
+    bytes = runPutS (serialize script)
+    size = B.length bytes
 
 -- | Match @[OP_M, PubKey1, ..., PubKeyN, OP_N, OP_CHECKMULTISIG]@ with M and N
 -- from 1 to 'maxMultisigKeys' and M at most N.
@@ -478,6 +566,28 @@ decodeSimpleInputFor net ctx rdm ops = case (rdm, ops) of
 -- the redeem script requires, see 'ScriptHashInput'. When the redeem script
 -- is a SegWit program and nothing comes before it, the input is a
 -- 'NestedWitnessInput'.
+--
+-- What this function reads is the standard form that nodes relay, not every
+-- input that a block may hold:
+--
+-- * A signature must be a 'TxSignature': strict DER, a low S value and a
+--   defined hash type. An input with a signature that is valid by consensus
+--   alone does not decode. See 'TxSignature'.
+--
+-- * The redeem script must be in the form that 'encodeOutput' writes, byte
+--   for byte. Bitcoin Core's @Solver@ also calls a script a multisig when a
+--   key is pushed with @OP_PUSHDATA1@, but a 'ScriptOutput' cannot hold the
+--   form of a push, so such a script would come back out as other bytes with
+--   another hash. It is refused here, so that 'Haskoin.Address.inputAddress'
+--   is always the hash of the bytes the input carries, and so that encoding
+--   a decoded input never rewrites its redeem script. Spending such a script
+--   breaks the @MINIMALDATA@ rule of the relay policy, so no standard
+--   transaction has one.
+--
+-- * The witness program of a 'NestedWitnessInput' must be a direct push and
+--   the only element of the script. BIP 141 makes any other form invalid by
+--   consensus: "the scriptSig must be exactly a push of the BIP16
+--   redeemScript".
 decodeInput :: Network -> Ctx -> Script -> Either String ScriptInput
 decodeInput net ctx s@(Script ops) =
   maybeToEither errMsg $ matchSimpleInput <|> matchPayScriptHash
@@ -486,15 +596,24 @@ decodeInput net ctx s@(Script ops) =
       RegularInput <$> eitherToMaybe (decodeSimpleInput net ctx s)
     matchPayScriptHash =
       case splitAt (length s.ops - 1) ops of
-        (is, [OP_PUSHDATA bs _]) -> do
+        (is, [OP_PUSHDATA bs pushType]) -> do
           rdm <- eitherToMaybe $ unmarshal ctx bs
+          guard (canonical rdm bs)
           case (is, rdm) of
-            ([], PayWitnessPKHash _) -> return $ NestedWitnessInput rdm
-            ([], PayWitnessScriptHash _) -> return $ NestedWitnessInput rdm
+            ([], PayWitnessPKHash _) -> nested pushType rdm
+            ([], PayWitnessScriptHash _) -> nested pushType rdm
             _ -> do
               inp <- decodeSimpleInputFor net ctx rdm is
               return $ ScriptHashInput inp rdm
         _ -> Nothing
+    -- The redeem script, written back, gives the bytes that were pushed.
+    canonical rdm bs =
+      fmap (runPutS . serialize) (encodeOutput ctx rdm) == Right bs
+    -- A witness program is 22 or 34 bytes, so its only valid push is the
+    -- direct one.
+    nested pushType rdm = do
+      guard (pushType == OPCODE)
+      return (NestedWitnessInput rdm)
     errMsg = "decodeInput: Could not decode script input"
 
 instance Marshal (Network, Ctx) ScriptInput where

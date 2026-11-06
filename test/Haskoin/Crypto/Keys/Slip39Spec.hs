@@ -16,9 +16,12 @@
 -- in data/slip39_wordlist.txt is the file of the specification.
 module Haskoin.Crypto.Keys.Slip39Spec (spec) where
 
+import Control.DeepSeq (force)
+import Control.Exception (evaluate)
 import Control.Monad (forM_)
+import Control.Monad.State.Strict (State, modify, runState)
 import Crypto.Hash (SHA256 (..), hashWith)
-import Crypto.Random (drgNewTest, withDRG)
+import Crypto.Random (drgNewTest, getRandomBytes, withDRG)
 import Data.Aeson (FromJSON (..), withObject, (.:))
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as B
@@ -34,6 +37,7 @@ import Data.Vector qualified as V
 import Haskoin (btc, makeXPrvKey, xPrvExport)
 import Haskoin.Crypto.Keys.Slip39
 import Haskoin.Util (decodeHex, encodeHex, readTestFile)
+import System.Timeout (timeout)
 import Test.Hspec
 import Test.QuickCheck
 
@@ -96,10 +100,17 @@ spec = do
       M.size slip39WordListMap `shouldBe` 1024
     it "reads the words of a mnemonic in any case" $
       mnemonicToIndices "Academic ZERO satoshi" `shouldBe` Right [0, 1023, 781]
-    it "names a word that is not in the list" $
-      mnemonicToIndices "academic abandon" `shouldBe` Left "The word \"abandon\" is not in the SLIP-39 word list"
+    it "names the position of a word that is not in the list, and not the word" $
+      -- a share is a secret, and a mistyped word is most of the right one
+      mnemonicToIndices "academic abandon" `shouldBe` Left "Word 2 is not in the SLIP-39 word list"
+    it "reads ASCII letters only: a look-alike of another script is not a letter of the list" $
+      -- U+212A KELVIN SIGN lower-cases to "k" under the Unicode rules
+      mnemonicToIndices "\x212A\&ernel kidney" `shouldBe` Left "Word 1 is not in the SLIP-39 word list"
     it "writes indices as words" $
-      indicesToMnemonic [0, 781, 1023] `shouldBe` "academic satoshi zero"
+      indicesToMnemonic [0, 781, 1023] `shouldBe` Right "academic satoshi zero"
+    it "refuses an index outside the list instead of raising an error" $ do
+      indicesToMnemonic [0, 1024] `shouldBe` Left "The word index must be between 0 and 1023, not 1024"
+      indicesToMnemonic [-1] `shouldBe` Left "The word index must be between 0 and 1023, not -1"
 
   describe "the field GF(256)" $ do
     it "multiplies 0x57 by 0x83 to 0xc1, the example of FIPS 197" $
@@ -157,7 +168,7 @@ spec = do
     let vector1Words = [248, 288, 0, 0, 17, 753, 521, 840, 372, 497, 155, 670, 192, 448, 297, 249, 23]
     it "makes the three words critical decision keyboard for the first vector" $ do
       rs1024Checksum (customizationString False) vector1Words `shouldBe` [173, 196, 496]
-      indicesToMnemonic [173, 196, 496] `shouldBe` "critical decision keyboard"
+      indicesToMnemonic [173, 196, 496] `shouldBe` Right "critical decision keyboard"
     it "verifies the first vector" $
       rs1024Verify (customizationString False) (vector1Words ++ [173, 196, 496]) `shouldBe` True
     it "fails when the last word changes to kidney" $
@@ -206,6 +217,44 @@ spec = do
     it "refuses 21 words, which would leave 12 bits of padding" $
       -- Vector 40
       decodeShare (mnemonicOf vectors 40) `shouldBe` Left "The mnemonic has 21 words, which is not a valid share length"
+    it "refuses 24 words, which would leave 10 bits of padding" $
+      -- 17 words of value are 170 bits, and 170 modulo 16 is 10. The
+      -- checksum words are those of the reference implementation, so the
+      -- length is the only thing wrong.
+      decodeShare (T.unwords (["duckling", "enlarge"] ++ replicate 19 "academic" ++ ["diminish", "hearing", "undergo"]))
+        `shouldBe` Left "The mnemonic has 24 words, which is not a valid share length"
+    it "refuses 1025 words, the first share length above the 1023 words the checksum covers" $
+      -- A Reed-Solomon code over GF(1024) has at most 1023 symbols. This is
+      -- the share of 1272 zero bytes as the reference implementation writes
+      -- it, with its checksum, so the length is the only thing wrong. 1024
+      -- words are no share length: they would leave 10 bits of padding.
+      decodeShare (T.unwords (["duckling", "enlarge"] ++ replicate 1020 "academic" ++ ["sack", "sugar", "course"]))
+        `shouldBe` Left "The mnemonic has 1025 words, but a share has at most 1023"
+    it "refuses a share of 256,007 words with a valid checksum within a second" $ do
+      -- The header of the first vector, then 256,000 words of value with
+      -- every bit set, which leave no padding, then their checksum. Such a
+      -- share used to have its words turned into one number, in time that
+      -- grew with the square of the length: 1.8 seconds for half as many
+      -- words. The checksum is computed here because the share is the
+      -- input of the test, not its expectation.
+      let dataWords = [248, 288, 0, 0] ++ replicate 256000 1023
+          checksum = rs1024Checksum (customizationString False) dataWords
+          mnemonic = T.unwords (map (slip39WordList V.!) (dataWords ++ checksum))
+      _ <- evaluate (T.length mnemonic)
+      -- the length of the value forces its bytes
+      timeout 1000000 (evaluate (force (fmap (\s -> B.length s.value) (decodeShare mnemonic))))
+        `shouldReturn` Just (Left "The mnemonic has 256007 words, but a share has at most 1023")
+    it "encodes a value of 1270 bytes as 1023 words, the longest share, and reads it back" $ do
+      -- (1023 - 7) words of 10 bits are 10160 bits, 1270 bytes. The three
+      -- checksum words are those of the reference implementation.
+      let longest = vector1 {value = B.replicate 1270 0}
+          mnemonic = encodeShare longest
+      fmap (length . T.words) mnemonic `shouldBe` Right 1023
+      fmap (drop 1020 . T.words) mnemonic `shouldBe` Right ["academic", "shaped", "dictate"]
+      (mnemonic >>= decodeShare) `shouldBe` Right longest
+    it "refuses to encode a value of 1272 bytes, which would take 1025 words" $
+      encodeShare vector1 {value = B.replicate 1272 0}
+        `shouldBe` Left "The share value must have at most 1270 bytes, not 1272"
     it "refuses a wrong checksum" $
       -- Vector 2: the first vector with its last word changed
       decodeShare (mnemonicOf vectors 2) `shouldBe` Left "The checksum of the mnemonic is invalid"
@@ -217,7 +266,7 @@ spec = do
       decodeShare (mnemonicOf vectors 10) `shouldBe` Left "The group threshold is greater than the group count"
     it "refuses a word that is not in the list" $
       decodeShare "duckling enlarge academic academic agency result length solution fridge kidney coal piece deal husband erode duke ajar critical decision abandon"
-        `shouldBe` Left "The word \"abandon\" is not in the SLIP-39 word list"
+        `shouldBe` Left "Word 20 is not in the SLIP-39 word list"
     it "refuses to encode an identifier of 16 bits" $
       encodeShare (singleShare 32768 False 0 vector1.value) `shouldBe` Left "The identifier must be between 0 and 32767, not 32768"
     it "refuses to encode an iteration exponent of 16" $
@@ -234,6 +283,18 @@ spec = do
       encodeShare vector1 {memberIndex = 16} `shouldBe` Left "The member index must be between 0 and 15, not 16"
     it "refuses to encode a member threshold of 17" $
       encodeShare vector1 {memberThreshold = 17} `shouldBe` Left "The member threshold must be between 1 and 16, not 17"
+    it "refuses to encode an identifier of -1" $
+      encodeShare (singleShare (-1) False 0 vector1.value) `shouldBe` Left "The identifier must be between 0 and 32767, not -1"
+    it "refuses to encode an iteration exponent of -1" $
+      encodeShare (singleShare 7945 False (-1) vector1.value) `shouldBe` Left "The iteration exponent must be between 0 and 15, not -1"
+    it "refuses to encode a group index of -1" $
+      encodeShare vector1 {groupIndex = -1} `shouldBe` Left "The group index must be between 0 and 15, not -1"
+    it "refuses to encode a group count of 0" $
+      encodeShare (groupShare 1 0 vector1.value) `shouldBe` Left "The group count must be between 1 and 16, not 0"
+    it "refuses to encode a member index of -1" $
+      encodeShare vector1 {memberIndex = -1} `shouldBe` Left "The member index must be between 0 and 15, not -1"
+    it "refuses to encode a member threshold of 0" $
+      encodeShare vector1 {memberThreshold = 0} `shouldBe` Left "The member threshold must be between 1 and 16, not 0"
     it "refuses to encode a value of 15 bytes" $
       encodeShare vector1 {value = B.replicate 15 0} `shouldBe` Left "The share value must have at least 16 bytes, not 15"
     it "refuses to encode a value of 17 bytes" $
@@ -300,6 +361,11 @@ spec = do
       splitSecret 3 4 secret (SplitRandom [B.take 15 secret] digestRandom) `shouldBe` Left "A random share must be as long as the secret"
     it "refuses a random part of another length" $
       splitSecret 2 3 secret (SplitRandom [] (B.take 11 digestRandom)) `shouldBe` Left "The random part of the digest share must have 12 bytes"
+    it "shows the random values of a split without their bytes" $
+      -- the random shares are real shares, and the random part is most of
+      -- the digest share
+      show (SplitRandom [B.replicate 16 0x41] (B.replicate 12 0x42))
+        `shouldBe` "SplitRandom {randomShares = <redacted>, digestRandom = <redacted>}"
     it "sizes the random values: none at threshold 1, T - 2 shares and n - 4 bytes otherwise" $ do
       splitRandomSizes 1 16 `shouldBe` (0, 16, 0)
       splitRandomSizes 2 16 `shouldBe` (0, 16, 12)
@@ -338,11 +404,36 @@ spec = do
     it "refuses a control character in the passphrase" $
       encryptMasterSecret 1 True 0 "a\tb" secret
         `shouldBe` Left "The passphrase must contain only printable ASCII characters, code points 32 to 126"
-    it "still decrypts a share made with such a passphrase, as UTF-8" $
-      -- Made by version 0.3.0 of the reference implementation with the
-      -- passphrase "café", from its tests
-      combineMnemonics "café" ["acid fawn academic academic company fridge picture cage pecan glance privacy carpet should public pharmacy eclipse percent python together flavor"]
-        `shouldBe` Right secret
+    it "refuses the characters next to printable ASCII: U+001F and U+007F" $ do
+      encryptMasterSecret 1 True 0 "a\x1f" secret
+        `shouldBe` Left "The passphrase must contain only printable ASCII characters, code points 32 to 126"
+      encryptMasterSecret 1 True 0 "a\x7f" secret
+        `shouldBe` Left "The passphrase must contain only printable ASCII characters, code points 32 to 126"
+    it "refuses a passphrase outside printable ASCII on decryption too" $ do
+      -- "the passphrase MUST be a string containing only printable ASCII
+      -- characters" (SLIP-39). Two spellings of one visible passphrase
+      -- used to open two wallets.
+      decryptMasterSecret "caf\x00e9" cafeEms
+        `shouldBe` Left "The passphrase must contain only printable ASCII characters, code points 32 to 126"
+      decryptMasterSecret "cafe\x0301" cafeEms
+        `shouldBe` Left "The passphrase must contain only printable ASCII characters, code points 32 to 126"
+      combineMnemonics "caf\x00e9" [cafeMnemonic]
+        `shouldBe` Left "The passphrase must contain only printable ASCII characters, code points 32 to 126"
+    it "decrypts with the bytes of a passphrase of other software, which it does not check" $ do
+      -- The share was made by version 0.3.0 of the reference implementation
+      -- with "café" as UTF-8, 63 61 66 c3 a9. The second line is what the
+      -- reference gives for "e" followed by U+0301: another secret.
+      decryptMasterSecretBytes (B.pack [0x63, 0x61, 0x66, 0xc3, 0xa9]) cafeEms `shouldBe` Right secret
+      fmap encodeHex (decryptMasterSecretBytes (B.pack [0x63, 0x61, 0x66, 0x65, 0xcc, 0x81]) cafeEms)
+        `shouldBe` Right "7a1965e4e0f2c5efee3e7efe53222345"
+    it "rebuilds the encrypted master secret of that share, whatever its passphrase was" $
+      (decodeShare cafeMnemonic >>= \s -> combineShares [s]) `shouldBe` Right cafeEms
+    it "refuses to decrypt under an iteration exponent of 16" $
+      decryptMasterSecret "" EncryptedMasterSecret {identifier = 7945, extendable = False, iterationExponent = 16, ciphertext = hex "11bc609d21747c49ba78c0701293e417"}
+        `shouldBe` Left "The iteration exponent must be between 0 and 15, not 16"
+    it "refuses to decrypt under an identifier of 16 bits" $
+      decryptMasterSecret "" EncryptedMasterSecret {identifier = 32768, extendable = False, iterationExponent = 0, ciphertext = hex "11bc609d21747c49ba78c0701293e417"}
+        `shouldBe` Left "The identifier must be between 0 and 32767, not 32768"
     it "refuses a master secret of 15 bytes" $
       encryptMasterSecret 1 True 0 "" (B.take 15 secret) `shouldBe` Left "The master secret must have at least 16 bytes, not 15"
     it "refuses a master secret of 17 bytes" $
@@ -397,12 +488,32 @@ spec = do
     it "refuses random values for the wrong number of splits" $
       generateSharesWith (Scheme 1 [(1, 1)]) 1 True 0 "" "ABCDEFGHIJKLMNOP" [SplitRandom [] B.empty]
         `shouldBe` Left "A scheme of 1 groups takes 2 sets of random values: one for the split among the groups, then one per group"
-    it "refuses a master secret of 15 bytes before drawing anything" $
-      fst (withDRG (drgNewTest (1, 2, 3, 4, 5)) (generateShares (Scheme 1 [(2, 3)]) True 0 "" "ABCDEFGHIJKLMNO"))
-        `shouldBe` Left "The master secret must have at least 16 bytes, not 15"
+    it "asks its source for nothing when the master secret has 15 bytes" $
+      runState (generateSharesFrom recordedZeros (Scheme 1 [(2, 3)]) True 0 "" "ABCDEFGHIJKLMNO") []
+        `shouldBe` (Left "The master secret must have at least 16 bytes, not 15", [])
+    it "asks its source for nothing when the scheme, the exponent or the passphrase is refused" $ do
+      runState (generateSharesFrom recordedZeros (Scheme 1 [(1, 3)]) True 0 "" "ABCDEFGHIJKLMNOP") []
+        `shouldBe` (Left "A group with a member threshold of 1 has one member, but group 1 has 3", [])
+      runState (generateSharesFrom recordedZeros (Scheme 1 [(2, 3)]) True 16 "" "ABCDEFGHIJKLMNOP") []
+        `shouldBe` (Left "The iteration exponent must be between 0 and 15, not 16", [])
+      runState (generateSharesFrom recordedZeros (Scheme 1 [(2, 3)]) True 0 "caf\x00e9" "ABCDEFGHIJKLMNOP") []
+        `shouldBe` (Left "The passphrase must contain only printable ASCII characters, code points 32 to 126", [])
+    it "asks its source for 2 and 12 bytes to split 16 bytes 2-of-3" $
+      -- 2 for the identifier, nothing for the split among one group, and
+      -- 16 - 4 = 12 for the random part of the digest share
+      snd (runState (generateSharesFrom recordedZeros (Scheme 1 [(2, 3)]) True 0 "" "ABCDEFGHIJKLMNOP") [])
+        `shouldBe` [2, 12]
+    it "asks its source for 2, 32 and 28 bytes to split 32 bytes 3-of-5" $
+      -- 2 for the identifier, 32 for the one random share, and 32 - 4 = 28
+      -- for the random part of the digest share
+      snd (runState (generateSharesFrom recordedZeros (Scheme 1 [(3, 5)]) True 0 "" "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345") [])
+        `shouldBe` [2, 32, 28]
+    it "refuses a source that gives fewer bytes than asked" $
+      fst (runState (generateSharesFrom (\_ -> return "x") (Scheme 1 [(2, 3)]) True 0 "" "ABCDEFGHIJKLMNOP") ())
+        `shouldBe` Left "The source of random bytes gave 1 bytes where 2 were asked for"
     it "draws a 15-bit identifier and shares of which any two of three rebuild the secret" $ do
       let secret = "ABCDEFGHIJKLMNOP"
-          drawn = fst (withDRG (drgNewTest (1, 2, 3, 4, 5)) (generateShares (Scheme 1 [(2, 3)]) True 0 "" secret))
+          drawn = fst (withDRG (drgNewTest (1, 2, 3, 4, 5)) (generateSharesFrom getRandomBytes (Scheme 1 [(2, 3)]) True 0 "" secret))
       case drawn of
         Right [shares] -> do
           length shares `shouldBe` 3
@@ -415,9 +526,26 @@ spec = do
             (combineShares two >>= decryptMasterSecret "") `shouldBe` Right secret
         other -> expectationFailure ("expected one group of three shares, got " <> show other)
     it "draws the same shares from the same random state and others from another" $ do
-      let draw seed = fst (withDRG (drgNewTest seed) (generateMnemonics (Scheme 1 [(2, 3)]) True 0 "" "ABCDEFGHIJKLMNOP"))
+      let draw seed = fst (withDRG (drgNewTest seed) (generateSharesFrom getRandomBytes (Scheme 1 [(2, 3)]) True 0 "" "ABCDEFGHIJKLMNOP"))
       draw (1, 2, 3, 4, 5) `shouldBe` draw (1, 2, 3, 4, 5)
       draw (1, 2, 3, 4, 5) `shouldNotBe` draw (6, 7, 8, 9, 10)
+    it "rebuilds a secret of 16 to 64 bytes from a threshold of the shares of any small scheme" $
+      property $ forAll splitOfAnyScheme $ \(scheme, ext, passphrase, secret, drawn) ->
+        case drawn of
+          Left err -> counterexample err False
+          Right groups ->
+            -- the first groups and the first members that meet the
+            -- thresholds, then the last ones
+            let firstOnes = concat [take t members | ((t, _), members) <- take scheme.groupThreshold (zip scheme.groups groups)]
+                lastOnes = concat [lastN t members | ((t, _), members) <- lastN scheme.groupThreshold (zip scheme.groups groups)]
+                rebuilt shares = combineShares shares >>= decryptMasterSecret passphrase
+             in (rebuilt firstOnes, rebuilt lastOnes) === (Right secret, Right secret)
+    it "refuses a share with one word of its value or checksum changed" $
+      -- the checksum catches any change of up to three words
+      property $ forAll changedWord $ \(position, word) ->
+        let ws = T.words (mnemonicOf vectors 1)
+            changed = T.unwords (take position ws ++ [word] ++ drop (position + 1) ws)
+         in ws !! position /= word ==> decodeShare changed === Left "The checksum of the mnemonic is invalid"
     it "draws shares with the system's randomness that rebuild a two-level scheme" $ do
       let secret = "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"
       drawn <- generateMnemonics (Scheme 2 [(1, 1), (2, 3), (3, 5)]) True 0 "pass" secret
@@ -477,6 +605,16 @@ spec = do
           xPrvExport btc (makeXPrvKey (hex secret)) `shouldBe` xprv
         else it (T.unpack d <> ": is refused") $
           combineMnemonics "TREZOR" ms `shouldBe` Left (refusalOf n)
+
+-- | A share made by version 0.3.0 of the reference implementation with the
+-- passphrase "café", from its tests. Its master secret is ABCDEFGHIJKLMNOP.
+cafeMnemonic :: Text
+cafeMnemonic = "acid fawn academic academic company fridge picture cage pecan glance privacy carpet should public pharmacy eclipse percent python together flavor"
+
+-- | The encrypted master secret of 'cafeMnemonic', as the reference
+-- implementation reads it: a 1-of-1 share is the encrypted secret itself.
+cafeEms :: EncryptedMasterSecret
+cafeEms = EncryptedMasterSecret {identifier = 42, extendable = True, iterationExponent = 1, ciphertext = hex "9f5d29d1ca9062eb91fb29b0e9840a93"}
 
 -- | The share of the first vector.
 vector1 :: Share
@@ -589,3 +727,36 @@ share i ext e gi gt gc mi mt mnemonic =
 
 bytesOf :: Int -> Gen ByteString
 bytesOf n = B.pack <$> vectorOf n arbitrary
+
+-- | A source of random bytes that gives zeros and records how many bytes
+-- each request asked for, in order.
+recordedZeros :: Int -> State [Int] ByteString
+recordedZeros n = modify (++ [n]) >> return (B.replicate n 0)
+
+-- | The last n elements of a list.
+lastN :: Int -> [a] -> [a]
+lastN n xs = drop (length xs - n) xs
+
+-- | A scheme of one to three groups of one to four members, a secret of 16
+-- to 64 bytes, a printable ASCII passphrase, and the shares of the secret
+-- drawn from the generator.
+splitOfAnyScheme :: Gen (Scheme, Bool, Text, ByteString, Either String [[Share]])
+splitOfAnyScheme = do
+  groupCount <- choose (1, 3)
+  groups <- vectorOf groupCount $ do
+    members <- choose (1, 4)
+    -- a group with a member threshold of 1 has one member
+    threshold <- if members == 1 then return 1 else choose (2, members)
+    return (threshold, members)
+  groupThreshold <- choose (1, groupCount)
+  let scheme = Scheme groupThreshold groups
+  ext <- arbitrary
+  passphrase <- T.pack <$> listOf (elements [' ' .. '~'])
+  secret <- choose (8, 32) >>= \half -> bytesOf (2 * half)
+  drawn <- generateSharesFrom bytesOf scheme ext 0 passphrase secret
+  return (scheme, ext, passphrase, secret, drawn)
+
+-- | A position in the 20 words of the first vector after the two words
+-- that hold the extendable flag, and a word of the list to put there.
+changedWord :: Gen (Int, Text)
+changedWord = (,) <$> choose (2, 19) <*> elements (V.toList slip39WordList)

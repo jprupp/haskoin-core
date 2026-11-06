@@ -21,6 +21,7 @@ module Haskoin.Network.Message
     msgType,
     putMessage,
     getMessage,
+    maxPayloadSize,
   )
 where
 
@@ -170,34 +171,53 @@ msgType MWtxidRelay = MCWtxidRelay
 msgType (MSendTxRcncl _) = MCSendTxRcncl
 msgType (MOther c _) = MCOther c
 
--- | Deserializer for network messages. It reads one message and nothing
--- more, so messages can be read one after the other from a stream. The parse
--- fails for a header with the magic of another network, a payload larger
--- than the 'maxMessageSize' of the network, or a checksum that does not
--- match the payload. Only the declared payload is handed to the parser of the
--- message type. A message type that carries no payload is accepted with
--- whatever payload it comes with, as in Bitcoin Core.
+-- | Largest payload that a message of this command may have on a network.
+-- On Bitcoin every message is limited to 4,000,000 bytes, as in Bitcoin Core.
+-- On Bitcoin Cash a message is limited to 2 MiB, unless it carries block
+-- content: @block@, @cmpctblock@ and @blocktxn@ may be twice the block size.
+-- This is @CMessageHeader::IsOversized@ in Bitcoin Cash Node. A node should
+-- check the length of a message header against this limit before it buffers
+-- the payload.
+maxPayloadSize :: Network -> MessageCommand -> Word32
+maxPayloadSize net cmd
+  | carriesBlock = net.maxMessageSize
+  | otherwise = min net.maxMessageSize net.maxProtocolMessageSize
+  where
+    carriesBlock = cmd `elem` [MCBlock, MCCmpctBlock, MCBlockTxn]
+
+-- | Read one message of a network. The checks come in this order: the magic
+-- bytes, the command name, the length against 'maxPayloadSize' of the
+-- command, then the payload is read and its checksum compared. The payload
+-- parser sees the declared bytes only. Any failure fails the parse. Bitcoin
+-- Core drops a message with a wrong checksum or an invalid command name and
+-- keeps the connection, which a caller can do by reading the header itself.
+--
+-- Transactions, in @tx@, @block@, @cmpctblock@ and @blocktxn@ messages, are
+-- read with 'getNetworkTx', and compact block positions are limited as the
+-- network requires, see 'getCompactBlock' and 'getGetBlockTxn'.
 getMessage :: (MonadGet m) => Network -> m Message
 getMessage net = do
-  (MessageHeader mgc cmd len chk) <- deserialize
+  -- The magic is checked before the rest of the header is looked at.
+  mgc <- lookAhead getWord32be
   unless
     (mgc == net.magic)
     (fail $ "get: Invalid network magic bytes: " ++ show mgc)
-  when (len > net.maxMessageSize) $
+  (MessageHeader _ cmd len chk) <- deserialize
+  let limit = maxPayloadSize net cmd
+  when (len > limit) $
     fail $
       "get: Message of "
         ++ show len
         ++ " bytes is larger than the limit of "
-        ++ show net.maxMessageSize
+        ++ show limit
   payload <- getByteString (fromIntegral len)
   unless
     (checkSum32 payload == chk)
     (fail $ "get: Invalid message checksum: " ++ show chk)
-  either fail return (runGetS (getPayload cmd len) payload)
+  either fail return (runGetS (getPayload net cmd len) payload)
 
--- | Parser for the payload of a message of the given command.
-getPayload :: (MonadGet m) => MessageCommand -> Word32 -> m Message
-getPayload cmd len =
+getPayload :: (MonadGet m) => Network -> MessageCommand -> Word32 -> m Message
+getPayload net cmd len =
   case cmd of
     MCVersion -> MVersion <$> deserialize
     MCVerAck -> return MVerAck
@@ -209,8 +229,8 @@ getPayload cmd len =
     MCNotFound -> MNotFound <$> deserialize
     MCGetBlocks -> MGetBlocks <$> deserialize
     MCGetHeaders -> MGetHeaders <$> deserialize
-    MCTx -> MTx <$> deserialize
-    MCBlock -> MBlock <$> deserialize
+    MCTx -> MTx <$> getNetworkTx net
+    MCBlock -> MBlock <$> (Block <$> deserialize <*> getVarIntList (getNetworkTx net))
     MCMerkleBlock -> MMerkleBlock <$> deserialize
     MCHeaders -> MHeaders <$> deserialize
     MCGetAddr -> return MGetAddr
@@ -225,9 +245,9 @@ getPayload cmd len =
     MCSendHeaders -> return MSendHeaders
     MCFeeFilter -> MFeeFilter <$> deserialize
     MCSendCmpct -> MSendCompact <$> deserialize
-    MCCmpctBlock -> MCompactBlock <$> deserialize
-    MCGetBlockTxn -> MGetBlockTxn <$> deserialize
-    MCBlockTxn -> MBlockTxn <$> deserialize
+    MCCmpctBlock -> MCompactBlock <$> getCompactBlock net
+    MCGetBlockTxn -> MGetBlockTxn <$> getGetBlockTxn net
+    MCBlockTxn -> MBlockTxn <$> getBlockTxn net
     MCGetCFilters -> MGetCFilters <$> deserialize
     MCCFilter -> MCFilter <$> deserialize
     MCGetCFHeaders -> MGetCFHeaders <$> deserialize

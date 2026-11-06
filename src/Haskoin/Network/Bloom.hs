@@ -43,7 +43,7 @@ where
 
 import Control.Applicative ((<|>))
 import Control.DeepSeq
-import Control.Monad (when)
+import Control.Monad (guard, when)
 import Crypto.Secp256k1 (Ctx)
 import Data.Binary (Binary (..))
 import Data.Bits
@@ -55,6 +55,7 @@ import Data.Bytes.Serial
 import Data.Foldable qualified as F
 import Data.Hash.Murmur (murmur3)
 import Data.List (foldl')
+import Data.Maybe (fromMaybe)
 import Data.Sequence qualified as S
 import Data.Serialize (Serialize (..))
 import Data.Serialize qualified as Ser
@@ -62,9 +63,7 @@ import Data.Word
 import GHC.Generics (Generic)
 import Haskoin.Network.Common
 import Haskoin.Script.Common
-import Haskoin.Script.Standard
 import Haskoin.Transaction.Common
-import Haskoin.Util.Marshal
 
 -- | Largest filter a peer may load, in bytes. 20,000 items with fp rate
 -- < 0.1% or 10,000 items and <0.0001%.
@@ -241,8 +240,10 @@ bloomCreate numElem fpRate =
     numHashF
       | numElem == 0 = 0
       | otherwise = truncate $ min c (fromIntegral maxHashFuncs)
-    -- Suggested number of hash functions
-    c = fromIntegral bloomSize * 8 / fromIntegral numElem * ln2
+    -- Suggested number of hash functions. The bits per element are divided
+    -- as integers first, as in the constructor of CBloomFilter in Bitcoin
+    -- Core, so that both pick the same number.
+    c = fromIntegral ((bloomSize * 8) `div` numElem) * ln2
 
 bloomHash :: BloomFilter -> Word32 -> ByteString -> Word32
 bloomHash b hashNum bs =
@@ -313,30 +314,47 @@ scriptPushData = either (const []) id . runGetS pushes
               | not (BS.null d) -> (d :) <$> pushes
             Just _ -> pushes
 
--- | Checks if any output of a transaction matches the filter, as
--- @IsRelevantAndUpdate@ does in Bitcoin Core. An output matches when any data
--- element pushed by its script is in the filter. The outpoint of a matching
--- output is inserted according to the flags: always with 'BloomUpdateAll',
--- only for pay-to-pubkey and pay-to-multisig outputs with
--- 'BloomUpdateP2PubKeyOnly', and never with 'BloomUpdateNone'. The result is
--- 'Nothing' when no output matches, and otherwise the filter with the
--- outpoints added, which lets a future transaction spending them match too.
--- Non-standard output scripts are scanned like any other. An empty filter
--- matches every transaction and gets no outpoints.
+-- | Tells whether a transaction is relevant to a filter, and updates the
+-- filter, as @CBloomFilter::IsRelevantAndUpdate@ does in Bitcoin Core and as
+-- BIP 37 specifies. A transaction is relevant when the filter contains:
+--
+-- 1. its hash, or
+-- 2. a data element pushed by one of its output scripts, or
+-- 3. an outpoint that one of its inputs spends, or
+-- 4. a data element pushed by one of its input scripts.
+--
+-- The result is 'Nothing' for a transaction that is not relevant, and
+-- otherwise the filter. For each output that matches, its outpoint is
+-- inserted according to the flags: always with 'BloomUpdateAll', only for
+-- pay-to-pubkey and bare multisig outputs with 'BloomUpdateP2PubKeyOnly', and
+-- never with 'BloomUpdateNone'. This lets a later transaction that spends the
+-- output match through rule 3. As in Bitcoin Core, the inputs are looked at
+-- only when neither the hash nor an output matched.
+--
+-- Pay-to-pubkey and multisig are told by the shape of the script, as
+-- @Solver@ does in Bitcoin Core: a key is any push of 33 bytes that starts
+-- with 02 or 03, or of 65 bytes that starts with 04, 06 or 07. It does not
+-- have to be a point of the curve. Non-standard scripts are scanned like any
+-- other. An empty filter matches every transaction and gets no outpoints.
+--
+-- The context is not used. It is kept so that callers do not have to change.
 bloomRelevantUpdate ::
   Ctx ->
   -- | Bloom filter
   BloomFilter ->
-  -- | Tx that may (or may not) have relevant outputs
+  -- | transaction to test
   Tx ->
-  -- | Returns an updated bloom filter adding relevant output
+  -- | the filter, updated, when the transaction is relevant
   Maybe BloomFilter
-bloomRelevantUpdate ctx b tx
+bloomRelevantUpdate _ b tx
   | S.null b.array = Just b
-  | found = Just updated
+  | hashFound || outputFound = Just updated
+  | any inputMatches tx.inputs = Just b
   | otherwise = Nothing
   where
-    (found, updated) = foldl' step (False, b) (zip [0 ..] tx.outputs)
+    hash = txHash tx
+    hashFound = bloomContains b (runPutS (serialize hash))
+    (outputFound, updated) = foldl' step (False, b) (zip [0 ..] tx.outputs)
     step :: (Bool, BloomFilter) -> (Word32, TxOut) -> (Bool, BloomFilter)
     step (f, cur) (i, out)
       | any (bloomContains cur) (scriptPushData out.script) =
@@ -349,11 +367,70 @@ bloomRelevantUpdate ctx b tx
         BloomUpdateP2PubKeyOnly
           | paysToKeys out.script -> bloomInsert cur (outpoint i)
         _ -> cur
-    outpoint i = runPutS $ serialize $ OutPoint {hash = txHash tx, index = i}
-    paysToKeys script =
-      case unmarshal ctx script of
-        Right o -> isPayPK o || isPayMulSig o
-        Left _ -> False
+    outpoint i = runPutS $ serialize $ OutPoint {hash = hash, index = i}
+    inputMatches :: TxIn -> Bool
+    inputMatches input =
+      bloomContains b (runPutS (serialize input.outpoint))
+        || any (bloomContains b) (scriptPushData input.script)
+
+-- | Is the script pay-to-pubkey or bare multisig, as @Solver@ classifies them
+-- in Bitcoin Core (@MatchPayToPubkey@ and @MatchMultisig@)? Keys are tested
+-- by size and first byte only.
+paysToKeys :: ByteString -> Bool
+paysToKeys script = payToPubkey || multisig
+  where
+    opCheckSig = 0xac
+    payToPubkey =
+      or
+        [ BS.length script == size + 2
+            && BS.head script == fromIntegral size
+            && BS.last script == opCheckSig
+            && validKeySize (BS.take size (BS.drop 1 script))
+        | size <- [65, 33]
+        ]
+    multisig =
+      case runGetS deserialize script :: Either String Script of
+        Right (Script (m : rest)) ->
+          case span isKey rest of
+            (keys, [n, OP_CHECKMULTISIG]) -> fromMaybe False $ do
+              required <- scriptNumber m
+              guard (required >= 1 && required <= maxKeys)
+              total <- scriptNumber n
+              guard (total >= required && total <= maxKeys)
+              return (length keys == total)
+            _ -> False
+        _ -> False
+    -- MAX_PUBKEYS_PER_MULTISIG
+    maxKeys = 20
+    isKey (OP_PUSHDATA bs _) = validKeySize bs
+    isKey _ = False
+
+-- | @CPubKey::ValidSize@ of Bitcoin Core: 33 bytes after 02 or 03, 65 bytes
+-- after 04, 06 or 07.
+validKeySize :: ByteString -> Bool
+validKeySize key =
+  case BS.uncons key of
+    Just (prefix, _)
+      | prefix == 2 || prefix == 3 -> BS.length key == 33
+      | prefix == 4 || prefix == 6 || prefix == 7 -> BS.length key == 65
+    _ -> False
+
+-- | The number that a script operation stands for in a multisig template,
+-- as @GetScriptNumber@ reads it in Bitcoin Core: 'OP_1' to 'OP_16', or a
+-- minimal push of one byte for 17 and above.
+scriptNumber :: ScriptOp -> Maybe Int
+scriptNumber op =
+  case op of
+    OP_PUSHDATA bs OPCODE
+      | BS.length bs == 1 && BS.head bs > 16 && BS.head bs < 0x80 ->
+          Just (fromIntegral (BS.head bs))
+    OP_PUSHDATA {} -> Nothing
+    OP_0 -> Nothing
+    OP_1NEGATE -> Nothing
+    _ -> do
+      bs <- pushOpData op
+      guard (BS.length bs == 1)
+      return (fromIntegral (BS.head bs))
 
 -- | Returns True if the filter is empty (all bytes set to 0x00)
 isBloomEmpty :: BloomFilter -> Bool

@@ -42,6 +42,7 @@ module Haskoin.Transaction.Builder
     chooseCoinsSink,
     countMulSig,
     greedyAddSink,
+    maxStandardTxWeight,
 
     -- * Size and fee estimation
     InputKind (..),
@@ -51,18 +52,20 @@ module Haskoin.Transaction.Builder
     guessTxFee,
     inputWeight,
     outputSize,
+    dustThreshold,
   )
 where
 
-import Control.Monad (foldM, unless)
+import Control.Monad (foldM, unless, when)
 import Control.Monad.Identity (runIdentity)
 import Crypto.Secp256k1
 import Data.ByteString qualified as B
 import Data.Conduit (ConduitT, Void, await, runConduit, (.|))
 import Data.Conduit.List (sourceList)
 import Data.Either (fromRight, rights)
-import Data.List (find, nub)
-import Data.Maybe (catMaybes, fromJust, isJust, mapMaybe)
+import Data.List (nub)
+import Data.Map.Strict qualified as Map
+import Data.Maybe (catMaybes, isNothing)
 import Data.String.Conversions (cs)
 import Data.Text (Text)
 import Data.Word (Word64)
@@ -86,10 +89,27 @@ class Coin c where
   coinValue :: c -> Word64
   coinInputKind :: c -> InputKind
 
+-- | The weight above which nodes do not relay a transaction: the
+-- @MAX_STANDARD_TX_WEIGHT@ of Bitcoin Core (@policy/policy.h@). A Bitcoin
+-- Cash transaction has no witness, so its weight is four times its size,
+-- and the limit is the 100,000 bytes of @MAX_STANDARD_TX_SIZE@ in Bitcoin
+-- Cash Node.
+maxStandardTxWeight :: Int
+maxStandardTxWeight = 400000
+
 -- | Coin selection algorithm. This function returns the selected coins
 -- together with the amount of change to send back to yourself, taking the
 -- fee into account. The fee is estimated from the kind of input each coin
--- is spent with and the kinds of the outputs, with 'guessTxFee'.
+-- is spent with and the kinds of the outputs, as 'guessTxFee' estimates it.
+--
+-- The coins are taken in the order of the list until they cover the target
+-- and the fee. The selection fails when the coins do not suffice, when a
+-- kind of input or output is not valid, and when the transaction would
+-- weigh more than 'maxStandardTxWeight', which nodes do not relay.
+--
+-- The change can be any amount, including one below 'dustThreshold'. Nodes
+-- do not relay a transaction with an output below that threshold, so leave
+-- such a change to the fee instead of making an output for it.
 chooseCoins ::
   (Coin c) =>
   -- | value to send
@@ -111,7 +131,7 @@ chooseCoins target fee outputs continue coins =
 -- | Coin selection algorithm. This function returns the selected coins
 -- together with the amount of change to send back to yourself, taking the
 -- fee into account. This version uses a Sink for conduit-based coin
--- selection.
+-- selection. See 'chooseCoins'.
 chooseCoinsSink ::
   (Monad m, Coin c) =>
   -- | value to send
@@ -125,13 +145,84 @@ chooseCoinsSink ::
   -- | coin selection and change
   ConduitT c Void m (Either String ([c], Word64))
 chooseCoinsSink target fee outputs continue
-  | target > 0 =
-      maybeToEither err
-        <$> greedyAddSink target feeOf continue
-  | otherwise = return $ Left "chooseCoins: Target must be > 0"
+  | target == 0 = return $ Left "chooseCoins: Target must be > 0"
+  | Left e <- mapM_ checkOutputKind outputs = return $ Left ("chooseCoins: " <> e)
+  | otherwise = go emptySelection Nothing
   where
-    err = "chooseCoins: No solution found"
-    feeOf coins = guessTxFee fee (map coinInputKind coins) outputs
+    outputBytes = varIntSize (length outputs) + sum (map outputSize outputs)
+    -- What the coins of a selection must reach: the target and the fee of
+    -- the transaction they make. Amounts are added as unbounded integers,
+    -- so that no sum wraps around.
+    goal sel = toInteger target + toInteger fee * toInteger ((selectionWeight outputBytes sel + 3) `div` 4)
+    go sel previous =
+      await >>= \case
+        Nothing -> return $ maybe (Left "chooseCoins: No solution found") solution previous
+        Just coin -> case addCoin coin sel of
+          Left e -> return $ Left ("chooseCoins: " <> e)
+          Right sel'
+            -- A heavier transaction is not relayed. Coins only add weight,
+            -- so nothing further in the stream can complete this selection.
+            | selectionWeight outputBytes sel' > maxStandardTxWeight ->
+                return $ maybe (Left tooHeavy) solution previous
+            | sel'.total < goal sel' -> go sel' previous
+            | not continue -> return (solution sel')
+            -- This solution is the first one, or it takes less than the
+            -- previous one: look for a better one in the rest of the stream
+            | maybe True (\p -> sel'.total < p.total) previous -> go emptySelection (Just sel')
+            | otherwise -> return $ maybe (Left "chooseCoins: No solution found") solution previous
+    solution sel
+      | change > toInteger (maxBound :: Word64) = Left "chooseCoins: The change does not fit in 64 bits"
+      | otherwise = Right (sel.coins, fromInteger change)
+      where
+        change = sel.total - goal sel
+    tooHeavy =
+      "chooseCoins: The selection exceeds the standard transaction weight of " <> show maxStandardTxWeight
+
+-- | The coins selected so far, with the sums that give the weight of the
+-- transaction they make. The sums are kept as coins are added, so that
+-- adding a coin does not walk over the coins before it.
+data Selection c = Selection
+  { -- | the coins, the last one added first
+    coins :: [c],
+    count :: !Int,
+    -- | the sum of the values
+    total :: !Integer,
+    -- | the bytes of the inputs outside the witness
+    baseBytes :: !Int,
+    -- | the bytes of the witness stacks, an input without a witness
+    -- counting the one byte of its empty stack
+    stackBytes :: !Int,
+    -- | whether an input has a witness
+    hasStack :: !Bool
+  }
+
+emptySelection :: Selection c
+emptySelection = Selection [] 0 0 0 0 False
+
+addCoin :: (Coin c) => c -> Selection c -> Either String (Selection c)
+addCoin coin sel = do
+  let kind = coinInputKind coin
+  checkInputKind kind
+  let (base, stack) = inputWeight kind
+  return
+    Selection
+      { coins = coin : sel.coins,
+        count = sel.count + 1,
+        total = sel.total + toInteger (coinValue coin),
+        baseBytes = sel.baseBytes + base,
+        stackBytes = sel.stackBytes + max 1 stack,
+        hasStack = sel.hasStack || stack > 0
+      }
+
+-- | The weight of the transaction that spends the coins of a selection to
+-- outputs of the size given, counted as 'guessTxWeight' counts it
+selectionWeight :: Int -> Selection c -> Int
+selectionWeight outputBytes sel = 4 * base + witness
+  where
+    base = 8 + varIntSize sel.count + sel.baseBytes + outputBytes
+    witness
+      | sel.hasStack = 2 + sel.stackBytes
+      | otherwise = 0
 
 -- | Select coins greedily by starting from an empty solution. If the 'continue'
 -- flag is set, the algorithm will try to find a better solution in the stream
@@ -139,6 +230,12 @@ chooseCoinsSink target fee outputs continue
 -- than the previously found solution, the algorithm stops and returns the
 -- previous solution. If the continue flag is not set, the algorithm will return
 -- the first solution it finds in the stream.
+--
+-- The fee function is called on the coins taken so far each time a coin is
+-- added. Amounts are added as unbounded integers, so that no sum wraps
+-- around. The result is 'Nothing' when no selection covers the target and
+-- its fee, or when the change does not fit in 64 bits. 'chooseCoinsSink'
+-- does not use this function: it also bounds the weight of the selection.
 greedyAddSink ::
   (Monad m, Coin c) =>
   -- | value to send
@@ -150,49 +247,50 @@ greedyAddSink ::
   -- | coin selection and change
   ConduitT c Void m (Maybe ([c], Word64))
 greedyAddSink target guessFee continue =
-  go [] 0 [] 0
+  go [] 0 Nothing
   where
     -- The goal is the value we must reach (including the fee) for a certain
     -- selection of coins.
-    goal coins = target + guessFee coins
-    go acc aTot ps pTot =
+    goal coins = toInteger target + toInteger (guessFee coins)
+    go acc aTot previous =
       await >>= \case
         -- A coin is available in the stream
         Just coin -> do
-          let val = coinValue coin
-          -- We have reached the goal using this coin
-          if val + aTot >= goal (coin : acc)
-            then -- If we want to continue searching for better solutions
-              if continue
-                then -- This solution is the first one or
-                -- This solution is better than the previous one
-                  if pTot == 0 || val + aTot < pTot
-                    then -- Continue searching for better solutions in the stream
-                      go [] 0 (coin : acc) (val + aTot)
-                    else -- Otherwise, we stop here and return the previous
-                    -- solution
-                      return $ Just (ps, pTot - goal ps)
-                else -- Otherwise, return this solution
-                  return $
-                    Just (coin : acc, val + aTot - goal (coin : acc))
-            else -- We have not yet reached the goal. Add the coin to the
+          let tot = aTot + toInteger (coinValue coin)
+          if tot < goal (coin : acc)
+            then -- We have not yet reached the goal. Add the coin to the
             -- accumulator
-              go (coin : acc) (val + aTot) ps pTot
+              go (coin : acc) tot previous
+            else
+              if not continue
+                then return $ solution (coin : acc, tot)
+                else -- This solution is the first one, or it is better than
+                -- the previous one: continue searching for better solutions
+                -- in the stream. Otherwise, stop here and return the
+                -- previous solution.
+                  if maybe True ((tot <) . snd) previous
+                    then go [] 0 (Just (coin : acc, tot))
+                    else return $ solution =<< previous
         -- We reached the end of the stream
-        Nothing ->
-          return $
-            if null ps
-              then -- If no solution was found, return Nothing
-                Nothing
-              else -- If we have a solution, return it
-                Just (ps, pTot - goal ps)
+        Nothing -> return $ solution =<< previous
+    solution (coins, tot)
+      | change > toInteger (maxBound :: Word64) = Nothing
+      | otherwise = Just (coins, fromInteger change)
+      where
+        change = tot - goal coins
 
 {- Size and fee estimation -}
 
 -- | The kind of input a coin is spent with, which decides the bytes it
 -- takes once signed. Keys are compressed, as every SegWit kind requires,
--- unless the kind says otherwise. A multisig kind is @m@ of @n@, with @n@
--- up to 'maxMultisigKeys'.
+-- unless the kind says otherwise. A multisig kind is @m@ of @n@, with @m@
+-- from 1 to @n@. A SegWit multisig has up to 'maxMultisigKeys' keys. A
+-- pay-to-script-hash multisig has up to 15: its redeem script is at most
+-- 'maxRedeemScriptSize' bytes, and 15 compressed keys make 513.
+--
+-- 'guessTxFee' and 'chooseCoins' refuse a kind outside these ranges.
+-- 'inputWeight', 'guessTxWeight' and 'guessTxSize' do not check: on such a
+-- kind their result means nothing.
 --
 -- Some inputs the library signs have no kind: bare multisig,
 -- pay-to-script-hash or pay-to-witness-script-hash of a single key,
@@ -240,6 +338,28 @@ data OutputKind
     OutputScript Int
   deriving (Eq, Show, Read)
 
+-- | Whether an input kind is one that can exist, see 'InputKind'
+checkInputKind :: InputKind -> Either String ()
+checkInputKind kind = case kind of
+  InputMulSig m n -> multisig m n 15
+  InputWitnessMulSig m n -> multisig m n maxMultisigKeys
+  InputNestedWitnessMulSig m n -> multisig m n maxMultisigKeys
+  _ -> Right ()
+  where
+    multisig m n most =
+      unless (1 <= m && m <= n && n <= most) $
+        Left $
+          "The input kind " <> show kind <> " is not valid: m of n needs 1 <= m <= n <= " <> show most
+
+-- | Whether an output kind is one that can exist: a script is from 0 to
+-- 10,000 bytes long
+checkOutputKind :: OutputKind -> Either String ()
+checkOutputKind kind = case kind of
+  OutputScript n
+    | n < 0 || n > maxWitnessScriptSize ->
+        Left $ "The output kind " <> show kind <> " is not valid: a script has from 0 to 10000 bytes"
+  _ -> Right ()
+
 -- | An upper bound on the weight, in weight units of BIP 141, of a signed
 -- transaction with the inputs and outputs given. A signature is counted as
 -- 72 bytes with its hash type, the most a low-S DER signature takes, and a
@@ -264,14 +384,57 @@ guessTxWeight inputs outputs = 4 * base + witness
 -- | An upper bound on the virtual size, in virtual bytes of BIP 141, of a
 -- signed transaction with the inputs and outputs given: its weight divided
 -- by four, rounded up. Nodes charge fees by virtual byte.
+--
+-- Bitcoin Core charges for signature operations as well: its size for fee
+-- purposes is the larger of this size and 5 virtual bytes per signature
+-- operation (@GetVirtualTransactionSize@ with @DEFAULT_BYTES_PER_SIGOP@ of
+-- 20, in @policy/policy.cpp@). That only exceeds the size for transactions
+-- dense in signature operations, such as one that pays to many bare
+-- multisig outputs. This estimate, like 'txVirtualSize', leaves it out.
 guessTxSize :: [InputKind] -> [OutputKind] -> Int
 guessTxSize inputs outputs = (guessTxWeight inputs outputs + 3) `div` 4
 
 -- | Estimate the fee to pay, from a fee rate per virtual byte and the
--- inputs and outputs of the transaction.
-guessTxFee :: Word64 -> [InputKind] -> [OutputKind] -> Word64
-guessTxFee feeRate inputs outputs =
-  feeRate * fromIntegral (guessTxSize inputs outputs)
+-- inputs and outputs of the transaction. Fails for a kind of input or
+-- output that cannot exist, see 'InputKind', and for a fee that does not
+-- fit in 64 bits.
+guessTxFee :: Word64 -> [InputKind] -> [OutputKind] -> Either String Word64
+guessTxFee feeRate inputs outputs = do
+  mapM_ (prefixed . checkInputKind) inputs
+  mapM_ (prefixed . checkOutputKind) outputs
+  -- Multiplied as unbounded integers, so that the fee cannot wrap around
+  let fee = toInteger feeRate * toInteger (guessTxSize inputs outputs)
+  when (fee > toInteger (maxBound :: Word64)) $
+    Left "guessTxFee: The fee does not fit in 64 bits"
+  return (fromInteger fee)
+  where
+    prefixed = either (Left . ("guessTxFee: " <>)) Right
+
+-- | The amount below which nodes do not relay an output of the kind, at
+-- the default dust relay fee of Bitcoin Core, 3,000 satoshi per 1,000
+-- virtual bytes: three satoshi for each byte of the output and of the
+-- smallest input that spends it. This is @GetDustThreshold@ of Bitcoin
+-- Core (@policy/policy.cpp@), which counts 148 bytes for the input of an
+-- output without a witness and 67 for the input of a witness program. It
+-- gives 546 satoshi for pay-to-public-key-hash, 294 for
+-- pay-to-witness-public-key-hash, and 330 for pay-to-witness-script-hash
+-- and Taproot. Bitcoin Cash Node gives the same amounts for the outputs
+-- it has.
+--
+-- An 'OutputScript' is counted as an output without a witness. For a
+-- witness program of another version this is more than Bitcoin Core asks,
+-- which is the safe side. A data carrier output is never dust, whatever
+-- this function says of its size.
+dustThreshold :: OutputKind -> Word64
+dustThreshold kind = 3 * fromIntegral (outputSize kind + spendSize)
+  where
+    spendSize = case kind of
+      OutputWitnessPKHash -> witnessSpend
+      OutputWitnessScriptHash -> witnessSpend
+      OutputTaproot -> witnessSpend
+      _ -> 32 + 4 + 1 + 107 + 4
+    -- The script of the input counts a quarter in a witness
+    witnessSpend = 32 + 4 + 1 + (107 `div` 4) + 4
 
 -- | The bytes an input of the kind takes: in the transaction without its
 -- witness, and in the witness. A kind without a witness counts no witness
@@ -344,9 +507,22 @@ varIntSize n
 {- Build a new Tx -}
 
 -- | Build a transaction by providing a list of outpoints as inputs
--- and a list of recipient addresses and amounts as outputs.
+-- and a list of recipient addresses and amounts as outputs. The
+-- transaction has version 1, no lock time, and final sequence numbers, so
+-- it does not signal replacement (BIP 125).
+--
+-- Fails for an address that is not one of the network, and for an amount
+-- above the 'maxSatoshi' of the network, as @createrawtransaction@ of
+-- Bitcoin Core refuses an amount out of range. Like that call, it does not
+-- check what needs the whole transaction: amounts that add up to more
+-- than 'maxSatoshi', and an outpoint listed twice. Nodes refuse a
+-- transaction with either, and so does 'verifyStdTx' for the second.
+--
+-- Nothing is added for change: what the outputs do not spend is the fee.
 buildAddrTx :: Network -> Ctx -> [OutPoint] -> [(Text, Word64)] -> Either String Tx
-buildAddrTx net ctx ops rcps =
+buildAddrTx net ctx ops rcps = do
+  when (any ((> net.maxSatoshi) . snd) rcps) $
+    Left $ "buildAddrTx: An amount is above the maximum of " <> show net.maxSatoshi <> " satoshi"
   buildTx ctx ops <$> mapM f rcps
   where
     f (aTxt, v) =
@@ -356,7 +532,9 @@ buildAddrTx net ctx ops rcps =
         return (o, v)
 
 -- | Build a transaction by providing a list of outpoints as inputs
--- and a list of 'ScriptOutput' and amounts as outputs.
+-- and a list of 'ScriptOutput' and amounts as outputs. It has no network
+-- to check against, so it builds what it is given, whatever the amounts.
+-- 'buildAddrTx' refuses an amount above the maximum of its network.
 buildTx :: Ctx -> [OutPoint] -> [(ScriptOutput, Word64)] -> Tx
 buildTx ctx ops rcpts =
   Tx 1 (toIn <$> ops) (toOut <$> rcpts) [] 0
@@ -378,6 +556,20 @@ buildTx ctx ops rcpts =
 -- without a script tree is the output key, as a wallet of BIP 86 spends. The
 -- BIP 341 digest commits to the output every input spends, so every input
 -- of the transaction must have a 'SigInput' then.
+--
+-- An input is signed with the keys of the list that its coin asks for. An
+-- input whose coin asks for none of them is left as it is, so that several
+-- parties can sign in turn. The result is then 'Right' with that input
+-- unsigned: use 'verifyStdTx' to tell whether the transaction is complete.
+--
+-- The signer refuses, with the reason, what would make a transaction that
+-- nodes do not accept: a hash type that is not defined, a redeem or a
+-- witness script that does not hash to its coin or is too long, a SegWit
+-- or Taproot coin on a network without SegWit, and a SegWit version 0 coin
+-- whose key is uncompressed. See 'makeSignature' and 'sigKeys'. It signs
+-- any defined hash type that a 'SigInput' asks for, 'sigHashNone' and
+-- 'sigHashSingle' included, so check a 'SigInput' that comes from someone
+-- else.
 --
 -- Example: P2WPKH
 --
@@ -446,6 +638,9 @@ findSigInput = Sign.findInputIndex (.outpoint)
 -- | Merge partially-signed multisig transactions.  This function does not
 -- support segwit and P2SH-segwit inputs.  Use PSBTs to merge transactions with
 -- segwit inputs. An input that no transaction has signed stays unsigned.
+-- The witness is not merged: the transactions must have the same one, and
+-- the result keeps it, so that a SegWit input signed before the multisig
+-- signers took their copies stays signed.
 mergeTxs ::
   Network ->
   Ctx ->
@@ -469,11 +664,13 @@ mergeTxs net ctx txs os = case txs of
     clearAll tx = foldl clearInput tx (outs tx)
     ins is i = updateIndex i is (\TxIn {..} -> TxIn {script = B.empty, ..})
     clearInput tx (_, i) =
-      Tx tx.version (ins tx.inputs i) tx.outputs [] tx.locktime
+      Tx tx.version (ins tx.inputs i) tx.outputs tx.witness tx.locktime
 
 -- | Merge input from partially-signed multisig transactions.  This function
 -- does not support segwit and P2SH-segwit inputs. When no transaction has a
--- script for the input, the input is left as it is.
+-- script for the input, the input is left as it is. Fails when one of the
+-- transactions has no input at the index. The witness of the transaction
+-- is kept.
 mergeTxInput ::
   Network ->
   Ctx ->
@@ -482,6 +679,8 @@ mergeTxInput ::
   ((ScriptOutput, Word64), Int) ->
   Either String Tx
 mergeTxInput net ctx txs tx ((so, val), i) = do
+  when (i < 0 || any ((<= i) . length . (.inputs)) (tx : txs)) $
+    Left "mergeTxInput: input index out of range"
   -- Ignore transactions with empty inputs
   let ins = map ((.script) . (!! i) . (.inputs)) txs
   sigRes <- mapM extractSigs $ filter (not . B.null) ins
@@ -491,7 +690,7 @@ mergeTxInput net ctx txs tx ((so, val), i) = do
       unless (all ((== rdm) . snd) sigRes) $ Left "Redeem scripts do not match"
       si <- marshal (net, ctx) <$> go (nub $ concatMap fst sigRes) so rdm
       let ins' = updateIndex i tx.inputs (\TxIn {..} -> TxIn {script = si, ..})
-      return $ Tx tx.version ins' tx.outputs [] tx.locktime
+      return $ Tx tx.version ins' tx.outputs tx.witness tx.locktime
   where
     go allSigs out rdmM =
       case out of
@@ -524,20 +723,48 @@ mergeTxInput net ctx txs tx ((so, val), i) = do
 {- Tx verification -}
 
 -- | Verify that every input of the transaction spends one of the coins
--- given with a standard input that verifies ('verifyStdInput'), and that
--- the outputs do not spend more than the coins hold. Other rules of
--- @CheckTransaction@ in Bitcoin Core, such as the limits on sizes and
--- amounts and the absence of duplicate inputs, are not checked.
+-- given with a standard input that verifies ('verifyStdInput'), that no
+-- two inputs spend the same coin, and that the outputs do not spend more
+-- than the coins hold. Other rules of @CheckTransaction@ in Bitcoin Core,
+-- such as the limits on sizes and amounts, are not checked, and neither
+-- are lock times.
+--
+-- This is not a script interpreter. It answers 'True' only for the
+-- standard kinds of input listed at 'verifyStdInput', and 'False' for any
+-- other script, valid or not. For those kinds it follows consensus: it
+-- does not answer 'True' for an input that no block can contain.
 verifyStdTx ::
   Network -> Ctx -> Tx -> [(ScriptOutput, Word64, OutPoint)] -> Bool
 verifyStdTx net ctx tx coins =
   not (null tx.inputs)
-    && all (verifyStdInput net ctx tx coins) [0 .. length tx.inputs - 1]
-    && spent <= available
+    && Map.size (Map.fromList [(i.outpoint, ()) | i <- tx.inputs]) == length tx.inputs
+    && all (verifyInput net ctx tx spent) [0 .. length tx.inputs - 1]
+    && maybe False (\outs -> toSpend <= sum (map (toInteger . snd) outs)) (sequence spent.coins)
   where
-    spent = sum (map (toInteger . (.value)) tx.outputs)
-    available = sum [toInteger v | (_, v, _) <- matched]
-    matched = catMaybes (matchTemplate coins tx.inputs (\(_, _, o) txin -> o == txin.outpoint))
+    -- The coins are looked up once for the whole transaction
+    spent = spentCoins ctx tx coins
+    toSpend = sum (map (toInteger . (.value)) tx.outputs)
+
+-- | The coin of each input of a transaction, and the outputs that the
+-- Taproot digest commits to. 'verifyStdTx' computes this once, so that the
+-- time it takes does not grow with the square of the number of inputs.
+data SpentCoins = SpentCoins
+  { -- | the coin of each input, in order, when it is among those given
+    coins :: [Maybe (ScriptOutput, Word64)],
+    -- | the output every input spends, when every coin is given
+    outputs :: Maybe [TxOut]
+  }
+
+spentCoins :: Ctx -> Tx -> [(ScriptOutput, Word64, OutPoint)] -> SpentCoins
+spentCoins ctx tx given =
+  SpentCoins
+    { coins = found,
+      outputs = map (\(so, val) -> TxOut val (marshal ctx so)) <$> sequence found
+    }
+  where
+    -- The first coin given for an outpoint is its coin
+    byOutPoint = Map.fromListWith (\_ first -> first) [(o, (so, val)) | (so, val, o) <- given]
+    found = map (\i -> Map.lookup i.outpoint byOutPoint) tx.inputs
 
 -- | Verify that an input spends one of the coins given with a standard
 -- input that verifies: a signature of the right key and digest for
@@ -547,16 +774,46 @@ verifyStdTx net ctx tx coins =
 -- single key check. An input that is not a witness program must have no
 -- witness, as @VerifyScript@ requires in Bitcoin Core. Other script path
 -- spends need script execution and are not verified: they are refused.
+--
+-- The answer is never 'True' for an input that no block can contain:
+--
+-- * A multisig input has exactly as many signatures as its script
+--   requires, each of a key of the script, in the order of the keys, and
+--   no other item. @OP_CHECKMULTISIG@ takes that many signatures from the
+--   top of the stack, and the item below them, its dummy element, must be
+--   empty (BIP 147). So an item more, after the signatures or among them,
+--   makes the operation fail.
+-- * The input script of a SegWit program nested in pay-to-script-hash is
+--   the push of the program and nothing else (BIP 141).
+-- * A redeem script is at most 'maxRedeemScriptSize' bytes, and a witness
+--   script at most 'maxWitnessScriptSize'.
+-- * A network without SegWit has no witness inputs.
+--
+-- The answer can be 'False' for an input that a block may hold but that
+-- nodes do not relay:
+--
+-- * A signature is read with 'decodeTxSig', which applies the relay rules:
+--   low S and a defined hash type.
+-- * A legacy multisig input with an empty item before its signatures
+--   leaves that item on the stack. Consensus allows it outside a witness,
+--   and the @CLEANSTACK@ rule of the relay policy does not.
+--
+-- An uncompressed key in a SegWit input is accepted, since a block may
+-- hold it, although nodes do not relay it.
 verifyStdInput :: Network -> Ctx -> Tx -> [(ScriptOutput, Word64, OutPoint)] -> Int -> Bool
-verifyStdInput net ctx tx coins i
+verifyStdInput net ctx tx coins = verifyInput net ctx tx (spentCoins ctx tx coins)
+
+-- | 'verifyStdInput' on coins that are looked up already
+verifyInput :: Network -> Ctx -> Tx -> SpentCoins -> Int -> Bool
+verifyInput net ctx tx spent i
   | i < 0 || i >= length tx.inputs = False
-  | otherwise = case coinOf (tx.inputs !! i) of
+  | otherwise = case spent.coins !! i of
       Nothing -> False
       Just (so0, val)
         | isSegwit so0 ->
-            fromRight False $ (B.null inp &&) . verifySegwitInput so0 val <$> wp so0
+            net.segWit && fromRight False ((B.null inp &&) . verifySegwitInput so0 val <$> wp so0)
         | isTaproot so0 ->
-            B.null inp && verifyTaprootInput so0
+            net.segWit && B.null inp && verifyTaprootInput so0
         | otherwise ->
             or $
               rights
@@ -565,7 +822,6 @@ verifyStdInput net ctx tx coins i
                 ]
   where
     inp = (tx.inputs !! i).script
-    coinOf txin = find (\(_, _, o) -> o == txin.outpoint) coins >>= \(so, val, _) -> Just (so, val)
     theTxSigHash so val = Sign.makeSigHash net ctx tx i so val
 
     -- A signature verifies only when its digest could be computed.
@@ -580,10 +836,24 @@ verifyStdInput net ctx tx coins i
     wp :: ScriptOutput -> Either String (Maybe ScriptOutput, SimpleInput)
     wp so = decodeWitnessInput net ctx =<< viewWitnessProgram net ctx so ws
 
+    -- The witness program of an input script that is its push and nothing
+    -- else, on a network that has SegWit
     nestedScriptOutput :: Either String ScriptOutput
     nestedScriptOutput = case unmarshal (net, ctx) inp of
-      Right (NestedWitnessInput so) -> Right so
+      Right (NestedWitnessInput so)
+        | net.segWit && inp == marshal (net, ctx) (NestedWitnessInput so) -> Right so
       _ -> Left "nestedScriptOutput: not a nested output"
+
+    -- OP_CHECKMULTISIG takes the signatures the script requires from the
+    -- top of the stack, and each must verify against a later key than the
+    -- one before. An empty item among them is no signature. An item more
+    -- pushes a signature into the place of the dummy element, which must
+    -- be empty. Only an empty item before the signatures does not fail the
+    -- operation: it stays on the stack, which the relay rules refuse.
+    multisigVerifies :: (SigHash -> Either String Hash256) -> [PubKey] -> Int -> [TxSignature] -> Bool
+    multisigVerifies hashfun pubs r sigs =
+      -- With exactly r items, r of them verify only when none is empty
+      length sigs == r && countMulSig' ctx hashfun pubs sigs == r
 
     verifyLegacyInput :: ScriptOutput -> Word64 -> ScriptInput -> Bool
     verifyLegacyInput so val si = case (so, si) of
@@ -593,10 +863,10 @@ verifyStdInput net ctx tx coins i
         pubKeyAddr ctx pub == p2pkhAddr h
           && checkSig (theTxSigHash so val sh Nothing) sig pub.point
       (PayMulSig pubs r, RegularInput (SpendMulSig sigs)) ->
-        either (const False) (\out -> countMulSig net ctx tx out val i ((.point) <$> pubs) sigs == r) $
+        either (const False) (\out -> multisigVerifies (txSigHash net tx out val i) ((.point) <$> pubs) r sigs) $
           encodeOutput ctx so
       (PayScriptHash h, ScriptHashInput si' rdm) ->
-        payToScriptAddress ctx rdm == p2shAddr h && verifyLegacyInput rdm val (RegularInput si')
+        payToScriptAddress ctx rdm == Right (p2shAddr h) && verifyLegacyInput rdm val (RegularInput si')
       _ -> False
 
     verifySegwitInput ::
@@ -617,7 +887,7 @@ verifyStdInput net ctx tx coins i
         Just rdm'@(PayPK pub),
         SpendPK (TxSignature sig sh)
         ) ->
-          let keytest = payToWitnessScriptAddress ctx rdm' == p2wshAddr h
+          let keytest = payToWitnessScriptAddress ctx rdm' == Right (p2wshAddr h)
               sighash = theTxSigHash so val sh $ Just rdm'
               pkpoint = pub.point
               verify = checkSig sighash sig pkpoint
@@ -626,7 +896,7 @@ verifyStdInput net ctx tx coins i
         Just rdm'@(PayPKHash kh),
         SpendPKHash (TxSignature sig sh) pub
         ) ->
-          let keytest = payToWitnessScriptAddress ctx rdm' == p2wshAddr h
+          let keytest = payToWitnessScriptAddress ctx rdm' == Right (p2wshAddr h)
               addrtest = addressHash (marshal ctx pub) == kh
               pkpoint = pub.point
               sighash = theTxSigHash so val sh $ Just rdm'
@@ -636,33 +906,30 @@ verifyStdInput net ctx tx coins i
         Just rdm'@(PayMulSig pubs r),
         SpendMulSig sigs
         ) ->
-          let keytest = payToWitnessScriptAddress ctx rdm' == p2wshAddr h
+          let keytest = payToWitnessScriptAddress ctx rdm' == Right (p2wshAddr h)
               pkpoints = (.point) <$> pubs
               hashfun sh = theTxSigHash so val sh $ Just rdm'
-              verify = countMulSig' ctx hashfun pkpoints sigs == r
+              verify = multisigVerifies hashfun pkpoints r sigs
            in keytest && verify
       _ -> False
 
     verifyNestedInput ::
       ScriptOutput -> ScriptOutput -> Word64 -> (Maybe RedeemScript, SimpleInput) -> Bool
     verifyNestedInput so so' val x = case so of
-      PayScriptHash h -> payToScriptAddress ctx so' == p2shAddr h && verifySegwitInput so' val x
+      PayScriptHash h -> payToScriptAddress ctx so' == Right (p2shAddr h) && verifySegwitInput so' val x
       _ -> False
-
-    -- The outputs every input spends, in order, which the Taproot digest
-    -- commits to
-    spentOutputs :: Maybe [TxOut]
-    spentOutputs = mapM (fmap (\(so, val) -> TxOut val (marshal ctx so)) . coinOf) tx.inputs
 
     verifyTaprootInput :: ScriptOutput -> Bool
     verifyTaprootInput so = fromRight False $ do
       outKey <- case so of
         PayWitness 1 program -> maybe (Left "not an output key") Right (importXOnlyPubKey ctx program)
         _ -> Left "not a Taproot output"
-      spent <- maybe (Left "a spent output is missing") Right spentOutputs
+      -- The outputs every input spends, in order, which the Taproot digest
+      -- commits to
+      spentOutputs <- maybe (Left "a spent output is missing") Right spent.outputs
       let schnorr sigBytes annex leaf = do
             TaprootSignature sig sh <- decodeTaprootSig sigBytes
-            h <- taprootSigHash tx spent i sh annex leaf
+            h <- taprootSigHash tx spentOutputs i sh annex leaf
             return (sig, h)
       case viewTaprootWitness ctx ws of
         Just (KeyPathSpend sigBytes annex) -> do
@@ -684,7 +951,14 @@ isTaproot = \case
   PayWitness 1 program -> B.length program == 32
   _ -> False
 
--- | Count the number of valid signatures for a multi-signature transaction.
+-- | Count the signatures of a multisig input that verify against the keys
+-- of its script, taken in the order of the keys. An empty item counts for
+-- nothing and passes over one key.
+--
+-- The count is not a verdict. An input is valid when it has exactly the
+-- signatures its script requires and all of them count, which
+-- 'verifyStdInput' checks. An input with an item more, or with an empty
+-- item, can count enough signatures and still fail @OP_CHECKMULTISIG@.
 countMulSig ::
   Network ->
   Ctx ->

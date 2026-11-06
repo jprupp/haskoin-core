@@ -143,13 +143,15 @@ data CFHeaders = CFHeaders
   }
   deriving (Eq, Show, Generic, NFData)
 
+-- | A message of more than 'maxFilterHashes' filter hashes fails the parse,
+-- as BIP 157 requires.
 instance Serial CFHeaders where
   deserialize =
     CFHeaders
       <$> getWord8
       <*> deserialize
       <*> deserialize
-      <*> getVarIntList deserialize
+      <*> getVarIntListMax "cfheaders" maxFilterHashes deserialize
   serialize c = do
     putWord8 c.filterType
     serialize c.stopHash

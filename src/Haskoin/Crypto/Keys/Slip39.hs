@@ -31,6 +31,16 @@
 -- The master secret of a BIP-0032 wallet is its seed, the bytes fed to
 -- HMAC-SHA512 to derive the master key. A SLIP-0039 share is not a BIP-0039
 -- mnemonic and cannot be converted into one.
+--
+-- A share is a secret. The 'Show' instances of this module leave the share
+-- values out, and an error names the position of a wrong word, never the
+-- word. A mnemonic can come from an untrusted source, so its length is
+-- checked before anything else: a share has at most 1023 words.
+--
+-- The field arithmetic looks bytes of the secret up in tables, as the
+-- reference implementation does, so its timing depends on them. Hardware
+-- wallets use constant-time code. Do not split or combine secrets where an
+-- attacker can time the operation closely.
 module Haskoin.Crypto.Keys.Slip39
   ( -- * Shares
     Share (..),
@@ -41,6 +51,7 @@ module Haskoin.Crypto.Keys.Slip39
     Scheme (..),
     generateMnemonics,
     generateShares,
+    generateSharesFrom,
     generateSharesWith,
     SplitRandom (..),
     splitRandomSizes,
@@ -53,6 +64,7 @@ module Haskoin.Crypto.Keys.Slip39
     -- * The passphrase
     encryptMasterSecret,
     decryptMasterSecret,
+    decryptMasterSecretBytes,
 
     -- * Shamir's secret sharing
     splitSecret,
@@ -81,16 +93,18 @@ module Haskoin.Crypto.Keys.Slip39
 where
 
 import Control.Monad (foldM, forM, forM_, replicateM, unless, when)
+import Control.Monad.IO.Class (MonadIO, liftIO)
+import Control.Monad.Trans.Class (lift)
+import Control.Monad.Trans.Except (ExceptT (..), runExceptT, throwE)
 import Crypto.Hash (SHA256)
 import Crypto.KDF.PBKDF2 (Parameters (..), fastPBKDF2_SHA256)
 import Crypto.MAC.HMAC (HMAC, hmac)
-import Crypto.Random (MonadRandom, getRandomBytes)
 import Data.Array.Unboxed (UArray, listArray, (!))
 import Data.Bits (shiftL, shiftR, testBit, xor, (.&.), (.|.))
 import Data.ByteArray qualified as BA
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as B
-import Data.Char (ord)
+import Data.Char (isAscii, ord)
 import Data.List (nub, transpose)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as M
@@ -100,6 +114,7 @@ import Data.Text.Encoding qualified as E
 import Data.Vector (Vector)
 import Data.Vector qualified as V
 import Data.Word (Word8)
+import System.Entropy (getEntropy)
 
 {- Shares -}
 
@@ -214,6 +229,18 @@ headerWords = 4
 minMnemonicWords :: Int
 minMnemonicWords = 20
 
+-- | The most words of a mnemonic. The checksum is a Reed-Solomon code over
+-- GF(1024), whose code words have at most 1023 symbols, the "up to a
+-- thousand words" of the specification. Beyond that length the checksum no
+-- longer promises to catch any three wrong words.
+maxMnemonicWords :: Int
+maxMnemonicWords = 1023
+
+-- | The most bytes of a share value that fit a mnemonic: the 1016 words
+-- left by the metadata hold 10160 bits.
+maxShareValueBytes :: Int
+maxShareValueBytes = ((maxMnemonicWords - metadataWords) * 10) `div` 8
+
 {- The field GF(256) -}
 
 -- | The powers of the generator x + 1, the byte 3, in the field of the AES
@@ -281,7 +308,14 @@ data SplitRandom = SplitRandom
   { randomShares :: ![ByteString],
     digestRandom :: !ByteString
   }
-  deriving (Eq, Show)
+  deriving (Eq)
+
+-- | The random shares are shares of the secret, and the random part is
+-- most of the digest share, so neither is shown.
+instance Show SplitRandom where
+  showsPrec d _ =
+    showParen (d > 10) $
+      showString "SplitRandom {randomShares = <redacted>, digestRandom = <redacted>}"
 
 -- | The sizes of the random values a split of a secret of the given length
 -- draws at the given threshold: how many random shares, their length, and
@@ -343,7 +377,8 @@ recoverSecret threshold shares =
           secret <- interpolate secretIndex shares
           digestShare <- interpolate digestIndex shares
           let (digest, randomPart) = B.splitAt digestBytes digestShare
-          unless (digest == digestOf randomPart secret) $ Left "The digest of the secret does not match"
+          -- compared in constant time, since the digest is of the secret
+          unless (BA.constEq digest (digestOf randomPart secret)) $ Left "The digest of the secret does not match"
           return secret
 
 {- The checksum -}
@@ -393,26 +428,35 @@ rs1024Verify cs values = rs1024Polymod (cs ++ values) == 1
 
 -- | The mnemonic of a share: its header, its value padded to whole words,
 -- and the checksum, as words of the list. A share whose fields are out of
--- range is refused.
+-- range is refused, and so is a value of more than 1270 bytes, whose
+-- mnemonic would be longer than the 1023 words the checksum covers.
 encodeShare :: Share -> Either String Text
 encodeShare share = do
   checkShare share
+  when (B.length share.value > maxShareValueBytes) $
+    Left ("The share value must have at most " <> show maxShareValueBytes <> " bytes, not " <> show (B.length share.value))
   let dataWords = headerOf share ++ valueWords share.value
       checksum = rs1024Checksum (customizationString share.extendable) dataWords
-  return $ indicesToMnemonic (dataWords ++ checksum)
+  indicesToMnemonic (dataWords ++ checksum)
 
 -- | The share a mnemonic carries. The words are looked up in lower case.
--- The mnemonic must have at least 20 words, a length that leaves at most 8
--- bits of padding, a valid checksum, zero padding bits, and a group
--- threshold no greater than its group count.
+-- The mnemonic must have at least 20 and at most 1023 words, a length that
+-- leaves at most 8 bits of padding, a valid checksum, zero padding bits,
+-- and a group threshold no greater than its group count.
+--
+-- The words are counted before anything else is done with them, so the
+-- work on a mnemonic from an untrusted source is linear in its length.
 decodeShare :: Text -> Either String Share
 decodeShare mnemonic = do
-  indices <- mnemonicToIndices mnemonic
-  let count = length indices
+  let mnemonicWords = T.words mnemonic
+      count = length mnemonicWords
       valueWordCount = count - metadataWords
-      -- The padded value is a whole number of 10-bit words; its length
-      -- modulo 16 is the padding, since the value has a multiple of 16 bits
-      padding = (10 * valueWordCount) `mod` 16
+  when (count > maxMnemonicWords) $
+    Left ("The mnemonic has " <> show count <> " words, but a share has at most " <> show maxMnemonicWords)
+  indices <- wordsToIndices mnemonicWords
+  -- The padded value is a whole number of 10-bit words; its length modulo
+  -- 16 is the padding, since the value has a multiple of 16 bits
+  let padding = (10 * valueWordCount) `mod` 16
   when (count < minMnemonicWords) $
     Left ("The mnemonic has " <> show count <> " words, but a share has at least " <> show minMnemonicWords)
   when (padding > 8) $
@@ -511,37 +555,61 @@ encryptMasterSecret identifier ext iterExponent passphrase secret = do
   checkRange "identifier" 0 32767 identifier
   checkRange "iteration exponent" 0 15 iterExponent
   checkSecretLength "master secret" secret
-  unless (T.all printableAscii passphrase) $
-    Left "The passphrase must contain only printable ASCII characters, code points 32 to 126"
+  passphraseBytes <- checkPassphrase passphrase
   return
     EncryptedMasterSecret
       { identifier = identifier,
         extendable = ext,
         iterationExponent = iterExponent,
-        ciphertext = feistel [0, 1, 2, 3] identifier ext iterExponent passphrase secret
+        ciphertext = feistel [0, 1, 2, 3] identifier ext iterExponent passphraseBytes secret
       }
+
+-- | The bytes of a passphrase, which must be printable ASCII: "the
+-- passphrase MUST be a string containing only printable ASCII characters
+-- (code points 32-126)", says the specification.
+checkPassphrase :: Text -> Either String ByteString
+checkPassphrase passphrase
+  | T.all printableAscii passphrase = Right (E.encodeUtf8 passphrase)
+  | otherwise = Left "The passphrase must contain only printable ASCII characters, code points 32 to 126"
   where
     printableAscii c = ord c >= 32 && ord c <= 126
 
 -- | The master secret of an encrypted one under a passphrase: the Feistel
 -- rounds in reverse. Any passphrase gives a master secret, so a wrong one
--- is not detected, as the specification intends. The passphrase is not
--- checked for printable ASCII here, so that shares made by an
--- implementation that allowed other characters can still be recovered; it
--- is encoded as UTF-8, as the reference implementation does.
+-- is not detected, as the specification intends.
+--
+-- The passphrase must be printable ASCII, as the specification requires
+-- and as on encryption. A passphrase with other characters has several
+-- encodings that look alike on screen, such as "é" as one code point or as
+-- "e" with a combining accent, and each one would open a different wallet.
+-- To recover shares made by software that allowed such a passphrase, use
+-- 'decryptMasterSecretBytes' with the exact bytes that software used.
 decryptMasterSecret :: Text -> EncryptedMasterSecret -> Either String ByteString
 decryptMasterSecret passphrase ems = do
+  passphraseBytes <- checkPassphrase passphrase
+  decryptMasterSecretBytes passphraseBytes ems
+
+-- | 'decryptMasterSecret' with the passphrase as bytes, which are not
+-- checked, as the @decrypt@ function of the reference implementation takes
+-- it. This is for shares made by software that allowed a passphrase
+-- outside printable ASCII: the caller has to know which bytes that
+-- software fed to the cipher, for instance the UTF-8 encoding of the NFKD
+-- form of the passphrase. Get the encrypted master secret from
+-- 'combineShares'.
+decryptMasterSecretBytes :: ByteString -> EncryptedMasterSecret -> Either String ByteString
+decryptMasterSecretBytes passphraseBytes ems = do
   checkRange "identifier" 0 32767 ems.identifier
   checkRange "iteration exponent" 0 15 ems.iterationExponent
   checkSecretLength "encrypted master secret" ems.ciphertext
-  return $ feistel [3, 2, 1, 0] ems.identifier ems.extendable ems.iterationExponent passphrase ems.ciphertext
+  return $ feistel [3, 2, 1, 0] ems.identifier ems.extendable ems.iterationExponent passphraseBytes ems.ciphertext
 
 -- | The Feistel network of the specification over the rounds given, in
 -- that order: the halves L and R become (R, L xor F(i, R)) each round, and
 -- the result is R || L. The round function is PBKDF2-HMAC-SHA256 of the
 -- round number followed by the passphrase, salted with the salt prefix
--- and R, with 2500 times 2 to the exponent iterations.
-feistel :: [Word8] -> Int -> Bool -> Int -> Text -> ByteString -> ByteString
+-- and R, with 2500 times 2 to the exponent iterations. The passphrase is
+-- given as its bytes.
+feistel :: [Word8] -> Int -> Bool -> Int -> ByteString -> ByteString -> ByteString
 feistel rounds identifier ext iterExponent passphrase secret = right <> left
   where
     half = B.length secret `div` 2
@@ -550,7 +618,7 @@ feistel rounds identifier ext iterExponent passphrase secret = right <> left
     roundFunction i r =
       fastPBKDF2_SHA256
         Parameters {iterCounts = 2500 `shiftL` iterExponent, outputLength = half}
-        (B.cons i (E.encodeUtf8 passphrase))
+        (B.cons i passphrase)
         (saltPrefix <> r)
     -- Without the extendable flag the identifier salts the passphrase, so
     -- another split of the same secret gives another master secret
@@ -617,30 +685,67 @@ schemeThresholds :: Scheme -> [Int]
 schemeThresholds scheme = scheme.groupThreshold : map fst scheme.groups
 
 -- | The shares of a master secret under a scheme, with a random identifier
--- and random values from the monad. The scheme and the secret are checked
--- before anything is drawn. The random source must be fit for keys.
-generateShares :: (MonadRandom m) => Scheme -> Bool -> Int -> Text -> ByteString -> m (Either String [[Share]])
-generateShares scheme ext iterExponent passphrase secret =
-  case checkScheme scheme >> checkSecretLength "master secret" secret of
-    Left err -> return (Left err)
-    Right () -> do
-      idBytes <- getRandomBytes 2
-      let identifier = fromIntegral (bytesToInteger idBytes .&. 0x7fff)
-      randoms <- mapM (drawSplitRandom (B.length secret)) (schemeThresholds scheme)
-      return $ generateSharesWith scheme identifier ext iterExponent passphrase secret randoms
+-- and random values from the operating system: 'getEntropy' of the entropy
+-- package, which reads the @getrandom@ system call or @\/dev\/urandom@ on
+-- Unix and the system's generator on Windows. The specification asks for a
+-- source "suitable for generating cryptographic keys".
+--
+-- Everything is checked before anything is drawn. A secret of more than
+-- 1270 bytes can be split, but its shares are too long for 'encodeShare'.
+generateShares :: (MonadIO m) => Scheme -> Bool -> Int -> Text -> ByteString -> m (Either String [[Share]])
+generateShares = generateSharesFrom (liftIO . getEntropy)
 
--- | The random values of one split: the random shares, then the random
--- part of the digest share.
-drawSplitRandom :: (MonadRandom m) => Int -> Int -> m SplitRandom
-drawSplitRandom secretLength threshold = do
-  let (count, shareLength, randomPartLength) = splitRandomSizes threshold secretLength
-  shares <- replicateM count (getRandomBytes shareLength)
-  randomPart <- getRandomBytes randomPartLength
-  return SplitRandom {randomShares = shares, digestRandom = randomPart}
+-- | 'generateShares' with the source of random bytes as its first
+-- argument: a function from a number of bytes to that many random bytes.
+-- Use it to draw from a generator of your own, which must be fit for keys.
+-- With @getRandomBytes@ of crypton it runs in any @MonadRandom@. Mind that
+-- in 'IO' that function takes its bytes from the RDRAND instruction of the
+-- processor alone when the processor has one, and does not mix in the
+-- operating system's entropy.
+--
+-- The source is only asked for whole values, never for zero bytes, and
+-- only after the scheme, the exponent, the passphrase and the secret have
+-- passed their checks.
+generateSharesFrom ::
+  (Monad m) =>
+  -- | the source of random bytes
+  (Int -> m ByteString) ->
+  Scheme ->
+  Bool ->
+  Int ->
+  Text ->
+  ByteString ->
+  m (Either String [[Share]])
+generateSharesFrom randomBytes scheme ext iterExponent passphrase secret = runExceptT $ do
+  ExceptT . return $ do
+    checkScheme scheme
+    checkRange "iteration exponent" 0 15 iterExponent
+    checkSecretLength "master secret" secret
+    _ <- checkPassphrase passphrase
+    return ()
+  idBytes <- draw 2
+  let identifier = fromIntegral (bytesToInteger idBytes .&. 0x7fff)
+  randoms <- mapM drawSplitRandom (schemeThresholds scheme)
+  ExceptT . return $ generateSharesWith scheme identifier ext iterExponent passphrase secret randoms
+  where
+    -- The bytes asked of the source, which must give as many as asked
+    draw 0 = return B.empty
+    draw n = do
+      bytes <- lift (randomBytes n)
+      unless (B.length bytes == n) $
+        throwE ("The source of random bytes gave " <> show (B.length bytes) <> " bytes where " <> show n <> " were asked for")
+      return bytes
+    -- The random values of one split: the random shares, then the random
+    -- part of the digest share
+    drawSplitRandom threshold = do
+      let (count, shareLength, randomPartLength) = splitRandomSizes threshold (B.length secret)
+      shares <- replicateM count (draw shareLength)
+      randomPart <- draw randomPartLength
+      return SplitRandom {randomShares = shares, digestRandom = randomPart}
 
 -- | The share mnemonics of a master secret under a scheme, one list per
 -- group: 'generateShares' encoded.
-generateMnemonics :: (MonadRandom m) => Scheme -> Bool -> Int -> Text -> ByteString -> m (Either String [[Text]])
+generateMnemonics :: (MonadIO m) => Scheme -> Bool -> Int -> Text -> ByteString -> m (Either String [[Text]])
 generateMnemonics scheme ext iterExponent passphrase secret =
   (>>= traverse (traverse encodeShare)) <$> generateShares scheme ext iterExponent passphrase secret
 
@@ -693,7 +798,16 @@ combineShares shares@(first : _) = do
         Left ("The shares do not have the same " <> what)
     duplicates xs = nub [x | (i, x) <- zip [0 :: Int ..] xs, x `elem` take i xs]
 
--- | The master secret the mnemonics rebuild, decrypted with the passphrase.
+-- | The master secret the mnemonics rebuild, decrypted with the passphrase,
+-- which must be printable ASCII (see 'decryptMasterSecret').
+--
+-- The cost of the decryption is set by the iteration exponent the shares
+-- carry: 10000 times 2 to its power rounds of PBKDF2-HMAC-SHA256. The
+-- exponent can be as high as 15, which is 327,680,000 rounds and about two
+-- minutes of one processor core, where an exponent of 0 takes a few
+-- milliseconds. The specification allows it. A program that reads shares
+-- from an untrusted source should look at the @iterationExponent@ that
+-- 'decodeShare' gives before it combines them.
 combineMnemonics :: Text -> [Text] -> Either String ByteString
 combineMnemonics passphrase mnemonics = do
   shares <- mapM decodeShare mnemonics
@@ -703,15 +817,33 @@ combineMnemonics passphrase mnemonics = do
 {- Words and bits -}
 
 -- | The indices of the words of a mnemonic in the list. The words are
--- matched in lower case, as the reference implementation matches them.
+-- separated by white space and matched without regard to the case of
+-- their ASCII letters. An error names the position of the first word that
+-- is not in the list, counted from 1, and not the word, since a share is a
+-- secret.
 mnemonicToIndices :: Text -> Either String [Int]
-mnemonicToIndices mnemonic = forM (T.words (T.toLower mnemonic)) $ \w ->
-  maybe (Left ("The word " <> show w <> " is not in the SLIP-39 word list")) Right (M.lookup w slip39WordListMap)
+mnemonicToIndices = wordsToIndices . T.words
+
+-- | The indices of words in the list, see 'mnemonicToIndices'.
+wordsToIndices :: [Text] -> Either String [Int]
+wordsToIndices ws = forM (zip [1 :: Int ..] ws) $ \(position, w) ->
+  maybe (Left ("Word " <> show position <> " is not in the SLIP-39 word list")) Right (wordIndex w)
+
+-- | The index of a word in the list. The words of the list are ASCII, so
+-- a word with any other character is not one of them: lower-casing by the
+-- Unicode rules would turn a look-alike such as U+212A KELVIN SIGN into a
+-- letter.
+wordIndex :: Text -> Maybe Int
+wordIndex w
+  | T.all isAscii w = M.lookup (T.toLower w) slip39WordListMap
+  | otherwise = Nothing
 
 -- | The mnemonic of word indices, the words separated by single spaces.
--- An index outside the list is an error of the caller.
-indicesToMnemonic :: [Int] -> Text
-indicesToMnemonic = T.unwords . map (slip39WordList V.!)
+-- An index outside the list, 0 to 1023, is refused.
+indicesToMnemonic :: [Int] -> Either String Text
+indicesToMnemonic indices = T.unwords <$> mapM wordAt indices
+  where
+    wordAt i = maybe (Left ("The word index must be between 0 and 1023, not " <> show i)) Right (slip39WordList V.!? i)
 
 -- | The big-endian number of a list of 10-bit indices.
 indicesToInteger :: [Int] -> Integer

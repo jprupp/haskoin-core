@@ -1,3 +1,6 @@
+{-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE OverloadedRecordDot #-}
+
 -- |
 -- Module      : Haskoin.Test.Block
 -- Copyright   : No rights reserved
@@ -11,19 +14,32 @@ import qualified Data.HashMap.Strict as HashMap
 import Haskoin.Block
 import Haskoin.Crypto (Ctx)
 import Haskoin.Network.Data
+import Haskoin.Transaction.Common (Tx, TxHash (..), txHash)
 import Haskoin.Util.Arbitrary.Crypto
 import Haskoin.Util.Arbitrary.Network
 import Haskoin.Util.Arbitrary.Transaction
 import Haskoin.Util.Arbitrary.Util
 import Test.QuickCheck
 
--- | Block full or arbitrary transactions.
+-- | Block of arbitrary transactions. The header has the Merkle root of the
+-- transactions when there are some. On a network without SegWit the
+-- transactions have no witness, as a block of that network has none.
 arbitraryBlock :: Network -> Ctx -> Gen Block
 arbitraryBlock net ctx = do
   h <- arbitraryBlockHeader
   c <- choose (0, 10)
-  txs <- vectorOf c (arbitraryTx net ctx)
-  return $ Block h txs
+  txs <- vectorOf c (arbitraryNetworkTx net ctx)
+  let header = case buildMerkleRoot (map txHash txs) of
+        Right root -> (h :: BlockHeader) {merkle = root}
+        Left _ -> h
+  return $ Block header txs
+
+-- | Arbitrary transaction of the kind a peer of the network sends: with or
+-- without a witness where the network has SegWit, without one elsewhere.
+arbitraryNetworkTx :: Network -> Ctx -> Gen Tx
+arbitraryNetworkTx net ctx
+  | net.segWit = arbitraryTx net ctx
+  | otherwise = arbitraryLegacyTx net ctx
 
 -- | Block header with random hash.
 arbitraryBlockHeader :: Gen BlockHeader
@@ -61,24 +77,49 @@ arbitraryHeaders :: Gen Headers
 arbitraryHeaders =
   Headers <$> listOf1 ((,) <$> arbitraryBlockHeader <*> arbitraryVarInt)
 
--- | Arbitrary 'MerkleBlock' with at least one hash.
+-- | Arbitrary 'MerkleBlock' that holds a valid proof: a partial Merkle tree
+-- over one to thirty distinct transaction hashes, with any subset of them
+-- matching, under a header that has the Merkle root of those hashes. The
+-- flags are padded with zero bits to whole bytes, as they are on the wire.
 arbitraryMerkleBlock :: Gen MerkleBlock
 arbitraryMerkleBlock = do
   bh <- arbitraryBlockHeader
-  ntx <- arbitrary
-  hashes <- listOf1 arbitraryHash256
-  c <- choose (1, 10)
-  flags <- vectorOf (c * 8) arbitrary
-  return $ MerkleBlock bh ntx hashes flags
+  n <- choose (1, 30)
+  hashes <- (TxHash <$> arbitraryHash256) `vectorOfDistinct` n
+  matches <- vectorOf n arbitrary
+  let (flags, partial) = buildPartialMerkle (zip hashes matches)
+      padding = (8 - length flags `mod` 8) `mod` 8
+      root = either (const bh.merkle) id (buildMerkleRoot hashes)
+  return $
+    MerkleBlock
+      (bh :: BlockHeader) {merkle = root}
+      (fromIntegral n)
+      partial
+      (flags ++ replicate padding False)
+  where
+    vectorOfDistinct gen k = go k []
+      where
+        go 0 acc = return acc
+        go i acc = do
+          x <- gen `suchThat` (`notElem` acc)
+          go (i - 1 :: Int) (x : acc)
 
--- | Arbitrary 'BlockNode'
+-- | Arbitrary 'BlockNode'. One in ten is at height zero, like a genesis
+-- node, whose skip hash is its own hash and is not serialized.
 arbitraryBlockNode :: Gen BlockNode
 arbitraryBlockNode =
-  BlockNode
-    <$> arbitraryBlockHeader
-    <*> choose (0, maxBound)
-    <*> arbitrarySizedNatural
-    <*> arbitraryBlockHash
+  frequency [(1, genesisLike), (9, above)]
+  where
+    genesisLike = do
+      h <- arbitraryBlockHeader
+      w <- arbitrarySizedNatural
+      return $ BlockNode h 0 w (headerHash h)
+    above =
+      BlockNode
+        <$> arbitraryBlockHeader
+        <*> choose (1, maxBound)
+        <*> arbitrarySizedNatural
+        <*> arbitraryBlockHash
 
 -- | Arbitrary 'HeaderMemory'
 arbitraryHeaderMemory :: Gen HeaderMemory

@@ -1,21 +1,25 @@
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE NoFieldSelectors #-}
 
 module Haskoin.Network.Data
   ( Network (..),
+    getNetworkTx,
   )
 where
 
 import Control.DeepSeq
 import Data.Binary (Binary (..))
 import Data.ByteString (ByteString)
+import Data.Bytes.Get (MonadGet)
+import Data.Bytes.Serial (deserialize)
 import Data.Serialize (Serialize (..))
 import Data.Text (Text)
 import Data.Word (Word32, Word64, Word8)
 import GHC.Generics (Generic)
 import Haskoin.Block.Common
-import Haskoin.Transaction.Common (Tx)
+import Haskoin.Transaction.Common (Tx, parseLegacyTx)
 
 -- | Network definition.
 data Network = Network
@@ -39,10 +43,22 @@ data Network = Network
     genesisTx :: !Tx,
     -- | maximum block size in bytes
     maxBlockSize :: !Int,
-    -- | largest P2P message that 'getMessage' accepts, in bytes. Bitcoin Core
-    -- refuses any message over 4,000,000 bytes (@MAX_PROTOCOL_MESSAGE_LENGTH@).
-    -- Bitcoin Cash Node refuses block messages over twice the block size.
+    -- | largest P2P message of any kind, in bytes. A message that carries
+    -- block content (@block@, @cmpctblock@ or @blocktxn@) may be this large.
+    -- Bitcoin Core refuses any message over 4,000,000 bytes
+    -- (@MAX_PROTOCOL_MESSAGE_LENGTH@). Bitcoin Cash Node refuses those three
+    -- messages over twice the block size. Use
+    -- 'Haskoin.Network.Message.maxPayloadSize' for the limit of one command.
     maxMessageSize :: !Word32,
+    -- | largest P2P message that carries no block content, in bytes. This is
+    -- @MAX_PROTOCOL_MESSAGE_LENGTH@ of the reference node: 4,000,000 on
+    -- Bitcoin, where it is the limit of every message, and 2 MiB on Bitcoin
+    -- Cash, where @CMessageHeader::IsOversized@ applies it to every message
+    -- but @block@, @cmpctblock@ and @blocktxn@.
+    maxProtocolMessageSize :: !Word32,
+    -- | largest transaction position that a compact block message may name.
+    -- BIP 152 and Bitcoin Core use 16 bits (65535). Bitcoin Cash Node uses 32.
+    maxCompactBlockIndex :: !Word32,
     -- | maximum amount of satoshi
     maxSatoshi :: !Word64,
     -- | user agent string
@@ -72,6 +88,11 @@ data Network = Network
     targetSpacing :: !Word32,
     -- | checkpoints
     checkpoints :: ![(BlockHeight, BlockHash)],
+    -- | work that the best chain is known to have, @nMinimumChainWork@ of the
+    -- reference node. Once the best block has this much work,
+    -- 'Haskoin.Block.Headers.connectBlocks' refuses a new header with less,
+    -- which can only be a fork from far below the tip. Zero on regtest.
+    minimumChainWork :: !Integer,
     -- | BIP44 derivation path root
     bip44Coin :: !Word32,
     -- | peer-to-peer network seeds
@@ -101,3 +122,16 @@ data Network = Network
     halvingInterval :: !Word32
   }
   deriving (Eq, Show, Read, Generic, NFData)
+
+-- | Read a transaction as the reference node of the network reads one that
+-- a peer sends. On a network with SegWit this is the extended format of BIP
+-- 144, with its marker, flag and witness. On a network without SegWit it is
+-- the old format only: Bitcoin Cash Node has no witness format, so it reads
+-- the marker byte as an input count of zero. Reading the old format there
+-- also means that a peer cannot make a Bitcoin Cash node build witness
+-- stacks.
+getNetworkTx :: (MonadGet m) => Network -> m Tx
+getNetworkTx net
+  | net.segWit = deserialize
+  | otherwise = parseLegacyTx
+

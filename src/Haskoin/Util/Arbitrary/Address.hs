@@ -20,17 +20,21 @@ import Haskoin.Util.Arbitrary.Crypto
 import Haskoin.Util.Arbitrary.Util
 import Test.QuickCheck
 
--- | Arbitrary pay-to-public-key-hash or pay-to-script-hash address.
+-- | Arbitrary address of a Bitcoin Cash network: pay-to-public-key-hash,
+-- pay-to-script-hash with either hash size, a token-aware address, or any
+-- other CashAddr kind.
 arbitraryBitcoinCashAddress :: Gen Address
 arbitraryBitcoinCashAddress =
   oneof
     [ arbitraryPubKeyAddress,
       arbitraryScriptAddress,
       arbitraryScript32Address,
+      arbitraryTokenAddress,
       arbitraryCashAddress
     ]
 
--- | Arbitrary address including pay-to-witness
+-- | Arbitrary address of a Bitcoin network, including pay-to-witness and
+-- Taproot.
 arbitraryBitcoinAddress :: Gen Address
 arbitraryBitcoinAddress =
   oneof
@@ -38,6 +42,7 @@ arbitraryBitcoinAddress =
       arbitraryScriptAddress,
       arbitraryWitnessPubKeyAddress,
       arbitraryWitnessScriptAddress,
+      arbitraryTaprootAddress,
       arbitraryWitnessAddress
     ]
 
@@ -80,8 +85,27 @@ arbitraryWitnessAddress = do
     Just a -> return a
     Nothing -> error "Error generating arbitrary WitnessAddress"
 
+-- | Arbitrary Taproot address: witness version 1 with a 32-byte program.
+-- 'arbitraryWitnessAddress' almost never draws that combination.
+arbitraryTaprootAddress :: Gen Address
+arbitraryTaprootAddress = do
+  bs <- B.pack <$> vectorOf 32 arbitrary
+  case witnessAddress 1 bs of
+    Just a -> return a
+    Nothing -> error "Error generating arbitrary Taproot address"
+
 arbitraryScript32Address :: Gen Address
 arbitraryScript32Address = script32Address <$> arbitraryHash256
+
+-- | Arbitrary token-aware CashAddr that can be paid: type 2 with a 20-byte
+-- hash, or type 3 with a 20-byte or a 32-byte hash.
+arbitraryTokenAddress :: Gen Address
+arbitraryTokenAddress = do
+  (ver, len) <- elements [(2, 20), (3, 20), (3, 32)]
+  bs <- B.pack <$> vectorOf len arbitrary
+  case cashAddress ver bs of
+    Just a -> return a
+    Nothing -> error "Error generating arbitrary token-aware address"
 
 arbitraryCashAddress :: Gen Address
 arbitraryCashAddress = do

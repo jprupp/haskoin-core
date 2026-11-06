@@ -23,7 +23,13 @@ import Test.QuickCheck
 
 -- | Arbitrary 'VarInt'.
 arbitraryVarInt :: Gen VarInt
-arbitraryVarInt = VarInt <$> arbitrary
+arbitraryVarInt =
+  VarInt
+    <$> frequency
+      [ -- the last value of each encoding length and the first of the next
+        (1, elements [0, 0xfc, 0xfd, 0xffff, 0x10000, 0xffffffff, 0x100000000, maxBound]),
+        (3, arbitrary)
+      ]
 
 -- | Arbitrary 'VarString'.
 arbitraryVarString :: Gen VarString
@@ -140,7 +146,8 @@ arbitrarySendTxRcncl = SendTxRcncl <$> arbitrary <*> arbitrary
 arbitraryReject :: Gen Reject
 arbitraryReject =
   Reject
-    <$> arbitraryMessageCommand
+    -- A reject can name any bytes as its command, of any length.
+    <$> frequency [(4, arbitraryMessageCommand), (1, stringToCommand <$> arbitraryBS)]
     <*> arbitraryRejectCode
     <*> arbitraryVarString
     <*> arbitraryMaybe arbitraryHash256

@@ -25,11 +25,24 @@ marshal s = runPutS . marshalPut s
 marshalLazy :: (Marshal s a) => s -> a -> Lazy.ByteString
 marshalLazy s = runPutL . marshalPut s
 
+-- | Read a value from bytes that hold the value and nothing else. Bytes left
+-- over after the value are an error, so that two different byte strings never
+-- read as the same value. To read a value from the start of a longer stream,
+-- run 'marshalGet' yourself.
 unmarshal :: (Marshal s a) => s -> ByteString -> Either String a
-unmarshal = runGetS . marshalGet
+unmarshal s = runGetS (marshalGetAll s)
 
+-- | Like 'unmarshal', for lazy bytes.
 unmarshalLazy :: (Marshal s a) => s -> Lazy.ByteString -> Either String a
-unmarshalLazy s = runGetS (marshalGet s) . Lazy.toStrict
+unmarshalLazy s = runGetS (marshalGetAll s) . Lazy.toStrict
+
+-- | Read a value and require that the input ends there.
+marshalGetAll :: (Marshal s a, MonadGet m) => s -> m a
+marshalGetAll s = do
+  value <- marshalGet s
+  done <- isEmpty
+  unless done $ fail "unmarshal: bytes left over after the value"
+  return value
 
 class MarshalJSON s a | a -> s where
   marshalValue :: s -> a -> Value

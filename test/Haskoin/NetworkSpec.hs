@@ -350,6 +350,12 @@ spec = prepareContext $ \ctx -> do
   compactBlockSpec
   blockFilterSpec
   constantsSpec
+  sizeLimitSpec
+  itemLimitSpec
+  compactPositionSpec
+  witnessFormatSpec
+  bloomMatchSpec ctx
+  boundarySpec
 
 -- VarInt ----------------------------------------------------------------------
 
@@ -402,6 +408,17 @@ listSpec = describe "lists and byte strings" $ do
     runGetS (getVarIntList getWord8) (hex "020102") `shouldBe` Right [1, 2]
   it "writes a list with its count" $
     encodeHex (runPutS (putVarIntList putWord8 [1, 2])) `shouldBe` "020102"
+  it "writes the count of a list of 253 elements in three bytes" $
+    -- 253 = 0xfd is the first count that does not fit one byte
+    B.take 4 (runPutS (putVarIntList putWord8 (replicate 253 7))) `shouldBe` hex "fdfd0007"
+  it "reads a list of 253 elements" $
+    fmap length (runGetS (getVarIntList getWord8) (hex "fdfd00" <> B.replicate 253 7)) `shouldBe` Right 253
+  it "refuses a list above a given limit as soon as the count is read" $ do
+    runGetS (getVarIntListMax "test" 2 getWord8) (hex "03") `failsWith` "test: too many entries: 3, the limit is 2"
+    runGetS (getVarIntListMax "test" 2 getWord8) (hex "020102") `shouldBe` Right [1, 2]
+  it "knows the item limits of the protocol" $
+    -- MAX_INV_SZ, MAX_ADDR_TO_SEND, MAX_HEADERS_RESULTS, MAX_LOCATOR_SZ, and BIP 157
+    [maxInvSize, maxAddrSize, maxHeadersSize, maxLocatorSize, maxFilterHashes] `shouldBe` [50000, 1000, 2000, 101, 2000]
   it "refuses a list count above the limit" $
     runGetS (getVarIntList getWord8) (hex "fe01000002") `failsWith` "List count too large"
 
@@ -795,16 +812,22 @@ bloomSpec ctx = describe "bloom filters" $ do
       parse (hex "81") `shouldBe` Right BloomUpdateAll
       parse (hex "82") `shouldBe` Right BloomUpdateP2PubKeyOnly
     it "accepts the largest filter a peer may load" $
+      -- 36000 bytes and 50 hash functions. Only sizes are compared: showing
+      -- two filters of this size in a failure report needs gigabytes.
       let f = BloomFilter (S.replicate 36000 0x55) 50 0 BloomUpdateAll
-       in parse (runPutS (serialize f)) `shouldBe` Right f
+          result = parse (runPutS (serialize f)) :: Either String BloomFilter
+       in do
+            fmap (\g -> (S.length g.array, g.functions, g.tweak, g.flags)) result
+              `shouldBe` Right (36000, 50, 0, BloomUpdateAll)
+            fmap (== f) result `shouldBe` Right True
     it "refuses a filter of 36001 bytes" $
       (parse (runPutS (serialize (BloomFilter (S.replicate 36001 0) 1 0 BloomUpdateAll))) :: Either String BloomFilter)
         `failsWith` "too large"
     it "refuses a filter with 51 hash functions" $
       (parse (runPutS (serialize (BloomFilter (S.replicate 1 0) 51 0 BloomUpdateAll))) :: Either String BloomFilter)
         `failsWith` "too many"
-    it "refuses a byte count that does not fit the input" $
-      -- 2^64 - 1 bytes announced
+    it "refuses a filter that announces 2^64 - 1 bytes" $
+      -- the count is above the 36000 bytes a filter may have
       (parse (hex ("ffffffffffffffffff" <> "01000000" <> "00000000" <> "01")) :: Either String BloomFilter)
         `failsWith` "too large"
     it "writes filterload as the filter" $
@@ -1106,9 +1129,10 @@ constantsSpec = describe "network constants" $ do
     btc.bip34Hash `shouldBe` Just "000000000000024b89b42a942fe0d9fea3bb44ab7bd1b19115dd6a759c0808b8"
     btc.bip65Height `shouldBe` 388381
     btc.bip66Height `shouldBe` 363725
-  it "pins block 1 of testnet4" $ do
+  it "pins no BIP34 block on testnet4, as Bitcoin Core does" $ do
+    -- kernel/chainparams.cpp, CTestNet4Params: BIP34Height = 1, BIP34Hash = uint256{}
     btcTest4.bip34Height `shouldBe` 1
-    btcTest4.bip34Hash `shouldBe` Just "0000000012982b6d5f621229286b880e909984df669c2afabb102ce311b13f28"
+    btcTest4.bip34Hash `shouldBe` Nothing
   it "uses the BIP44 coin type of each network" $
     map (.bip44Coin) [btc, btcTest, btcTest4, btcRegTest, bch, bchTest, bchTest4, bchRegTest]
       `shouldBe` [0, 1, 1, 1, 145, 1, 1, 1]
@@ -1124,3 +1148,362 @@ constantsSpec = describe "network constants" $ do
     nodeCompactFilters `shouldBe` 64
     nodeNetworkLimited `shouldBe` 1024
     nodeP2PV2 `shouldBe` 2048
+
+-- Message sizes per command -----------------------------------------------------
+
+-- | A P2P message as it is on the wire: magic, command padded with NUL
+-- bytes, payload length, checksum and payload.
+frame :: Network -> ByteString -> ByteString -> ByteString
+frame net cmd payload =
+  runPutS $ do
+    putWord32be net.magic
+    putByteString (cmd <> B.replicate (12 - B.length cmd) 0)
+    putWord32le (fromIntegral (B.length payload))
+    serialize (checkSum32 payload)
+    putByteString payload
+
+-- | A message header that announces a payload of the given length, with no
+-- payload after it. Reading it fails either on the length or, when the
+-- length is allowed, on the missing payload.
+headerOnly :: Network -> ByteString -> Word32 -> ByteString
+headerOnly net cmd len =
+  runPutS $ do
+    putWord32be net.magic
+    putByteString (cmd <> B.replicate (12 - B.length cmd) 0)
+    putWord32le len
+    putWord32be 0
+
+sizeLimitSpec :: Spec
+sizeLimitSpec = describe "message size per command" $ do
+  -- Bitcoin Cash Node, CMessageHeader::IsOversized: a message above
+  -- MAX_PROTOCOL_MESSAGE_LENGTH (2 * 1024 * 1024 = 2097152) is oversized
+  -- unless it is block, cmpctblock or blocktxn. Those three may be twice the
+  -- block size: 2 * 32000000 = 64000000.
+  it "refuses an inv of 2097153 bytes on bitcoin cash before reading the payload" $
+    runGetS (getMessage bch) (headerOnly bch "inv" 2097153) `failsWith` "larger than the limit"
+  it "accepts the length of an inv of 2097152 bytes on bitcoin cash" $
+    runGetS (getMessage bch) (headerOnly bch "inv" 2097152) `failsWith` "too few bytes"
+  it "refuses a getblocktxn, a merkleblock and a tx of 2097153 bytes on bitcoin cash" $
+    forM_ ["getblocktxn", "merkleblock", "tx", "headers", "addr", "foo"] $ \cmd ->
+      runGetS (getMessage bch) (headerOnly bch cmd 2097153) `failsWith` "larger than the limit"
+  it "accepts the length of a block, a cmpctblock and a blocktxn of 64000000 bytes on bitcoin cash" $
+    forM_ ["block", "cmpctblock", "blocktxn"] $ \cmd ->
+      runGetS (getMessage bch) (headerOnly bch cmd 64000000) `failsWith` "too few bytes"
+  it "refuses a block of 64000001 bytes on bitcoin cash" $
+    forM_ ["block", "cmpctblock", "blocktxn"] $ \cmd ->
+      runGetS (getMessage bch) (headerOnly bch cmd 64000001) `failsWith` "larger than the limit"
+  it "accepts the length of any message of 4000000 bytes on bitcoin" $
+    forM_ ["inv", "block", "tx", "foo"] $ \cmd ->
+      runGetS (getMessage btc) (headerOnly btc cmd 4000000) `failsWith` "too few bytes"
+  it "refuses any message of 4000001 bytes on bitcoin" $
+    forM_ ["inv", "block", "tx", "foo"] $ \cmd ->
+      runGetS (getMessage btc) (headerOnly btc cmd 4000001) `failsWith` "larger than the limit"
+  it "reads a message whose payload is exactly the limit" $
+    -- an unknown command with 4000000 payload bytes on bitcoin
+    let result = runGetS (getMessage btc) (frame btc "foo" (B.replicate 4000000 0x61))
+     in fmap (\m -> case m of MOther c p -> (c, B.length p); _ -> ("", 0)) result
+          `shouldBe` Right ("foo", 4000000)
+  it "gives the limit of each command on bitcoin cash" $ do
+    map (maxPayloadSize bch) [MCBlock, MCCmpctBlock, MCBlockTxn] `shouldBe` [64000000, 64000000, 64000000]
+    map (maxPayloadSize bch) [MCInv, MCTx, MCMerkleBlock, MCGetBlockTxn, MCHeaders, MCOther "foo"]
+      `shouldBe` replicate 6 2097152
+  it "gives 4000000 for every command on bitcoin" $
+    map (maxPayloadSize btc) [MCBlock, MCCmpctBlock, MCBlockTxn, MCInv, MCTx, MCOther "foo"]
+      `shouldBe` replicate 6 4000000
+  it "gives twice the 2 MB block size for a block on bitcoin cash testnet4" $ do
+    maxPayloadSize bchTest4 MCBlock `shouldBe` 4000000
+    maxPayloadSize bchTest4 MCInv `shouldBe` 2097152
+  it "limits messages without block content to 4 MB on bitcoin and 2 MiB on bitcoin cash" $
+    -- MAX_PROTOCOL_MESSAGE_LENGTH: 4 * 1000 * 1000 in Bitcoin Core, 2 * 1024 * 1024 in Bitcoin Cash Node
+    map (.maxProtocolMessageSize) [btc, btcTest, btcTest4, btcRegTest, bch, bchTest, bchTest4, bchRegTest]
+      `shouldBe` [4000000, 4000000, 4000000, 4000000, 2097152, 2097152, 2097152, 2097152]
+  it "checks the magic before the command name" $
+    -- magic 00000000 and the command "ping" followed by a line feed
+    runGetS (getMessage btc) (hex ("00000000" <> "70696e670a00000000000000" <> "00000000" <> "5df6e0e2"))
+      `failsWith` "Invalid network magic"
+
+-- Item counts ---------------------------------------------------------------------
+
+itemLimitSpec :: Spec
+itemLimitSpec = describe "item counts" $ do
+  -- Bitcoin Core net_processing.cpp and Bitcoin Cash Node net.h:
+  -- MAX_INV_SZ = 50000, MAX_ADDR_TO_SEND = 1000, MAX_HEADERS_RESULTS = 2000,
+  -- MAX_LOCATOR_SZ = 101. BIP 157: at most 2000 filter hashes.
+  let invEntry = hex ("01000000" <> h1Hex)
+      addrEntry = hex ("e215104d" <> "0100000000000000" <> ipv4Bytes)
+      addrV2Entry = hex ("e215104d" <> "01" <> "01" <> "04" <> "0a000001" <> "208d")
+      headerEntry = hex (genesisHeaderHex <> "00")
+      -- counts as three-byte compact sizes, little-endian
+      -- 50000 = 0xc350, 50001 = 0xc351, 1000 = 0x03e8, 1001 = 0x03e9,
+      -- 2000 = 0x07d0, 2001 = 0x07d1
+      many :: Text -> Int -> ByteString -> ByteString
+      many count n entry = hex count <> B.concat (replicate n entry)
+  it "accepts an inv of 50000 entries" $
+    fmap (\(Inv xs) -> length xs) (parse (many "fd50c3" 50000 invEntry)) `shouldBe` Right 50000
+  it "refuses an inv of 50001 entries" $
+    fmap (\(Inv xs) -> length xs) (parse (many "fd51c3" 50001 invEntry)) `failsWith` "too many"
+  it "accepts a getdata of 50000 entries and refuses 50001" $ do
+    fmap (\(GetData xs) -> length xs) (parse (many "fd50c3" 50000 invEntry)) `shouldBe` Right 50000
+    fmap (\(GetData xs) -> length xs) (parse (many "fd51c3" 50001 invEntry)) `failsWith` "too many"
+  it "accepts an addr of 1000 entries and refuses 1001" $ do
+    fmap (\(Addr xs) -> length xs) (parse (many "fde803" 1000 addrEntry)) `shouldBe` Right 1000
+    fmap (\(Addr xs) -> length xs) (parse (many "fde903" 1001 addrEntry)) `failsWith` "too many"
+  it "accepts an addrv2 of 1000 entries and refuses 1001" $ do
+    fmap (\(AddrV2 xs) -> length xs) (parse (many "fde803" 1000 addrV2Entry)) `shouldBe` Right 1000
+    fmap (\(AddrV2 xs) -> length xs) (parse (many "fde903" 1001 addrV2Entry)) `failsWith` "too many"
+  it "accepts a headers message of 2000 entries and refuses 2001" $ do
+    fmap (\(Headers xs) -> length xs) (parse (many "fdd007" 2000 headerEntry)) `shouldBe` Right 2000
+    fmap (\(Headers xs) -> length xs) (parse (many "fdd107" 2001 headerEntry)) `failsWith` "too many"
+  it "accepts a getheaders locator of 101 hashes and refuses 102" $ do
+    -- version 70001 = 0x00011171, then the locator, then the stop hash
+    fmap (\g -> length g.locator) (parse (hex "71110100" <> many "65" 101 (hex h1Hex) <> hex h2Hex) :: Either String GetHeaders)
+      `shouldBe` Right 101
+    fmap (\g -> length g.locator) (parse (hex "71110100" <> many "66" 102 (hex h1Hex) <> hex h2Hex) :: Either String GetHeaders)
+      `failsWith` "too many"
+  it "accepts a getblocks locator of 101 hashes and refuses 102" $ do
+    fmap (\g -> length g.locator) (parse (hex "71110100" <> many "65" 101 (hex h1Hex) <> hex h2Hex) :: Either String GetBlocks)
+      `shouldBe` Right 101
+    fmap (\g -> length g.locator) (parse (hex "71110100" <> many "66" 102 (hex h1Hex) <> hex h2Hex) :: Either String GetBlocks)
+      `failsWith` "too many"
+  it "accepts a cfheaders of 2000 filter hashes and refuses 2001" $ do
+    fmap (\c -> length c.filterHashes) (parse (hex ("00" <> bh1Hex <> h1Hex) <> many "fdd007" 2000 (hex h2Hex)) :: Either String CFHeaders)
+      `shouldBe` Right 2000
+    fmap (\c -> length c.filterHashes) (parse (hex ("00" <> bh1Hex <> h1Hex) <> many "fdd107" 2001 (hex h2Hex)) :: Either String CFHeaders)
+      `failsWith` "too many"
+
+-- Compact block positions per network -----------------------------------------------
+
+compactPositionSpec :: Spec
+compactPositionSpec = describe "compact block positions" $ do
+  -- BIP 152 and Bitcoin Core (blockencodings.h) use 16-bit positions:
+  -- BlockTransactionsRequest::indexes is std::vector<uint16_t>, and a
+  -- cmpctblock with more than 65535 transactions fails with "indexes
+  -- overflowed 16 bits". Bitcoin Cash Node uses uint32_t in both places.
+  let requestFrame positions = frame btc "getblocktxn" (hex (bh1Hex <> positions))
+      indexes = fmap (\m -> case m of MGetBlockTxn g -> g.indexes; _ -> [])
+      tx = hex oneInputTxHex
+      compact n prefilled =
+        hex (genesisHeaderHex <> "0000000000000000")
+          <> runPutS (putVarInt (n :: Int))
+          <> B.concat (replicate n (hex "010000000000"))
+          <> prefilled
+      counts = fmap (\m -> case m of MCompactBlock c -> (length c.shortIds, map (.index) c.prefilled); _ -> (0, []))
+  it "reads the position 65535 in a getblocktxn on bitcoin" $
+    indexes (runGetS (getMessage btc) (requestFrame "01fdffff")) `shouldBe` Right [65535]
+  it "refuses the position 65536 in a getblocktxn on bitcoin" $
+    indexes (runGetS (getMessage btc) (requestFrame "01fe00000100")) `failsWith` "16 bits"
+  it "refuses a getblocktxn position reached by adding distances beyond 65535 on bitcoin" $
+    -- 65535, then a distance of 0, which is position 65536
+    indexes (runGetS (getMessage btc) (requestFrame "02fdffff00")) `failsWith` "16 bits"
+  it "reads the position 65536 in a getblocktxn on bitcoin cash" $
+    indexes (runGetS (getMessage bch) (frame bch "getblocktxn" (hex (bh1Hex <> "01fe00000100"))))
+      `shouldBe` Right [65536]
+  it "refuses a prefilled transaction at position 65536 on bitcoin" $
+    counts (runGetS (getMessage btc) (frame btc "cmpctblock" (compact 0 (hex "01fe00000100" <> tx))))
+      `failsWith` "16 bits"
+  it "reads a compact block of 65535 transactions on bitcoin" $
+    -- 65534 short ids and one prefilled transaction
+    counts (runGetS (getMessage btc) (frame btc "cmpctblock" (compact 65534 (hex "0100" <> tx))))
+      `shouldBe` Right (65534, [0])
+  it "refuses a compact block of 65536 transactions on bitcoin" $
+    -- 65535 short ids and one prefilled transaction
+    counts (runGetS (getMessage btc) (frame btc "cmpctblock" (compact 65535 (hex "0100" <> tx))))
+      `failsWith` "16 bits"
+  it "reads a compact block of 65536 transactions on bitcoin cash" $
+    counts (runGetS (getMessage bch) (frame bch "cmpctblock" (compact 65535 (hex "0100" <> tx))))
+      `shouldBe` Right (65535, [0])
+  it "allows positions of 16 bits on bitcoin and of 32 bits on bitcoin cash" $
+    map (.maxCompactBlockIndex) [btc, btcTest, btcTest4, btcRegTest, bch, bchTest, bchTest4, bchRegTest]
+      `shouldBe` [65535, 65535, 65535, 65535, 4294967295, 4294967295, 4294967295, 4294967295]
+  it "keeps 32-bit positions in the form without a network" $ do
+    parse (hex (bh1Hex <> "01feffffffff")) `shouldBe` Right (GetBlockTxn bh1 [4294967295])
+    hexOf (GetBlockTxn bh1 [4294967295]) `shouldBe` bh1Hex <> "01feffffffff"
+  it "refuses a getblocktxn count above the list limit" $
+    -- 0x02000001 positions announced
+    (parse (hex (bh1Hex <> "fe01000002")) :: Either String GetBlockTxn) `failsWith` "List count too large"
+  it "reads any non-zero announce byte of sendcmpct as true" $
+    parse (hex ("02" <> "0100000000000000")) `shouldBe` Right (SendCompact True 1)
+
+-- SegWit format on networks without SegWit -------------------------------------------
+
+witnessFormatSpec :: Spec
+witnessFormatSpec = describe "transaction format per network" $ do
+  -- A transaction in the extended format of BIP 144: version, marker 00,
+  -- flag 01, one input, one output, one witness stack with the item ab, lock
+  -- time. The outpoint hash is 32 bytes of 0x11.
+  let witnessTx =
+        hex $
+          "01000000"
+            <> "0001"
+            <> "01"
+            <> h1Hex
+            <> "00000000"
+            <> "00"
+            <> "ffffffff"
+            <> "01"
+            <> "e803000000000000"
+            <> "0151"
+            <> "0101ab"
+            <> "00000000"
+      shape = fmap (\m -> case m of MTx t -> (length t.inputs, length t.outputs, t.witness); _ -> (-1, -1, []))
+  it "reads the witness of a tx message on bitcoin" $
+    shape (runGetS (getMessage btc) (frame btc "tx" witnessTx)) `shouldBe` Right (1, 1, [[hex "ab"]])
+  it "does not read the extended format in a tx message on bitcoin cash" $
+    -- Bitcoin Cash Node has no witness format. It reads the marker as an
+    -- input count of zero and the flag as an output count of one.
+    shape (runGetS (getMessage bch) (frame bch "tx" witnessTx)) `shouldBe` Right (0, 1, [])
+  it "does not read the extended format in a block message on bitcoin cash" $
+    let block = hex genesisHeaderHex <> hex "01" <> witnessTx
+        txShape = fmap (\m -> case m of MBlock b -> map (\t -> (length t.inputs, t.witness)) b.txs; _ -> [])
+     in txShape (runGetS (getMessage bch) (frame bch "block" block)) `shouldBe` Right [(0, [])]
+  it "reads a transaction in the old format only on a network without SegWit" $ do
+    fmap (\t -> (length t.inputs, t.witness)) (runGetS (getNetworkTx btc) witnessTx) `shouldBe` Right (1, [[hex "ab"]])
+    fmap (\t -> (length t.inputs, t.witness)) (runGetS (getNetworkTx bch) witnessTx) `shouldBe` Right (0, [])
+  it "does not read the extended format in a blocktxn or a cmpctblock message on bitcoin cash" $ do
+    let blockTxn = hex bh1Hex <> hex "01" <> witnessTx
+        compact = hex (genesisHeaderHex <> "0000000000000000" <> "00" <> "0100") <> witnessTx
+    fmap (\m -> case m of MBlockTxn b -> map (\t -> length t.inputs) b.transactions; _ -> [])
+      (runGetS (getMessage bch) (frame bch "blocktxn" blockTxn))
+      `shouldBe` Right [0]
+    fmap (\m -> case m of MCompactBlock c -> map (\x -> length x.tx.inputs) c.prefilled; _ -> [])
+      (runGetS (getMessage bch) (frame bch "cmpctblock" compact))
+      `shouldBe` Right [0]
+  it "reads an empty witness item as an empty byte string" $
+    -- one input with a witness stack of three empty items
+    let tx3 =
+          hex $
+            "01000000" <> "0001" <> "01" <> h1Hex <> "00000000" <> "00" <> "ffffffff"
+              <> "01" <> "e803000000000000" <> "0151" <> "03000000" <> "00000000"
+     in fmap (.witness) (parse tx3 :: Either String Tx) `shouldBe` Right [["", "", ""]]
+
+-- Bloom filter matching -----------------------------------------------------------
+
+-- | The transaction of the bloom_match case of Bitcoin Core
+-- (src/test/bloom_tests.cpp),
+-- b4749f017444b051c44dfd2720e88f314ff94f3dd6d56d40ef65854fcd7fff6b.
+bloomMatchTx :: Tx
+bloomMatchTx =
+  either error id . parse . hex $
+    "01000000010b26e9b7735eb6aabdf358bab62f9816a21ba9ebdb719d5299e88607d722c190000000008b4830450220070aca44506c5cef3a16ed519d7c3c39f8aab192c4e1c90d065f37b8a4af6141022100a8e160b856c2d43d27d8fba71e5aef6405b8643ac4cb7cb3c462aced7f14711a0141046d11fee51b0e60666d5049a9101a72741df480b96ee26488a4d3466b95c9a40ac5eeef87e10a5cd336c19a84565f80fa6c547957b7700ff4dfbdefe76036c339ffffffff021bff3d11000000001976a91404943fdd508053c75000106d3bc6e2754dbcff1988ac2f15de00000000001976a914a266436d2965547608b9e15d9032a7b9d64fa43188ac00000000"
+
+-- | The transaction that spends output 0 of 'bloomMatchTx' in the same case,
+-- e2769b09e784f32f62ef849763d4f45b98e07ba658647343b915ff832b110436.
+bloomSpendingTx :: Tx
+bloomSpendingTx =
+  either error id . parse . hex $
+    "01000000016bff7fcd4f8565ef406dd5d63d4ff94f318fe82027fd4dc451b04474019f74b4000000008c493046022100da0dc6aecefe1e06efdf05773757deb168820930e3b0d03f46f5fcf150bf990c022100d25b5c87040076e4f253f8262e763e2dd51e7ff0be157727c4bc42807f17bd39014104e6c26ef67dc610d2cd192484789a6cf9aea9930b944b7e2db5342b9d9e5b9ff79aff9a2ee1978dd7fd01dfc522ee02283d3b06a9d03acf8096968d7dbb0f9178ffffffff028ba7940e000000001976a914badeecfdef0507247fc8f74241d73bc039972d7b88ac4094a802000000001976a914c10932483fec93ed51f5fe95e72559f2cc7043f988ac00000000"
+
+bloomMatchSpec :: Ctx -> Spec
+bloomMatchSpec ctx = describe "bloom filter matching, the bloom_match case of Bitcoin Core" $ do
+  let fresh = bloomCreate 10 0.000001 0 BloomUpdateAll
+      matches element = bloomRelevantUpdate ctx (bloomInsert fresh element) bloomMatchTx /= Nothing
+      -- the outpoint 90c122d7...260b:n that the transaction spends
+      spent n = hex "0b26e9b7735eb6aabdf358bab62f9816a21ba9ebdb719d5299e88607d722c190" <> hex n
+  it "matches the transaction hash" $
+    -- the hash in internal byte order
+    matches (hex "6bff7fcd4f8565ef406dd5d63d4ff94f318fe82027fd4dc451b04474019f74b4") `shouldBe` True
+  it "matches the signature of an input" $
+    matches (hex "30450220070aca44506c5cef3a16ed519d7c3c39f8aab192c4e1c90d065f37b8a4af6141022100a8e160b856c2d43d27d8fba71e5aef6405b8643ac4cb7cb3c462aced7f14711a01") `shouldBe` True
+  it "matches the public key of an input" $
+    matches (hex "046d11fee51b0e60666d5049a9101a72741df480b96ee26488a4d3466b95c9a40ac5eeef87e10a5cd336c19a84565f80fa6c547957b7700ff4dfbdefe76036c339") `shouldBe` True
+  it "matches the address of each output" $ do
+    matches (hex "04943fdd508053c75000106d3bc6e2754dbcff19") `shouldBe` True
+    matches (hex "a266436d2965547608b9e15d9032a7b9d64fa431") `shouldBe` True
+  it "matches the outpoint that an input spends" $
+    matches (spent "00000000") `shouldBe` True
+  it "does not match another transaction hash" $
+    matches (hex "36041132b83ff15b9143736458a67be0985bf4d4639784ef622ff384e7090000") `shouldBe` False
+  it "does not match another address" $
+    matches (hex "0000006d2965547608b9e15d9032a7b9d64fa431") `shouldBe` False
+  it "does not match another output of the spent transaction" $
+    matches (spent "01000000") `shouldBe` False
+  it "matches the transaction that spends a matched output" $
+    -- "Simple Bloom filter didn't add output" in Bitcoin Core
+    let updated = bloomRelevantUpdate ctx (bloomInsert fresh (hex "04943fdd508053c75000106d3bc6e2754dbcff19")) bloomMatchTx
+     in fmap (\f -> bloomRelevantUpdate ctx f bloomSpendingTx /= Nothing) updated `shouldBe` Just True
+  it "leaves the filter as it is when only the transaction hash matches" $
+    let f = bloomInsert fresh (hex "6bff7fcd4f8565ef406dd5d63d4ff94f318fe82027fd4dc451b04474019f74b4")
+     in bloomRelevantUpdate ctx f bloomMatchTx `shouldBe` Just f
+  describe "pay-to-pubkey test of BloomUpdateP2PubKeyOnly, as Solver in Bitcoin Core" $ do
+    -- Solver checks the size and the first byte of a key, not the curve.
+    let hybridKey = hex "06" <> B.replicate 64 0x11
+        offCurveKey = hex "02" <> B.replicate 32 0xff
+        g = hex "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+        inserted key script =
+          let bf = bloomInsert (bloomCreate 10 0.000001 0 BloomUpdateP2PubKeyOnly) key
+              tx = txPaying [script]
+           in fmap (`bloomContains` outpointBytes tx 0) (bloomRelevantUpdate ctx bf tx)
+    it "inserts the outpoint of a pay-to-pubkey output with a hybrid key" $
+      inserted hybridKey (hex "41" <> hybridKey <> hex "ac") `shouldBe` Just True
+    it "inserts the outpoint of a pay-to-pubkey output whose key is not on the curve" $
+      inserted offCurveKey (hex "21" <> offCurveKey <> hex "ac") `shouldBe` Just True
+    it "inserts the outpoint of a bare multisig output with a key that is not on the curve" $
+      inserted g (hex "51" <> hex "21" <> g <> hex "21" <> offCurveKey <> hex "52ae") `shouldBe` Just True
+    it "inserts the outpoint of a bare 1-of-2 multisig output" $
+      let k2 = hex "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"
+       in inserted g (hex "51" <> hex "21" <> g <> hex "21" <> k2 <> hex "52ae") `shouldBe` Just True
+    it "does not insert the outpoint of a pay-to-pubkey-hash output" $
+      inserted p2pkhHash p2pkhScript `shouldBe` Just False
+    it "does not insert the outpoint of a script that only starts like pay-to-pubkey" $
+      -- a 33-byte push and OP_CHECKSIG followed by OP_NOP
+      inserted g (hex "21" <> g <> hex "ac61") `shouldBe` Just False
+  it "reads the flags byte 05 as update-all, since only the two low bits count" $
+    (parse (hex "05") :: Either String BloomFlags) `shouldBe` Right BloomUpdateAll
+  it "picks the number of hash functions with the integer division of Bitcoin Core" $
+    -- 5 elements at a rate of 0.08: -1 / ln(2)^2 * 5 * ln(0.08) = 26.2 bits,
+    -- 3 bytes. Then 3 * 8 / 5 = 4 in integers, and 4 * ln(2) = 2.77, so 2.
+    let f = bloomCreate 5 0.08 0 BloomUpdateNone
+     in (S.length f.array, f.functions) `shouldBe` (3, 2)
+
+-- Boundaries --------------------------------------------------------------------------
+
+boundarySpec :: Spec
+boundarySpec = describe "boundaries" $ do
+  it "refuses the largest value that a three-byte encoding does not need" $
+    (parse (hex "fdfc00") :: Either String VarInt) `failsWith` "non-canonical"
+  it "refuses the largest value that a five-byte encoding does not need" $
+    (parse (hex "feffff0000") :: Either String VarInt) `failsWith` "non-canonical"
+  it "refuses the largest value that a nine-byte encoding does not need" $
+    (parse (hex "ffffffffff00000000") :: Either String VarInt) `failsWith` "non-canonical"
+  it "accepts a list count equal to the limit and then fails on the missing elements" $
+    -- 0x02000000 elements announced, none present
+    runGetS (getVarIntList getWord8) (hex "fe00000002") `failsWith` "too few bytes"
+  it "accepts a byte count equal to the limit and then fails on the missing bytes" $
+    (parse (hex "fe00000002") :: Either String VarString) `failsWith` "too few bytes"
+  it "accepts a space and a tilde in a command name" $ do
+    -- 0x20 and 0x7e are the first and the last printable ASCII characters
+    parse (hex "612062000000000000000000") `shouldBe` Right (MCOther "a b")
+    parse (hex "617e62000000000000000000") `shouldBe` Right (MCOther "a~b")
+  it "refuses the bytes 0x1f and 0x7f in a command name" $ do
+    (parse (hex "611f62000000000000000000") :: Either String MessageCommand) `failsWith` "printable ASCII"
+    (parse (hex "617f62000000000000000000") :: Either String MessageCommand) `failsWith` "printable ASCII"
+  it "reads a version message with negative fields as negative numbers" $
+    -- Bitcoin Core reads int nVersion, int64_t nTime and int starting_height
+    let payload =
+          hex "ffffffff" <> hex "0100000000000000" <> hex "ffffffffffffffff"
+            <> B.drop 20 (hex (T.take 160 versionPayloadHex))
+            <> hex "00"
+            <> hex "ffffffff"
+     in fmap (\v -> (toInteger v.version, toInteger v.timestamp, toInteger v.startHeight)) (parse payload :: Either String Version)
+          `shouldBe` Right (-1, -1, -1)
+  it "reads back the shown form of a command name with a byte above 0x7f" $
+    read (show (MCOther "\200")) `shouldBe` MCOther "\200"
+  it "reads back the shown form of a reject that names such a command" $
+    -- command of one byte c8, code 0x10, empty reason
+    let r = either error id (parse (hex "01c8" <> hex "10" <> hex "00")) :: Reject
+     in read (show r) `shouldBe` r
+  describe "addrv2" $ do
+    it "keeps a Tor v2 entry whatever its length, since BIP 155 says to ignore it" $
+      parse (hex ("00000000" <> "00" <> "03" <> "05" <> "0102030405" <> "0000"))
+        `shouldBe` Right (NetworkAddressV2 0 0 AddrTorV2 (hex "0102030405") 0)
+    it "reads the entries after a Tor v2 entry of the wrong length" $
+      fmap (\(AddrV2 xs) -> map (.network) xs)
+        (parse (hex ("02" <> "00000000" <> "00" <> "03" <> "05" <> "0102030405" <> "0000" <> "e215104d" <> "01" <> "01" <> "04" <> "0a000001" <> "208d")))
+        `shouldBe` Right [AddrTorV2, AddrIPv4]
+    it "has no addr form for an IPv6 entry that holds an IPv4-mapped address" $
+      fromNetworkAddressV2 (NetworkAddressV2 0 0 AddrIPv6 (hex "00000000000000000000ffff0a000001") 8333) `shouldBe` Nothing
+    it "has no addr form for an IPv6 entry that holds an OnionCat address" $
+      fromNetworkAddressV2 (NetworkAddressV2 0 0 AddrIPv6 (hex "fd87d87eeb4301020304050607080910") 8333) `shouldBe` Nothing
+    it "turns an OnionCat addr entry into a Tor v2 entry of ten bytes" $
+      toNetworkAddressV2 (0, NetworkAddress 0 (either error id (parse (hex "fd87d87eeb4301020304050607080910" <> hex "208d"))))
+        `shouldBe` NetworkAddressV2 0 0 AddrTorV2 (hex "01020304050607080910") 8333
