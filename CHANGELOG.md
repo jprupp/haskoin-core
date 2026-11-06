@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/)
 and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.html).
 
+## [1.6.1] - 2026-11-06
+
+### Changed
+
+- `encodeBase58`, `encodeBase58Check`, `cashAddrEncode`, `cash32encode` and `cash32encodeType`, and with them `addrToText` and the JSON form of addresses, are faster. Base58 divides its big integer by 58^10 instead of once per digit and builds its bytes directly instead of a `String`. CashAddr looks its characters up in a `ByteString` instead of with `(!!)` on a `String`, converts to five-bit groups without lists, and unrolls the generators of its checksum. A P2PKH address takes 1.1 µs instead of 5.6 µs in CashAddr and 4.3 µs instead of 5.9 µs in Base58. The output is the same: 120,061 encodings of random payloads are byte for byte the same before and after.
+
 ## [1.6.0] - 2026-11-06
 
 ### Added
