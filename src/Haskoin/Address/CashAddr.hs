@@ -49,7 +49,7 @@ import Data.List (elemIndex, foldl')
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Text.Encoding (decodeUtf8, encodeUtf8)
+import Data.Text.Encoding (decodeLatin1, decodeUtf8, encodeUtf8)
 import Data.Word (Word64, Word8)
 import Haskoin.Network.Data (Network (cashAddrPrefix))
 import Haskoin.Util.Helpers (convertBits)
@@ -205,21 +205,28 @@ cash32encode prefix bs = do
       px = B.map (.&. 0x1f) (encodeUtf8 pfx)
       pd = px <> B.singleton 0 <> b32 <> B.replicate checkSumLength 0
       cs = cash32Polymod pd
-      c32 = B.map f (b32 <> cs)
-      f = fromIntegral . ord . (charset !!) . fromIntegral
-  return (pfx <> ":" <> decodeUtf8 c32)
+      c32 = B.map (B.index charsetBytes . fromIntegral) (b32 <> cs)
+  return (pfx <> ":" <> decodeLatin1 c32)
+
+-- | 'charset' as bytes, to look up characters in constant time.
+charsetBytes :: ByteString
+charsetBytes = C.pack charset
 
 -- | Convert base of 'ByteString' from eight bits per byte to five bits per
 -- byte, adding padding as necessary.
 toBase32 :: ByteString -> ByteString
-toBase32 =
-  B.pack
-    . map fromIntegral
-    -- With padding allowed the conversion always succeeds.
-    . fromMaybe []
-    . convertBits True 8 5
-    . map fromIntegral
-    . B.unpack
+toBase32 bs = fst $ B.unfoldrN groups group 0
+  where
+    groups = (B.length bs * 8 + 4) `div` 5
+    byte i
+      | i < B.length bs = fromIntegral (B.index bs i) :: Word
+      | otherwise = 0
+    -- the five bits that start this many bits into the input, from the two
+    -- bytes that hold them, padded with zeros after the end
+    group bit =
+      let i = bit `shiftR` 3
+          pair = (byte i `shiftL` 8) .|. byte (i + 1)
+       in Just (fromIntegral ((pair `shiftR` (11 - (bit .&. 7))) .&. 0x1f), bit + 5)
 
 -- | Convert five-bit groups to the bytes they fill completely, dropping any
 -- bits left over at the end.
@@ -270,17 +277,20 @@ encodeVersionByte ver len = do
 cash32Polymod :: ByteString -> ByteString
 cash32Polymod v =
   B.pack
-    [fromIntegral (polymod `shiftR` (5 * (7 - i))) .&. 0x1f | i <- [0 .. 7]]
+    [fromIntegral (polymod `shiftR` (5 * (7 - i))) .&. 0x1f | i <- [0 .. 7 :: Int]]
   where
     polymod = B.foldl' outer (1 :: Word64) v `xor` 1
     outer c d =
-      let c0 = (fromIntegral (c `shiftR` 35) :: Word8)
+      let c0 = c `shiftR` 35
           c' = ((c .&. 0x07ffffffff) `shiftL` 5) `xor` fromIntegral d
-       in foldl' (inner c0) c' (zip [0 ..] generator)
-    generator =
-      [0x98f2bc8e61, 0x79b76d99e2, 0xf33e5fb3c4, 0xae2eabe2a8, 0x1e4f43e470]
-    inner c0 c (b, g)
-      | c0 `testBit` b = c `xor` g
+       in g 4 0x1e4f43e470 c0
+            . g 3 0xae2eabe2a8 c0
+            . g 2 0xf33e5fb3c4 c0
+            . g 1 0x79b76d99e2 c0
+            $ g 0 0x98f2bc8e61 c0 c'
+    g :: Int -> Word64 -> Word64 -> Word64 -> Word64
+    g b gen c0 c
+      | c0 `testBit` b = c `xor` gen
       | otherwise = c
 
 -- | Validate that polymod 'ByteString' (eight bytes) is equal to zero.

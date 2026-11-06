@@ -33,9 +33,10 @@ import Data.String.Conversions (cs)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as E
-import Data.Word (Word8)
+import Data.Bits (shiftL, (.|.))
+import Data.Word (Word64, Word8)
 import Haskoin.Crypto.Hash (checkSum32)
-import Haskoin.Util.Helpers (bsToInteger, integerToBS)
+import Haskoin.Util.Helpers (integerToBS)
 import Numeric (showIntAtBase)
 
 -- | 'Base58' classic Bitcoin address format.
@@ -71,7 +72,29 @@ b58' = (b58InvArray !)
 -- | Encode an arbitrary-length 'Integer' into a 'Base58' string. Leading zeroes
 -- will not be part of the resulting string.
 encodeBase58I :: Integer -> Base58
-encodeBase58I i = cs $ showIntAtBase 58 (chr . fromIntegral . b58) i ""
+encodeBase58I i
+  | i < 0 = cs $ showIntAtBase 58 (chr . fromIntegral . b58) i ""
+  | otherwise = E.decodeLatin1 . B.pack . map b58 $ chunks i []
+  where
+    -- Divide by 58^10 rather than by 58, so that a number of n digits takes
+    -- n/10 divisions of a big number and the rest is machine arithmetic.
+    chunk = 58 ^ (10 :: Int) :: Integer
+    chunks n acc
+      | n < chunk = top (fromInteger n) acc
+      | otherwise =
+          let (q, r) = n `quotRem` chunk
+           in chunks q (digits (10 :: Int) (fromInteger r) acc)
+    -- the digits of a chunk, ten of them with leading zeros
+    digits 0 _ acc = acc
+    digits k w acc =
+      let (q, r) = w `quotRem` (58 :: Word64)
+       in digits (k - 1) q (fromIntegral r : acc)
+    -- the digits of the leading chunk, without leading zeros
+    top w acc
+      | w < 58 = fromIntegral w : acc
+      | otherwise =
+          let (q, r) = w `quotRem` (58 :: Word64)
+           in top q (fromIntegral r : acc)
 
 -- | Decode the UTF-8 bytes of a 'Base58' string into an 'Integer'. Fails on
 -- the first byte that is not a 'Base58' digit.
@@ -93,7 +116,7 @@ encodeBase58 bs =
     l = T.replicate (B.length z) "1" -- preserve leading 0's
     r
       | B.null b = T.empty
-      | otherwise = encodeBase58I $ bsToInteger b
+      | otherwise = encodeBase58I $ B.foldl' (\n w -> n `shiftL` 8 .|. toInteger w) 0 b
 
 -- | Decode a 'Base58'-encoded 'Text' to a 'ByteString'. Returns 'Nothing' if
 -- the input contains any character outside the 'Base58' alphabet.
