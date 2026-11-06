@@ -27,6 +27,5 @@ git tag -m "Version $ver" "v$ver"
 git push origin master
 git push origin "v$ver"
 stack upload .
-cabal update
-cabal new-haddock --enable-documentation --haddock-hyperlink-source --haddock-for-hackage
-cabal upload -d --publish "dist-newstyle/$package-$ver-docs.tar.gz"
+stack haddock --haddock-for-hackage
+stack upload . --documentation
