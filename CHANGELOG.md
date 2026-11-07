@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/)
 and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- `stack.yaml` builds against secp256k1-haskell 2.0.1. The README's Stack
+  example names that version and the current haskoin-core release, 1.6.1. The
+  package and its bounds are unchanged.
+
 ## [1.6.1] - 2026-11-06
 
 ### Changed
