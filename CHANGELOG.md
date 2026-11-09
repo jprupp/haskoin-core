@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
   example names that version and the current haskoin-core release, 1.6.1. The
   package and its bounds are unchanged.
 - The README shows a badge with the status of CI on `master`.
+- The Nix CI job deletes Stack's cached Setup programs before building. One
+  restored from an older nixos-unstable cache was linked against Nix store
+  paths missing on the runner, and the build failed with "posix_spawnp: does
+  not exist".
 
 ## [1.6.1] - 2026-11-06
 
