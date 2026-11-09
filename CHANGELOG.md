@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 - `stack.yaml` builds against secp256k1-haskell 2.0.1. The README's Stack
   example names that version and the current haskoin-core release, 1.6.1. The
   package and its bounds are unchanged.
+- The README shows a badge with the status of CI on `master`.
 
 ## [1.6.1] - 2026-11-06
 

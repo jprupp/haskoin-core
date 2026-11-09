@@ -1,5 +1,6 @@
 # Haskoin Core
 
+[![CI](https://github.com/jprupp/haskoin-core/actions/workflows/ci.yml/badge.svg)](https://github.com/jprupp/haskoin-core/actions/workflows/ci.yml)
 [![Hackage](https://img.shields.io/hackage/v/haskoin-core.svg)](https://hackage.haskell.org/package/haskoin-core)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/jprupp/haskoin-core/blob/master/LICENSE)
 
