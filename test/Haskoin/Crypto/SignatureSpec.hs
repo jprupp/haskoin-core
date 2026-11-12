@@ -32,6 +32,7 @@ import Test.QuickCheck
 
 spec :: Spec
 spec = prepareContext $ \ctx -> do
+  cashSchnorrSpec ctx
   describe "Signature property checks" $ do
     prop "verifies signature" $
       forAll (arbitrarySignature ctx) $ \(m, key', sig) ->
@@ -571,3 +572,113 @@ secHexKey = decodeHex >=> secKey
 
 toPubKey :: Ctx -> SecKey -> PublicKey
 toPubKey ctx = derivePublicKey ctx . wrapSecKey True
+
+-- | The test vectors of the Schnorr module of Bitcoin Cash Node
+-- (@src\/secp256k1\/src\/modules\/schnorr\/tests_impl.h@, version 29.0.0):
+-- a name, the public key, the digest, the signature, and whether it
+-- verifies.
+cashSchnorrVectors :: [(String, Text, Text, Text, Bool)]
+cashSchnorrVectors =
+  [
+    ( "1",
+      "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "0000000000000000000000000000000000000000000000000000000000000000",
+      "787a848e71043d280c50470e8e1532b2dd5d20ee912a45dbdd2bd1dfbf187ef6\
+      \7031a98831859dc34dffeedda86831842ccd0079e1f92af177f7f22cc1dced05",
+      True
+    ),
+    ( "2",
+      "02dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659",
+      "243f6a8885a308d313198a2e03707344a4093822299f31d0082efa98ec4e6c89",
+      "2a298dacae57395a15d0795ddbfd1dcb564da82b0f269bc70a74f8220429ba1d\
+      \1e51a22ccec35599b8f266912281f8365ffc2d035a230434a1a64dc59f7013fd",
+      True
+    ),
+    ( "3",
+      "03fac2114c2fbb091527eb7c64ecb11f8021cb45e8e7809d3c0938e4b8c0e5f84b",
+      "5e2d58d8b3bcdf1abadec7829054f90dda9805aab56c77333024b9d0a508b75c",
+      "00da9b08172a9b6f0466a2defd817f2d7ab437e0d253cb5395a963866b3574be\
+      \00880371d01766935b92d2ab4cd5c8a2a5837ec57fed7660773a05f0de142380",
+      True
+    ),
+    ( "4",
+      "03defdea4cdb677750a420fee807eacf21eb9898ae79b9768766e4faa04a2d4a34",
+      "4df3c3f68fcc83b27e9d42c90431a72499f17875c81a599b566c9889b9696703",
+      "00000000000000000000003b78ce563f89a0ed9414f5aa28ad0d96d6795f9c63\
+      \02a8dc32e64e86a333f20ef56eac9ba30b7246d6d25e22adb8c6be1aeb08d49d",
+      True
+    ),
+    ( "4b",
+      "031b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f",
+      "0000000000000000000000000000000000000000000000000000000000000000",
+      "52818579aca59767e3291d91b76b637bef062083284992f2d95f564ca6cb4e35\
+      \30b1da849c8e8304adc0cfe870660334b3cfc18e825ef1db34cfae3dfc5d8187",
+      True
+    ),
+    ( "6: R.y is not a quadratic residue",
+      "02dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659",
+      "243f6a8885a308d313198a2e03707344a4093822299f31d0082efa98ec4e6c89",
+      "2a298dacae57395a15d0795ddbfd1dcb564da82b0f269bc70a74f8220429ba1d\
+      \fa16aee06609280a19b67a24e1977e4697712b5fd2943914ecd5f730901b4ab7",
+      False
+    ),
+    ( "7: negated message hash",
+      "03fac2114c2fbb091527eb7c64ecb11f8021cb45e8e7809d3c0938e4b8c0e5f84b",
+      "5e2d58d8b3bcdf1abadec7829054f90dda9805aab56c77333024b9d0a508b75c",
+      "00da9b08172a9b6f0466a2defd817f2d7ab437e0d253cb5395a963866b3574be\
+      \d092f9d860f1776a1f7412ad8a1eb50daccc222bc8c0e26b2056df2f273efdec",
+      False
+    ),
+    ( "8: negated s",
+      "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "0000000000000000000000000000000000000000000000000000000000000000",
+      "787a848e71043d280c50470e8e1532b2dd5d20ee912a45dbdd2bd1dfbf187ef6\
+      \8fce5677ce7a623cb20011225797ce7a8de1dc6ccd4f754a47da6c600e59543c",
+      False
+    ),
+    ( "9: negated P",
+      "03dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659",
+      "243f6a8885a308d313198a2e03707344a4093822299f31d0082efa98ec4e6c89",
+      "2a298dacae57395a15d0795ddbfd1dcb564da82b0f269bc70a74f8220429ba1d\
+      \1e51a22ccec35599b8f266912281f8365ffc2d035a230434a1a64dc59f7013fd",
+      False
+    ),
+    ( "10: s * G = e * P, R at infinity",
+      "02dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659",
+      "243f6a8885a308d313198a2e03707344a4093822299f31d0082efa98ec4e6c89",
+      "2a298dacae57395a15d0795ddbfd1dcb564da82b0f269bc70a74f8220429ba1d\
+      \8c3428869a663ed1e954705b020cbb3e7bb6ac31965b9ea4c73e227b17c5af5a",
+      False
+    ),
+    ( "11: r not on the curve",
+      "02dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659",
+      "243f6a8885a308d313198a2e03707344a4093822299f31d0082efa98ec4e6c89",
+      "4a298dacae57395a15d0795ddbfd1dcb564da82b0f269bc70a74f8220429ba1d\
+      \1e51a22ccec35599b8f266912281f8365ffc2d035a230434a1a64dc59f7013fd",
+      False
+    ),
+    ( "12: r = p",
+      "02dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659",
+      "243f6a8885a308d313198a2e03707344a4093822299f31d0082efa98ec4e6c89",
+      "fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffc2f\
+      \1e51a22ccec35599b8f266912281f8365ffc2d035a230434a1a64dc59f7013fd",
+      False
+    ),
+    ( "13: s = n",
+      "02dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659",
+      "243f6a8885a308d313198a2e03707344a4093822299f31d0082efa98ec4e6c89",
+      "2a298dacae57395a15d0795ddbfd1dcb564da82b0f269bc70a74f8220429ba1d\
+      \fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141",
+      False
+    )
+  ]
+
+cashSchnorrSpec :: Ctx -> Spec
+cashSchnorrSpec ctx =
+  describe "Schnorr signatures of Bitcoin Cash" $
+    forM_ cashSchnorrVectors $ \(name, pk, digest, sig, valid) ->
+      it ("vector " <> name) $ do
+        let bytes = fromJust . decodeHex
+            pub = fromJust (importPubKey ctx (bytes pk))
+            h = either error id (S.decode (bytes digest)) :: Hash256
+        verifyCashSchnorr ctx pub (bytes sig) h `shouldBe` valid

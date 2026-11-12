@@ -55,8 +55,11 @@ storage.
 - **A script interpreter.** `verifyStdTx` recognises the standard templates. It
   is not a consensus check.
 - **Signet, output descriptors, Miniscript and MuSig2.**
-- **Schnorr transaction signatures, `SIGHASH_UTXOS` and token outputs of Bitcoin
-  Cash.** An input or an output that uses them does not decode or verify.
+- **Signing with Schnorr signatures, `SIGHASH_UTXOS` and token outputs of
+  Bitcoin Cash.** `judgeInputs` verifies a Schnorr signature, of one key
+  or in a multisig, and the spend of a coin that holds tokens.
+  Nothing here signs them, `verifyStdTx` does not read them, and an
+  output with tokens has no address.
 - **BIP-324 encrypted transport.**
 - **BIP-39 word lists other than English.**
 
@@ -112,7 +115,7 @@ dependency. Use the [latest version from Hackage](https://hackage.haskell.org/pa
 ```yaml
 resolver: nightly-2026-10-28
 extra-deps:
-  - haskoin-core-1.6.1
+  - haskoin-core-1.6.2
   - base16-2.0
   - secp256k1-haskell-2.0.1
 ```

@@ -22,6 +22,9 @@ module Haskoin.Crypto.Signature
     isCanonicalHalfOrder,
     decodeStrictSig,
     exportSig,
+
+    -- * Schnorr signatures of Bitcoin Cash
+    verifyCashSchnorr,
   )
 where
 
@@ -31,11 +34,12 @@ import Data.Aeson
 import Data.Aeson.Encoding
 import Data.Binary (Binary (..))
 import Data.ByteString (ByteString)
+import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as L
 import Data.Bytes.Get
 import Data.Bytes.Put
 import Data.Bytes.Serial
-import Data.Maybe (fromMaybe)
+import Data.Maybe (catMaybes, fromMaybe)
 import Data.Serialize (Serialize (..))
 import Haskoin.Crypto.Hash
 import Haskoin.Util.Helpers
@@ -109,3 +113,56 @@ isCanonicalHalfOrder = isLowS
 -- block chain. Use 'isCanonicalHalfOrder' for the low-S relay rule.
 decodeStrictSig :: Ctx -> ByteString -> Maybe Sig
 decodeStrictSig = importSig
+
+-- | Verify a Schnorr signature of Bitcoin Cash: 64 bytes, @r@ then @s@,
+-- of a public key over a 32-byte digest.
+--
+-- Bitcoin Cash has had these in @OP_CHECKSIG@ since May 2019, where a
+-- signature of 64 bytes and the hash type byte is one, and most of its
+-- wallets make them. They are not the Schnorr signatures of BIP 340,
+-- which Taproot uses: the key is a full public key and not its x
+-- coordinate, the challenge is a plain SHA-256 of @r@, the compressed
+-- key and the digest, and @R@ is told from its negation by its y
+-- coordinate being a square. libsecp256k1 has no function for them, so
+-- this builds the check out of the operations it has on points:
+--
+-- > e = SHA-256(r || compressed P || m) mod n
+-- > R = s*G - e*P
+-- > valid when R is not at infinity, x(R) = r, and y(R) is a square mod p
+--
+-- This is the check of @secp256k1_schnorr_sig_verify@ in Bitcoin Cash
+-- Node, and the tests hold it to the test vectors of that code. It only
+-- verifies: nothing here is secret, so it is not written to run in
+-- constant time.
+verifyCashSchnorr :: Ctx -> PubKey -> ByteString -> Hash256 -> Bool
+verifyCashSchnorr ctx pub sig h
+  | BS.length sig /= 64 = False
+  | r >= fieldP || s >= orderN = False
+  | otherwise = case combined of
+      Nothing -> False
+      Just point ->
+        let (x, y) = BS.splitAt 32 (BS.drop 1 (exportPubKey ctx False point))
+         in bsToInteger x == r && isSquare (bsToInteger y)
+  where
+    (rBytes, sBytes) = BS.splitAt 32 sig
+    r = bsToInteger rBytes
+    s = bsToInteger sBytes
+    digest = runPutS (serialize h)
+    e = bsToInteger (runPutS (serialize (sha256 (rBytes <> exportPubKey ctx True pub <> digest)))) `mod` orderN
+    -- s*G, when s is not zero
+    sG = derivePubKey ctx <$> secKey (word256 s)
+    -- -e*P, when e is not zero
+    eP = tweak (word256 ((orderN - e) `mod` orderN)) >>= tweakMulPubKey ctx pub
+    -- their sum, which is nothing when it is the point at infinity
+    combined = case catMaybes [sG, eP] of
+      [] -> Nothing
+      points -> combinePubKeys ctx points
+    -- Euler's criterion
+    isSquare y = powMod y ((fieldP - 1) `div` 2) fieldP == 1
+    word256 n = let b = integerToBS n in BS.replicate (32 - BS.length b) 0 <> b
+    fieldP = 2 ^ (256 :: Int) - 2 ^ (32 :: Int) - 977 :: Integer
+    orderN = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141 :: Integer
+    powMod _ 0 _ = 1
+    powMod b k m
+      | even k = let half = powMod b (k `div` 2) m in half * half `mod` m
+      | otherwise = b * powMod b (k - 1) m `mod` m
