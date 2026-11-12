@@ -7,10 +7,37 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [1.6.2] - 2026-11-12
+
+### Added
+
+- `judgeInputs` says of each input of a transaction whether its
+  signature verifies, is forged, or cannot be told without running a
+  script (`InputVerdict`). `verifyStdTx` answers no both for a forged
+  signature and for a script it does not read; to refuse a transaction
+  before sending it, the two have to be told apart. "Forged" is said only
+  of a coin locked to one key, spent with the items such a coin takes and
+  a hash type of all.
+- `verifyCashSchnorr` verifies a Schnorr signature of Bitcoin Cash, which
+  is not the one of BIP 340 and has no function in libsecp256k1. It is
+  held to the test vectors of Bitcoin Cash Node.
+- `splitTokenPrefix` takes the token prefix off the script of an output of
+  Bitcoin Cash, and `txSigHashCashToken` is the digest of a coin that holds
+  tokens. `judgeInputs` uses both, and reads Schnorr signatures, so it
+  verifies inputs on Bitcoin Cash that `verifyStdInput` does not. The
+  tests hold it to two transactions signed by Bitcoin Cash Node 29.2.0,
+  one of them spending tokens.
+- `judgeInputs` verifies a multisig of Bitcoin Cash signed with Schnorr
+  signatures, where a field of bits in place of the empty first item says
+  which keys signed, as `OP_CHECKMULTISIG` of Bitcoin Cash Node reads it.
+- `verifyStdInput`, `verifyStdTx` and `judgeInputs` verify the multisig
+  of Taproot: a script path whose leaf is `multi_a` of the output
+  descriptors, with `OP_CHECKSIGADD`.
+
 ### Changed
 
 - `stack.yaml` builds against secp256k1-haskell 2.0.1. The README's Stack
-  example names that version and the current haskoin-core release, 1.6.1. The
+  example names that version and the current haskoin-core release. The
   package and its bounds are unchanged.
 - The README shows a badge with the status of CI on `master`.
 - The Nix CI job deletes Stack's cached Setup programs before building. One

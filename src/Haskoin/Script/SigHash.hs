@@ -41,6 +41,8 @@ module Haskoin.Script.SigHash
     sigHashAddNetworkId,
     txSigHash,
     txSigHashForkId,
+    txSigHashCashToken,
+    splitTokenPrefix,
     TxSignature (..),
     decodeTxSig,
     encodeTxSig,
@@ -356,12 +358,15 @@ buildOutputs txos i sh
 --   digest. 'isSigHashUnknown' treats the bit as undefined, so 'decodeTxSig'
 --   refuses such a signature.
 --
--- * Coins that hold tokens. Their digest also covers the token data, and
---   their output script starts with the prefix byte 0xef, which
---   'Haskoin.Script.Standard.decodeOutput' does not read. A signature made
---   here for such a coin is not valid.
+-- * Coins that hold tokens, in this function. Their digest also covers the
+--   token data, and their output script starts with the prefix byte 0xef,
+--   which 'Haskoin.Script.Standard.decodeOutput' does not read. Their
+--   digest is 'txSigHashCashToken', with the prefix that 'splitTokenPrefix'
+--   takes off the script.
 --
--- * Schnorr signatures, see 'TxSignature'.
+-- * Schnorr signatures as a 'TxSignature'. They are verified by
+--   'Haskoin.Crypto.Signature.verifyCashSchnorr', and by
+--   'Haskoin.Transaction.Builder.judgeInputs' in an input.
 --
 -- Fails when the input index is not an index of the transaction.
 txSigHashForkId ::
@@ -378,7 +383,33 @@ txSigHashForkId ::
   SigHash ->
   -- | hash to be signed
   Either String Hash256
-txSigHashForkId net tx out v i sh
+txSigHashForkId net tx = txSigHashCashToken net tx B.empty
+
+-- | 'txSigHashForkId' for a coin of Bitcoin Cash that holds tokens. The
+-- digest of such a coin also covers its token prefix, the bytes that
+-- 'splitTokenPrefix' takes off the front of its output script, which go in
+-- right before the script. With an empty prefix this is 'txSigHashForkId'.
+--
+-- The outputs of the transaction need nothing done: on the wire the
+-- prefix of an output is part of its script field, and so it is in the
+-- 'TxOut' that is hashed.
+txSigHashCashToken ::
+  Network ->
+  -- | transaction to sign
+  Tx ->
+  -- | token prefix of the output being spent, or empty
+  ByteString ->
+  -- | script from output being spent, without the prefix
+  Script ->
+  -- | value of output being spent
+  Word64 ->
+  -- | index of input being signed
+  Int ->
+  -- | what to sign
+  SigHash ->
+  -- | hash to be signed
+  Either String Hash256
+txSigHashCashToken net tx prefix out v i sh
   | i < 0 || i >= length tx.inputs =
       Left "txSigHashForkId: input index out of range"
   | otherwise = Right . doubleSHA256 . runPutS $ do
@@ -386,6 +417,7 @@ txSigHashForkId net tx out v i sh
     serialize hashPrevouts
     serialize hashSequence
     serialize (tx.inputs !! i).outpoint
+    putByteString prefix
     putScript out
     putWord64le v
     putWord32le (tx.inputs !! i).sequence
@@ -416,6 +448,63 @@ txSigHashForkId net tx out v i sh
       putByteString encodedScript
     zeros :: Hash256
     zeros = "0000000000000000000000000000000000000000000000000000000000000000"
+
+-- | Split the script field of an output of Bitcoin Cash into its token
+-- prefix and the output script after it. An output without tokens has an
+-- empty prefix. 'Nothing' for a prefix that is not well formed.
+--
+-- Since May 2023 an output may hold tokens (CashTokens). They are written
+-- at the front of its script field: the byte @0xef@, the 32 bytes of the
+-- token category, a byte of flags, and after it a commitment with its
+-- length and an amount, each when its flag is set. What follows is the
+-- output script that locks the coin.
+splitTokenPrefix :: ByteString -> Maybe (ByteString, ByteString)
+splitTokenPrefix bytes
+  | B.null bytes || B.head bytes /= 0xef = Just (B.empty, bytes)
+  | B.length bytes < 34 = Nothing
+  | flags .&. 0x80 /= 0 = Nothing
+  -- tokens of some kind, a commitment only with a non-fungible one, and
+  -- a capability of none, mutable or minting, only with one too
+  | not hasNft && not hasAmount = Nothing
+  | not hasNft && (hasCommitment || capability /= 0) = Nothing
+  | capability > 2 = Nothing
+  | otherwise = do
+      afterCommitment <-
+        if hasCommitment
+          then do
+            (n, rest) <- compact afterFlags
+            if n == 0 || fromIntegral (B.length rest) < n then Nothing else Just (B.drop (fromIntegral n) rest)
+          else Just afterFlags
+      afterAmount <-
+        if hasAmount
+          then do
+            (n, rest) <- compact afterCommitment
+            if n == 0 || n > 0x7fffffffffffffff then Nothing else Just rest
+          else Just afterCommitment
+      Just (B.splitAt (B.length bytes - B.length afterAmount) bytes)
+  where
+    flags = B.index bytes 33
+    afterFlags = B.drop 34 bytes
+    hasCommitment = flags .&. 0x40 /= 0
+    hasNft = flags .&. 0x20 /= 0
+    hasAmount = flags .&. 0x10 /= 0
+    capability = flags .&. 0x0f
+    -- a number in the compact form of the protocol, in its shortest
+    -- encoding only
+    compact :: ByteString -> Maybe (Word64, ByteString)
+    compact b = case B.uncons b of
+      Nothing -> Nothing
+      Just (w, rest)
+        | w < 0xfd -> Just (fromIntegral w, rest)
+        | w == 0xfd -> sized 2 0xfd rest
+        | w == 0xfe -> sized 4 0x10000 rest
+        | otherwise -> sized 8 0x100000000 rest
+    sized k least rest
+      | B.length rest < k = Nothing
+      | n < least = Nothing
+      | otherwise = Just (n, B.drop k rest)
+      where
+        n = B.foldr (\w acc -> acc `shiftL` 8 .|. fromIntegral w) 0 (B.take k rest)
 
 -- | Data type representing a signature together with a 'SigHash'. The 'SigHash'
 -- is serialized as one byte at the end of an ECDSA 'Sig'. All signatures in

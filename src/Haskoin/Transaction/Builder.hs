@@ -35,6 +35,8 @@ module Haskoin.Transaction.Builder
     mergeTxInput,
     findSigInput,
     verifyStdInput,
+    InputVerdict (..),
+    judgeInputs,
 
     -- * Coin Selection
     Coin (..),
@@ -59,7 +61,10 @@ where
 import Control.Monad (foldM, unless, when)
 import Control.Monad.Identity (runIdentity)
 import Crypto.Secp256k1
+import Data.Bits (popCount, testBit)
 import Data.ByteString qualified as B
+import Data.Bytes.Get (runGetS)
+import Data.Bytes.Serial (deserialize)
 import Data.Conduit (ConduitT, Void, await, runConduit, (.|))
 import Data.Conduit.List (sourceList)
 import Data.Either (fromRight, rights)
@@ -771,9 +776,14 @@ spentCoins ctx tx given =
 -- pay-to-public-key, pay-to-public-key-hash, multisig and pay-to-script-hash
 -- inputs, their SegWit forms, native or nested in pay-to-script-hash, and
 -- Taproot inputs spent by the key path or by a script path whose leaf is a
--- single key check. An input that is not a witness program must have no
--- witness, as @VerifyScript@ requires in Bitcoin Core. Other script path
--- spends need script execution and are not verified: they are refused.
+-- single key check or a multisig. The multisig of Taproot is @multi_a@ of
+-- the output descriptors: a key and @OP_CHECKSIG@, then a key and
+-- @OP_CHECKSIGADD@ for each other key, the number of signatures asked
+-- for, and @OP_NUMEQUAL@; its witness has an item for every key, that of
+-- the last key first, empty for a key that did not sign. An input that
+-- is not a witness program must have no witness, as @VerifyScript@
+-- requires in Bitcoin Core. Other script path spends need script
+-- execution and are not verified: they are refused.
 --
 -- The answer is never 'True' for an input that no block can contain:
 --
@@ -941,8 +951,210 @@ verifyInput net ctx tx spent i
                 leafKey <- maybe (Left "not an x-only key") Right (importXOnlyPubKey ctx keyBytes)
                 (sig, h) <- schnorr sigBytes spd.annex (Just (leafHash spd.leafVersion spd.script, 0xffffffff))
                 return (verifyScriptPathData ctx outKey spd && verifySchnorr ctx leafKey sig (hashToMsg h))
-          _ -> Left "script path spends other than a single key check are not verified"
+          -- The multisig of Taproot, @multi_a@ of the output descriptors:
+          -- a key and OP_CHECKSIG, then a key and OP_CHECKSIGADD for each
+          -- other key, the number of signatures asked for, and
+          -- OP_NUMEQUAL. The witness has an item for every key, that of
+          -- the last key first: a signature, or nothing for a key that
+          -- did not sign. A signature that does not verify fails the
+          -- script, it does not count for nothing (BIP 342).
+          (ops, items)
+            | spd.leafVersion == tapscriptLeafVersion,
+              Just (keys, asked) <- multiA ops,
+              length items == length keys -> do
+                let leaf = Just (leafHash spd.leafVersion spd.script, 0xffffffff)
+                    signs keyBytes sigBytes
+                      | B.null sigBytes = Right False
+                      | otherwise = do
+                          key <- maybe (Left "not an x-only key") Right (importXOnlyPubKey ctx keyBytes)
+                          (sig, h) <- schnorr sigBytes spd.annex leaf
+                          if verifySchnorr ctx key sig (hashToMsg h)
+                            then Right True
+                            else Left "a signature that does not verify"
+                signed <- sequence (zipWith signs keys (reverse items))
+                return (verifyScriptPathData ctx outKey spd && length (filter id signed) == asked)
+          _ -> Left "script path spends other than key checks are not verified"
         Nothing -> Left "not a Taproot witness"
+
+-- | What can be said of the signature of an input without running its
+-- script.
+data InputVerdict
+  = -- | the input is one of the standard kinds and its signatures verify
+    -- ('verifyStdInput')
+    InputVerified
+  | -- | the input spends a coin locked to one key, with the signature and
+    -- key that such a coin takes, and they do not open it: no node takes
+    -- the transaction
+    InputForged
+  | -- | neither: a script that is not run here, a coin that was not
+    -- given, a hash type other than all, an encoding that is not read
+    InputUndecided
+  deriving (Eq, Show)
+
+-- | Judge each input of a transaction, given the output it spends, in
+-- order, as it is in the transaction that made it: 'Nothing' for one that
+-- is not known.
+--
+-- 'verifyStdTx' answers 'False' both for a forged signature and for a
+-- script it does not read. To refuse a transaction before sending it,
+-- those have to be told apart: a wrong 'InputForged' turns away a good
+-- transaction, while 'InputUndecided' only leaves the question to a
+-- node. So 'InputForged' is said of little, and only where there is
+-- nothing to run:
+--
+-- * a coin locked to a key hash, to a key, to a witness key hash, to one
+--   nested in a script hash, or to a Taproot key, spent by the key and
+--   not by a script;
+-- * with exactly the items such an input has, and a hash type of all;
+-- * whose key is not the one the coin names, or whose signature does not
+--   verify over the digest.
+--
+-- On Bitcoin Cash it reads what 'verifyStdInput' does not: a Schnorr
+-- signature ('verifyCashSchnorr'), of one key or in a multisig, bare or in
+-- a script hash, and a coin that holds tokens, whose digest covers them
+-- ('txSigHashCashToken'). Inputs of those kinds are 'InputVerified' here
+-- and not by 'verifyStdInput'. A multisig is never 'InputForged': one
+-- that does not verify is 'InputUndecided'.
+judgeInputs :: Network -> Ctx -> Tx -> [Maybe TxOut] -> [InputVerdict]
+judgeInputs net ctx tx given = zipWith judge [0 ..] decoded
+  where
+    prevs = take (length tx.inputs) (given <> repeat Nothing)
+    forked = net.sigHashForkId /= Nothing
+    split bytes
+      | forked = splitTokenPrefix bytes
+      | otherwise = Just (B.empty, bytes)
+    decoded = map (>>= decode) prevs
+    decode o = do
+      (prefix, script) <- split o.script
+      so <- eitherToMaybe (unmarshal ctx script)
+      return (prefix, so, o.value)
+    spent =
+      SpentCoins
+        { coins = [d >>= \(prefix, so, v) -> if B.null prefix then Just (so, v) else Nothing | d <- decoded],
+          outputs = sequence prevs
+        }
+    judge :: Int -> Maybe (B.ByteString, ScriptOutput, Word64) -> InputVerdict
+    judge _ Nothing = InputUndecided
+    judge i (Just (prefix, so, val))
+      | B.null prefix && verifyInput net ctx tx spent i = InputVerified
+      | otherwise = case so of
+          PayPKHash h
+            | null ws, Just [sig, pub] <- pushes -> keyed (addressHash pub == h) sig pub legacy
+          PayPK pub
+            | null ws, Just [sig] <- pushes -> signed sig pub.point legacy
+          PayWitnessPKHash h
+            | net.segWit, B.null inp, [sig, pub] <- ws -> keyed (addressHash pub == h) sig pub (segwit so)
+          PayScriptHash h
+            | net.segWit,
+              Just [program] <- pushes,
+              addressHash program == h,
+              Right nested@(PayWitnessPKHash kh) <- unmarshal ctx program,
+              [sig, pub] <- ws ->
+                keyed (addressHash pub == kh) sig pub (segwit nested)
+          PayWitness 1 program
+            | net.segWit, B.length program == 32, B.null inp, [sig] <- ws -> taproot program sig
+          PayMulSig keys asked
+            | forked, null ws, Just (bits : sigs) <- pushes -> cashMultisig so keys asked bits sigs
+          PayScriptHash h
+            | forked,
+              null ws,
+              Just items@(_ : _ : _) <- pushes,
+              addressHash (last items) == h,
+              Right redeem@(PayMulSig keys asked) <- unmarshal ctx (last items),
+              bits : sigs <- init items ->
+                cashMultisig redeem keys asked bits sigs
+          _ -> InputUndecided
+      where
+        inp = (tx.inputs !! i).script
+        ws = if length tx.witness > i then tx.witness !! i else []
+        -- the items of an input script that only pushes data
+        pushes = case runGetS deserialize inp of
+          Right (Script ops) -> mapM pushed ops
+          Left _ -> Nothing
+        -- a small number is pushed by an opcode of its own
+        pushed = \case
+          OP_PUSHDATA d _ -> Just d
+          op -> B.singleton . fromIntegral <$> eitherToMaybe (scriptOpToInt op)
+        legacy sh = do
+          script <- encodeOutput ctx so
+          if forked then txSigHashCashToken net tx prefix script val i sh else txSigHash net tx script val i sh
+        segwit out sh = Sign.makeSigHash net ctx tx i out val sh Nothing
+        -- a coin that names the hash of its key: another key does not
+        -- open it, whatever it signed
+        keyed named sig pub digest
+          | not named = InputForged
+          | otherwise = maybe InputUndecided (\k -> signed sig k digest) (importPubKey ctx pub)
+        -- Forged is said of the hash type "all" only. With another hash
+        -- type a signature that verifies is verified, and one that does
+        -- not is left alone.
+        signed sig key digest
+          | B.null sig || not (readable (B.last sig)) = InputUndecided
+          | otherwise = case digest (fromIntegral (B.last sig)) of
+              Left _ -> InputUndecided
+              Right m
+                -- on Bitcoin Cash a signature of 64 bytes is a Schnorr one
+                | forked && B.length body == 64 -> sure (verifyCashSchnorr ctx key body m)
+                | otherwise -> maybe InputUndecided (\s -> sure (verifyHashSig ctx m s key)) (decodeStrictSig ctx body)
+          where
+            body = B.init sig
+            sure ok
+              | ok = InputVerified
+              | B.last sig == (if forked then 0x41 else 0x01) = InputForged
+              | otherwise = InputUndecided
+        -- The hash types whose digest is computed here. On Bitcoin Cash:
+        -- all, none or single, with the fork id, alone or with "anyone
+        -- can pay"; not the one that covers every coin spent.
+        readable ht
+          | forked = ht `elem` [0x41, 0x42, 0x43, 0xc1, 0xc2, 0xc3]
+          | otherwise = ht == 0x01
+        -- A multisig of Bitcoin Cash signed with Schnorr signatures. In
+        -- place of the empty item that a multisig takes first there is a
+        -- field of bits, one for each key in the order of the script,
+        -- the first key lowest, set for the keys that signed. It has
+        -- exactly the bytes that hold a bit for every key, no bit past
+        -- the keys, and as many bits set as signatures are asked for.
+        -- The signatures follow in the order of their keys, and every
+        -- one must be a Schnorr signature that verifies. This is
+        -- OP_CHECKMULTISIG of Bitcoin Cash Node, since November 2019.
+        cashMultisig script keys asked bits sigs
+          | B.null bits = InputUndecided
+          | B.length bits /= (length keys + 7) `div` 8 = InputUndecided
+          | field >= 2 ^ length keys || popCount field /= asked || length sigs /= asked = InputUndecided
+          | all good (zip signers sigs) = InputVerified
+          | otherwise = InputUndecided
+          where
+            field = B.foldr (\w acc -> acc * 256 + toInteger w) 0 bits :: Integer
+            signers = [k | (n, k) <- zip [0 ..] keys, testBit field n]
+            good (key, sig) =
+              B.length sig == 65
+                && readable (B.last sig)
+                && either
+                  (const False)
+                  (verifyCashSchnorr ctx key.point (B.init sig))
+                  (encodeOutput ctx script >>= \code -> cashDigest code (fromIntegral (B.last sig)))
+            cashDigest code = txSigHashCashToken net tx prefix code val i
+        taproot program sig = fromRight InputUndecided $ do
+          key <- maybe (Left "not a key") Right (importXOnlyPubKey ctx program)
+          outs <- maybe (Left "a spent output is missing") Right spent.outputs
+          TaprootSignature s sh <- decodeTaprootSig sig
+          unless (sh == sigHashDefault || sh == sigHashAll) $ Left "another hash type"
+          m <- taprootSigHash tx outs i sh Nothing Nothing
+          return (verdict (verifySchnorr ctx key s (hashToMsg m)))
+        verdict ok = if ok then InputVerified else InputForged
+
+-- | The keys of a Taproot multisig script and the number of signatures it
+-- asks for, if the script is one: see 'verifyStdInput'.
+multiA :: [ScriptOp] -> Maybe ([B.ByteString], Int)
+multiA (OP_PUSHDATA first OPCODE : OP_CHECKSIG : rest) = go [first] rest
+  where
+    go keys (OP_PUSHDATA key OPCODE : OP_CHECKSIGADD : more) = go (key : keys) more
+    go keys [number, OP_NUMEQUAL]
+      | Right asked <- scriptOpToInt number,
+        asked <= length keys,
+        all ((== 32) . B.length) keys =
+          Just (reverse keys, asked)
+    go _ _ = Nothing
+multiA _ = Nothing
 
 -- | Whether an output script is a Taproot output: a witness program of
 -- version 1 that is 32 bytes long
