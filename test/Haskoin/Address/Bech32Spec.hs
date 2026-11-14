@@ -4,7 +4,7 @@
 module Haskoin.Address.Bech32Spec (spec) where
 
 import Control.Monad
-import Data.Bits (xor)
+import Data.Bits (testBit, xor)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as ByteString
 import Data.Char (chr, ord, toLower)
@@ -18,6 +18,7 @@ import Haskoin.Address.Bech32
 import Haskoin.Util
 import Test.HUnit
 import Test.Hspec
+import Test.Hspec.QuickCheck (prop)
 
 spec :: Spec
 spec = do
@@ -108,6 +109,12 @@ spec = do
       map fromWord5 (toBase32 [0xff]) `shouldBe` [31, 28 :: Int]
     it "toBase32 needs no padding for five bytes" $
       map fromWord5 (toBase32 [1, 2, 3, 4, 5]) `shouldBe` [0, 4, 1, 0, 6, 1, 0, 5 :: Int]
+    prop "toBase32 reads the bits five at a time, most significant first, padded with zeros" $ \bytes ->
+      let bits = concatMap (\b -> [testBit (b :: Word8) i | i <- [7, 6 .. 0]]) bytes
+          groups [] = []
+          groups bs = take 5 (bs <> replicate 4 False) : groups (drop 5 bs)
+          value = foldl (\acc b -> acc * 2 + if b then 1 else 0) 0
+       in map fromWord5 (toBase32 bytes) `shouldBe` (map value (groups bits) :: [Int])
     it "toBase256 reverses toBase32" $
       toBase256 (map word5 [31, 28 :: Int]) `shouldBe` Just [0xff]
     it "toBase256 rejects padding bits that are not zero" $

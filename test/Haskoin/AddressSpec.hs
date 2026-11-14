@@ -26,11 +26,11 @@ import Haskoin.Script
 import Haskoin.Util
 import Haskoin.Util.Arbitrary
 import System.Timeout (timeout)
-import Text.Read (readMaybe)
 import Test.HUnit
 import Test.Hspec
 import Test.Hspec.QuickCheck
 import Test.QuickCheck
+import Text.Read (readMaybe)
 
 identityTests :: Network -> IdentityTests
 identityTests net =
@@ -88,6 +88,15 @@ spec = prepareContext $ \ctx -> do
       decodeBase58 "2\x0131" `shouldBe` Nothing
     it "rejects a checked string shorter than a checksum" $
       decodeBase58Check "1" `shouldBe` Nothing
+    prop "writes what the plain conversion through one big number writes" $
+      -- leading zero bytes, which are written as 1, and lengths of every
+      -- remainder by four, for the limbs of 32 bits
+      forAll ((<>) <$> (B.pack <$> listOf (pure 0)) <*> arbitraryBS) $ \bs ->
+        encodeBase58 bs `shouldBe` slowBase58 bs
+    it "writes the numbers around the edges of a limb and of 58^5" $
+      forM_ [0, 1, 57, 58, 656356767, 656356768, 4294967295, 4294967296, 2 ^ (200 :: Int) - 1] $ \n -> do
+        let bs = integerToBS n
+        assertEqual (show n) (slowBase58 bs) (encodeBase58 bs)
   describe "Smart constructors" $ do
     it "witnessAddress builds a P2WPKH address from version 0 and 20 bytes" $
       witnessAddress 0 hash20Bytes `shouldBe` Just (WitnessPubKeyAddress hash20)
@@ -391,6 +400,22 @@ spec = prepareContext $ \ctx -> do
       ((.ops) <$> addressToScript ctx p2sh)
         `shouldBe` Just [OP_HASH160, OP_PUSHDATA hash20Bytes OPCODE, OP_EQUAL]
   describe "outputAddress, scriptToAddress and scriptToAddressBS" $ do
+    prop "reads the standard kinds by their bytes as the parser reads them" $
+      -- outputs of every kind, of any network, read on any network
+      forAll ((,) <$> arbitraryNetwork <*> (arbitraryNetwork >>= \other -> arbitraryScriptOutput other ctx)) $ \(net, out) ->
+        let bytes = marshal ctx out
+         in scriptToAddressBS net ctx bytes `shouldBe` parsed ctx net bytes
+    prop "reads bytes that are nearly of a standard kind as the parser reads them" $
+      -- a standard script with one byte changed, or one too many or too few
+      forAll ((,,) <$> arbitraryNetwork <*> elements standardShapes <*> arbitrary) $ \(net, hex, (i, w, cut)) -> do
+        let good = fromJust (decodeHex hex)
+            k = i `mod` B.length good
+            changed = B.take k good <> B.singleton w <> B.drop (k + 1) good
+            bytes = case cut `mod` (3 :: Int) of
+              0 -> changed
+              1 -> changed <> "\x00"
+              _ -> B.take (B.length changed - 1) changed
+        scriptToAddressBS net ctx bytes `shouldBe` parsed ctx net bytes
     it "recovers the address of every standard locking script on a network that has its kind" $
       forM_ scriptTable $ \(net, a, hex) ->
         assertEqual (T.unpack hex) (Right a) (scriptToAddressBS net ctx (fromJust (decodeHex hex)))
@@ -837,4 +862,30 @@ compatWitnessVectors =
       "cNUnpYpMsJXYCERYBciJnsWBpcYEFjdcbq6dxj4SskGhs7uHuJ7Q",
       "2N6PDTueBHvXzW61B4oe5SW1D3v2Z3Vpbvw"
     )
+  ]
+
+-- | Base58 as it was written until haskoin-core 1.6.2: the bytes as one
+-- 'Integer', divided by 58 until nothing is left, and a 1 for each leading
+-- zero byte.
+slowBase58 :: ByteString -> Text
+slowBase58 bs = T.replicate (B.length zeros) "1" <> T.pack (map (T.index alphabet) (digits number []))
+  where
+    (zeros, rest) = B.span (== 0) bs
+    number = B.foldl' (\n w -> n * 256 + toInteger w) 0 rest :: Integer
+    digits 0 acc = acc
+    digits n acc = digits (n `div` 58) (fromInteger (n `mod` 58) : acc)
+    alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+-- | The address of a script as the parser reads it, which is what
+-- 'scriptToAddressBS' did for every script until haskoin-core 1.6.2.
+parsed :: Ctx -> Network -> ByteString -> Either String Address
+parsed ctx net bytes = maybeToEither "Could not decode address" . outputAddress net ctx =<< unmarshal ctx bytes
+
+-- | The four kinds of script that 'scriptToAddressBS' reads by their bytes.
+standardShapes :: [Text]
+standardShapes =
+  [ "76a91476a04053bda0a88bda5177b86a15c3b29f55987388ac",
+    "a91476a04053bda0a88bda5177b86a15c3b29f55987387",
+    "001476a04053bda0a88bda5177b86a15c3b29f559873",
+    "00201863143c14c5166804bd19203356da136c985678cd4d27a1b8c6329604903262"
   ]

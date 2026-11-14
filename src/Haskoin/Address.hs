@@ -90,6 +90,7 @@ import Data.Aeson.Encoding (text)
 import Data.Binary (Binary (..))
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as B
+import Data.ByteString.Unsafe qualified as BU
 import Data.Bytes.Get (MonadGet (getByteString, getWord64be, getWord8), isEmpty, runGetS)
 import Data.Bytes.Put (MonadPut (putByteString, putWord64be, putWord8), runPutS)
 import Data.Bytes.Serial (Serial (..))
@@ -724,11 +725,39 @@ scriptToAddress net ctx =
 
 -- | Decode a serialized script into the 'Address' it has on a network, if it
 -- has one there. See 'outputAddress'.
+--
+-- The four kinds of output that nearly every transaction pays to are told
+-- by their bytes, without parsing the script: a key hash, a script hash,
+-- and on a network with SegWit a witness key hash and a witness script
+-- hash. A server reads the address of every input and output that it shows,
+-- and parsing took most of that time. Any other script is parsed, and gives
+-- what it gave before; the tests hold both ways to the same answers.
 scriptToAddressBS :: Network -> Ctx -> ByteString -> Either String Address
-scriptToAddressBS net ctx =
-  maybeToEither e . outputAddress net ctx <=< unmarshal ctx
+scriptToAddressBS net ctx bytes
+  | Just a <- standard = Right a
+  | otherwise = maybeToEither e . outputAddress net ctx =<< unmarshal ctx bytes
   where
     e = "Could not decode address"
+    n = B.length bytes
+    at = BU.unsafeIndex bytes
+    segwit = isJust net.bech32Prefix
+    hash :: (Serial h) => Int -> Int -> Maybe h
+    hash from size = eitherToMaybe (runGetS deserialize (B.take size (B.drop from bytes)))
+    standard
+      -- OP_DUP OP_HASH160, a push of 20 bytes, OP_EQUALVERIFY OP_CHECKSIG
+      | n == 25,
+        at 0 == 0x76,
+        at 1 == 0xa9,
+        at 2 == 0x14,
+        at 23 == 0x88,
+        at 24 == 0xac =
+          PubKeyAddress <$> hash 3 20
+      -- OP_HASH160, a push of 20 bytes, OP_EQUAL
+      | n == 23, at 0 == 0xa9, at 1 == 0x14, at 22 == 0x87 = ScriptAddress <$> hash 2 20
+      -- OP_0 and a push of 20 bytes, or of 32
+      | segwit, n == 22, at 0 == 0x00, at 1 == 0x14 = WitnessPubKeyAddress <$> hash 2 20
+      | segwit, n == 34, at 0 == 0x00, at 1 == 0x20 = WitnessScriptAddress <$> hash 2 32
+      | otherwise = Nothing
 
 -- | Get the 'Address' that a 'ScriptOutput' has on a network.
 --

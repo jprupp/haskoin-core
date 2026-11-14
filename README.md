@@ -115,7 +115,7 @@ dependency. Use the [latest version from Hackage](https://hackage.haskell.org/pa
 ```yaml
 resolver: nightly-2026-10-28
 extra-deps:
-  - haskoin-core-1.6.2
+  - haskoin-core-1.6.3
   - base16-2.0
   - secp256k1-haskell-2.0.1
 ```

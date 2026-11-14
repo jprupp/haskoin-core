@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE NoFieldSelectors #-}
@@ -24,20 +25,17 @@ where
 
 import Control.Monad (guard)
 import Data.Array (Array, assocs, listArray, (!), (//))
+import Data.Bits (shiftL, (.|.))
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as B
+import Data.ByteString.Unsafe qualified as BU
 import Data.Bytes.Put (runPutS)
 import Data.Bytes.Serial (Serial (serialize))
-import Data.Char (chr)
-import Data.String.Conversions (cs)
 import Data.Text (Text)
-import Data.Text qualified as T
 import Data.Text.Encoding qualified as E
-import Data.Bits (shiftL, (.|.))
 import Data.Word (Word64, Word8)
 import Haskoin.Crypto.Hash (checkSum32)
 import Haskoin.Util.Helpers (integerToBS)
-import Numeric (showIntAtBase)
 
 -- | 'Base58' classic Bitcoin address format.
 type Base58 = Text
@@ -63,38 +61,11 @@ b58InvArray =
 
 -- | Convert a number less than 58 into a 'Base58' character.
 b58 :: Int -> Word8
-b58 = (b58Array !)
+b58 = BU.unsafeIndex b58Data
 
 -- | Convert a 'Base58' character into the number it represents.
 b58' :: Word8 -> Maybe Int
 b58' = (b58InvArray !)
-
--- | Encode an arbitrary-length 'Integer' into a 'Base58' string. Leading zeroes
--- will not be part of the resulting string.
-encodeBase58I :: Integer -> Base58
-encodeBase58I i
-  | i < 0 = cs $ showIntAtBase 58 (chr . fromIntegral . b58) i ""
-  | otherwise = E.decodeLatin1 . B.pack . map b58 $ chunks i []
-  where
-    -- Divide by 58^10 rather than by 58, so that a number of n digits takes
-    -- n/10 divisions of a big number and the rest is machine arithmetic.
-    chunk = 58 ^ (10 :: Int) :: Integer
-    chunks n acc
-      | n < chunk = top (fromInteger n) acc
-      | otherwise =
-          let (q, r) = n `quotRem` chunk
-           in chunks q (digits (10 :: Int) (fromInteger r) acc)
-    -- the digits of a chunk, ten of them with leading zeros
-    digits 0 _ acc = acc
-    digits k w acc =
-      let (q, r) = w `quotRem` (58 :: Word64)
-       in digits (k - 1) q (fromIntegral r : acc)
-    -- the digits of the leading chunk, without leading zeros
-    top w acc
-      | w < 58 = fromIntegral w : acc
-      | otherwise =
-          let (q, r) = w `quotRem` (58 :: Word64)
-           in top q (fromIntegral r : acc)
 
 -- | Decode the UTF-8 bytes of a 'Base58' string into an 'Integer'. Fails on
 -- the first byte that is not a 'Base58' digit.
@@ -106,17 +77,42 @@ decodeBase58I = B.foldl' step (Just 0)
       d <- b58' w
       return (n * 58 + toInteger d)
 
--- | Encode an arbitrary 'ByteString' into a its 'Base58' representation,
+-- | Encode an arbitrary 'ByteString' into its 'Base58' representation,
 -- preserving leading zeroes.
+--
+-- The bytes are read as one number in limbs of 32 bits, and divided by 58^5
+-- (656,356,768) in machine words: each pass over the limbs gives five digits. An address
+-- of 25 bytes takes seven passes over seven limbs. Building an 'Integer'
+-- and dividing that, as this did until 1.6.2, took about five times as long,
+-- and a server writes an address for every input and output it shows.
 encodeBase58 :: ByteString -> Base58
 encodeBase58 bs =
-  l <> r
+  E.decodeLatin1 (B.replicate (B.length z) (b58 0) <> B.pack (map b58 (dropWhile (== 0) (groups (limbs b) []))))
   where
     (z, b) = B.span (== 0) bs
-    l = T.replicate (B.length z) "1" -- preserve leading 0's
-    r
-      | B.null b = T.empty
-      | otherwise = encodeBase58I $ B.foldl' (\n w -> n `shiftL` 8 .|. toInteger w) 0 b
+    -- the number, most significant limb first, each limb under 2^32
+    limbs bytes =
+      let padded = B.replicate ((4 - B.length bytes `mod` 4) `mod` 4) 0 <> bytes
+       in [ B.foldl' (\acc w -> acc `shiftL` 8 .|. fromIntegral w) 0 (BU.unsafeTake 4 (BU.unsafeDrop k padded))
+          | k <- [0, 4 .. B.length padded - 4]
+          ]
+    -- the digits, most significant first, five for each division
+    groups ls !acc = case dropWhile (== 0) ls of
+      [] -> acc
+      live -> let (q, r) = divide live in groups q (five (5 :: Int) r acc)
+    -- the number divided by 58^5, with the remainder; a remainder is under
+    -- 2^30, so with a limb after it it fits in 64 bits
+    divide = go 0 []
+      where
+        go !r qs [] = (reverse qs, r)
+        go !r qs (x : xs) =
+          let !cur = r `shiftL` 32 .|. x
+              !q = cur `quot` chunk
+           in go (cur `rem` chunk) (q : qs) xs
+    chunk = 656356768 :: Word64
+    five :: Int -> Word64 -> [Int] -> [Int]
+    five 0 _ acc = acc
+    five k !w acc = let !d = fromIntegral (w `rem` 58) in five (k - 1) (w `quot` 58) (d : acc)
 
 -- | Decode a 'Base58'-encoded 'Text' to a 'ByteString'. Returns 'Nothing' if
 -- the input contains any character outside the 'Base58' alphabet.
@@ -140,8 +136,7 @@ decodeBase58 t =
 -- | Computes a checksum for the input 'ByteString' and encodes the input and
 -- the checksum as 'Base58'.
 encodeBase58Check :: ByteString -> Base58
-encodeBase58Check bs =
-  (encodeBase58 . B.append bs . runPutS . serialize . checkSum32) bs
+encodeBase58Check bs = encodeBase58 (bs <> runPutS (serialize (checkSum32 bs)))
 
 -- | Decode a 'Base58'-encoded string that contains a checksum. This function
 -- returns 'Nothing' if the input string contains invalid 'Base58' characters,
