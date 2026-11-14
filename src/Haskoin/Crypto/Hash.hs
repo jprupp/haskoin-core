@@ -44,6 +44,7 @@ import Control.Monad (guard)
 import Crypto.Hash
 import Crypto.MAC.HMAC (HMAC, hmac)
 import Data.Binary (Binary (..))
+import Data.Bits (shiftL, (.|.))
 import Data.ByteArray (ByteArrayAccess, convert)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as B
@@ -51,7 +52,6 @@ import Data.ByteString.Short (ShortByteString, fromShort, toShort)
 import Data.Bytes.Get
 import Data.Bytes.Put
 import Data.Bytes.Serial (Serial (..))
-import Data.Either (fromRight)
 import Data.Function (on)
 import Data.Hashable (Hashable)
 import Data.Serialize (Serialize (..))
@@ -210,11 +210,13 @@ addressHash =
 
 {- CheckSum -}
 
--- | Computes a 32 bit checksum.
+-- | Computes a 32 bit checksum: the first four bytes of two rounds of
+-- SHA-256, read big-endian. It is read from the bytes directly rather than
+-- parsed, as it is part of every 'Haskoin.Address.Base58.encodeBase58Check'.
 checkSum32 :: (ByteArrayAccess b) => b -> CheckSum32
 checkSum32 =
-  fromRight (error "Could not decode bytes as CheckSum32")
-    . runGetS deserialize
+  CheckSum32
+    . B.foldl' (\acc w -> acc `shiftL` 8 .|. fromIntegral w) 0
     . B.take 4
     . convert
     . hashWith SHA256

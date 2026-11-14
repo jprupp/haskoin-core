@@ -5,7 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/)
 and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.6.3] - 2026-11-14
+
+### Changed
+
+- **Writing and reading addresses is faster**, for servers that show an
+  address for every input and output. Measured on 20,000 addresses:
+  - `scriptToAddressBS` tells the four standard kinds of output by their
+    bytes, without parsing the script: 3 ms where it took 33, and the
+    same answers as the parser for any script, which the tests check.
+  - `encodeBase58` divides by 58^5 in machine words instead of building an
+    `Integer`, and `checkSum32` reads its four bytes directly: Base58Check
+    addresses take 60 ms where they took 81.
+  - `toBase32` reads five bits at a time from the bytes, and the Bech32
+    checksum has no lists: SegWit addresses take 50 ms where they took 81.
 
 ## [1.6.2] - 2026-11-12
 

@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -43,6 +44,8 @@ import Data.Array
   )
 import Data.Bits
   ( Bits,
+    shiftL,
+    shiftR,
     testBit,
     unsafeShiftL,
     unsafeShiftR,
@@ -51,6 +54,7 @@ import Data.Bits
     (.|.),
   )
 import Data.ByteString qualified as B
+import Data.ByteString.Unsafe qualified as BU
 import Data.Foldable (foldl')
 import Data.Functor.Identity (Identity, runIdentity)
 import Data.Ix (Ix (..))
@@ -102,6 +106,10 @@ charset :: Array Word5 Char
 charset =
   listArray (UnsafeWord5 0, UnsafeWord5 31) "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
 
+-- | 'charset' as bytes, for writing: looked up without bounds or boxes.
+charsetBytes :: B.ByteString
+charsetBytes = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+
 -- | Inverse of 'charset'. Only the lowercase characters are present. The
 -- decoder checks that the string is ASCII and not mixed case, then lowercases
 -- it, before looking characters up here. No character from another alphabet
@@ -122,13 +130,19 @@ charsetMap c
 bech32Polymod :: [Word5] -> Word
 bech32Polymod values = foldl' go 1 values .&. 0x3fffffff
   where
-    go chk value =
-      foldl' xor chk' [g | (g, i) <- zip generator [25 ..], testBit chk i]
+    -- the five generators, each where its bit of the top of the accumulator
+    -- is set, written out: a list of them for each character made the
+    -- checksum the most of the cost of an address
+    go !chk value =
+      g 29 0x2a1462b3 . g 28 0x3d4233dd . g 27 0x1ea119fa . g 26 0x26508e6d $ g 25 0x3b6a57b2 chk'
       where
-        generator = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3]
         -- Keep only the low 25 bits before shifting, as the reference
         -- implementation does, so the accumulator never grows past 30 bits.
         chk' = ((chk .&. 0x1ffffff) .<<. 5) `xor` fromWord5 value
+        g :: Int -> Word -> Word -> Word
+        g i gen c
+          | testBit chk i = c `xor` gen
+          | otherwise = c
 
 -- | Convert human-readable part of 'Bech32' string into a list of five-bit
 -- words.
@@ -179,8 +193,8 @@ bech32Encode enc hrp dat = do
   -- character.
   guard $ all (\(UnsafeWord5 w) -> w <= 31) dat
   let dat' = dat ++ bech32CreateChecksum enc (T.toLower hrp) dat
-      rest = map (charset !) dat'
-      result = T.concat [T.toLower hrp, T.pack "1", T.pack rest]
+      rest = map (\(UnsafeWord5 w) -> BU.unsafeIndex charsetBytes (fromIntegral w)) dat'
+      result = T.concat [T.toLower hrp, T.pack "1", E.decodeLatin1 (B.pack rest)]
   guard $ T.length result <= maxBech32Length
   return result
 
@@ -251,9 +265,26 @@ convertBits dat frombits tobits pad = concat . reverse <$> go dat 0 0 []
 {-# INLINE convertBits #-}
 
 -- | Convert from eight-bit to five-bit word string, adding padding as required.
+--
+-- Each five bits are read from the two bytes that hold them, as
+-- "Haskoin.Address.CashAddr" does, rather than through 'convertBits', whose
+-- lists made this most of the cost of writing a SegWit address. The tests
+-- hold it to 'convertBits'.
 toBase32 :: [Word8] -> [Word5]
-toBase32 dat =
-  map word5 $ runIdentity $ convertBits (map fromIntegral dat) 8 5 yesPadding
+toBase32 dat = map UnsafeWord5 (B.unpack (fst (B.unfoldrN groups group 0)))
+  where
+    bs = B.pack dat
+    groups = (B.length bs * 8 + 4) `div` 5
+    byte :: Int -> Word
+    byte i
+      | i < B.length bs = fromIntegral (BU.unsafeIndex bs i)
+      | otherwise = 0
+    -- the five bits that start this many bits into the input, padded with
+    -- zeros after its end
+    group bit =
+      let i = bit `shiftR` 3
+          two = byte i `shiftL` 8 .|. byte (i + 1)
+       in Just (fromIntegral ((two `shiftR` (11 - (bit .&. 7))) .&. 0x1f), bit + 5)
 
 -- | Convert from five-bit word string to eight-bit word string. Fails if the
 -- padding bits are not zero, or if there are enough of them to hold a whole
