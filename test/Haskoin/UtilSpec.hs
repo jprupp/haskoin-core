@@ -15,8 +15,11 @@ import Data.Aeson
 import Data.Aeson.Encoding (encodingToLazyByteString)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as B
-import Data.ByteString.Builder (toLazyByteString)
+import Data.ByteString.Builder (byteStringHex, lazyByteStringHex, toLazyByteString)
 import Data.ByteString.Lazy qualified as BL
+import Data.ByteString.Short qualified as SBS
+import Data.Text.Encoding qualified as TE
+import Data.Text.Lazy.Encoding qualified as TLE
 import Data.Bytes.Get
 import Data.Bytes.Put
 import Data.Default (def)
@@ -101,6 +104,28 @@ spec = prepareContext $ \ctx ->
         encodingToLazyByteString (hexEncoding "\xab\xcd") `shouldBe` "\"abcd\""
         toLazyByteString (hexBuilder "\xab\xcd") `shouldBe` "abcd"
       prop "decodeHex . encodeHex" $ forAll arbitraryBS fromToHex
+      -- the table-based hex against the hex of the builder of bytestring,
+      -- byte by byte, on every byte value and on chunks of every size
+      -- either side of where the builder's own hex takes over
+      it "writes every byte value as the builder of bytestring does" $ do
+        let every = B.pack [0 .. 255]
+            reference = BL.toStrict (toLazyByteString (byteStringHex every))
+        encodeHexBytes every `shouldBe` reference
+        encodeHex every `shouldBe` TE.decodeLatin1 reference
+      prop "writes what the builder of bytestring writes, whatever the chunks" $
+        forAll (listOf (sized (\n -> B.pack <$> vectorOf (n * 7) arbitrary))) $ \chunks -> do
+          let lazy = BL.fromChunks chunks
+              reference = toLazyByteString (lazyByteStringHex lazy)
+          toLazyByteString (hexBuilder lazy) `shouldBe` reference
+          encodeHexLazy lazy `shouldBe` TLE.decodeLatin1 reference
+          encodingToLazyByteString (hexEncoding lazy) `shouldBe` "\"" <> reference <> "\""
+      prop "writes reversed hex as the hex of the reversed bytes" $
+        forAll (oneof [pure 32, choose (0, 70)]) $ \n -> forAll (vectorOf n arbitrary) $ \ws -> do
+          let bytes = B.pack ws
+              reversed = BL.toStrict (toLazyByteString (byteStringHex (B.reverse bytes)))
+          encodeHexReversed (SBS.toShort bytes) `shouldBe` TE.decodeLatin1 reversed
+          encodingToLazyByteString (hexEncodingReversed (SBS.toShort bytes))
+            `shouldBe` BL.fromStrict ("\"" <> reversed <> "\"")
       prop "decodeHexLazy . encodeHexLazy" $ forAll arbitraryBS $ \bs -> decodeHexLazy (encodeHexLazy (BL.fromStrict bs)) == Just (BL.fromStrict bs)
 
     describe "getBits" $ do

@@ -108,7 +108,7 @@ instance FromJSON TxHash where
 
 instance ToJSON TxHash where
   toJSON = A.String . txHashToHex
-  toEncoding = hexEncoding . BL.reverse . runPutL . serialize
+  toEncoding (TxHash h) = hexEncodingReversed h.get
 
 -- | Hash of the transaction with every input script and the whole witness
 -- removed, so that it is the same before and after signing, whether the
@@ -122,8 +122,7 @@ nosigTxHash Tx {..} =
 
 -- | Convert transaction hash to hex form, reversing bytes.
 txHashToHex :: TxHash -> Text
-txHashToHex (TxHash h) =
-  encodeHex . B.reverse . runPutS $ serialize h
+txHashToHex (TxHash h) = encodeHexReversed h.get
 
 -- | Convert transaction hash from hex, reversing bytes. The hex must be
 -- exactly 32 bytes long, as @uint256::FromHex@ requires in Bitcoin Core.

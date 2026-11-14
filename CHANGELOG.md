@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/)
 and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.html).
 
+## [1.6.4] - 2026-11-14
+
+### Changed
+
+- **Hex is written faster.** `encodeHex`, `encodeHexLazy`, `hexBuilder` and
+  `hexEncoding` look up the two digits of each byte in a table. On a
+  250-byte transaction, that is four times as fast as base16, which
+  `encodeHex` used, and on a block of a megabyte, 1.5 times as fast as the
+  builder of bytestring, which `hexBuilder` used. Short input inside a
+  builder is still written by the builder's own hex, which is as fast
+  there and allocates nothing.
+- **Hashes of blocks and transactions are written five times as fast in
+  JSON**: 78 ns where it took 390, straight from their bytes, without
+  serializing and reversing them first. `txHashToHex`, `blockHashToHex`
+  and the hashes in a block header gain too.
+
+### Added
+
+- `encodeHexBytes`, the hex of bytes as the bytes of its digits.
+- `encodeHexReversed` and `hexEncodingReversed`, the hex of bytes in
+  reverse order, as hashes are shown, as text and as JSON.
+
 ## [1.6.3] - 2026-11-14
 
 ### Changed

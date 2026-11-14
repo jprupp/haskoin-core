@@ -1,3 +1,4 @@
+{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DuplicateRecordFields #-}
@@ -152,11 +153,11 @@ hexToBlockHash = fmap BlockHash . hexToReversedHash
 -- | Hex of a 256-bit hash in display order, which is the reverse of its byte
 -- order in memory. Block hashes and Merkle roots are shown this way.
 reversedHex :: Hash256 -> Text
-reversedHex = encodeHex . B.reverse . runPutS . serialize
+reversedHex = encodeHexReversed . (.get)
 
 -- | JSON encoding of a 256-bit hash in display order.
 reversedHexEncoding :: Hash256 -> Encoding
-reversedHexEncoding = hexEncoding . L.reverse . runPutL . serialize
+reversedHexEncoding = hexEncodingReversed . (.get)
 
 -- | Parse hex in display order into a 256-bit hash. Any input that is not
 -- exactly 32 bytes of hex is rejected instead of being truncated.
