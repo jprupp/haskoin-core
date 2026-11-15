@@ -7,7 +7,9 @@ name: CI
 # - nix: with --nix, so that GHC and the C libraries listed under "nix:" in
 #   stack.yaml come from nixpkgs, as on NixOS or with "stack --nix" locally.
 #
-# Both jobs also build the Haddock documentation, so broken markup fails CI.
+# Both jobs also build the Haddock documentation, so broken markup fails CI,
+# and compile the benchmarks without running them, so that they keep building:
+# timings from a shared runner would mean nothing.
 
 on:
   push:
@@ -53,8 +55,11 @@ jobs:
           key: stack-os-${{ runner.os }}-${{ hashFiles('stack.yaml', 'stack.yaml.lock', '**/package.yaml') }}
           restore-keys: stack-os-${{ runner.os }}-
 
-      - name: Build, test and build the documentation
-        run: stack --no-nix build --install-ghc --test --haddock --no-haddock-deps
+      - name: Build, test, build the documentation and compile the benchmarks
+        run: >-
+          stack --no-nix build --install-ghc
+          --test --bench --no-run-benchmarks
+          --haddock --no-haddock-deps
 
   nix:
     name: Stack with Nix
@@ -102,5 +107,8 @@ jobs:
       - name: Drop cached Setup programs
         run: rm -rf ~/.stack/setup-exe-cache
 
-      - name: Build, test and build the documentation
-        run: stack --nix build --test --haddock --no-haddock-deps
+      - name: Build, test, build the documentation and compile the benchmarks
+        run: >-
+          stack --nix build
+          --test --bench --no-run-benchmarks
+          --haddock --no-haddock-deps

@@ -107,7 +107,7 @@ import Data.Text.Encoding qualified as T
 import Data.Text.Lazy qualified as LT
 import Data.Text.Lazy.Encoding qualified as LT
 import Data.Word
-import Foreign.Ptr (Ptr)
+import Foreign.Ptr (Ptr, plusPtr)
 import Foreign.Storable (peekByteOff, pokeByteOff)
 import Test.Hspec
 
@@ -131,33 +131,66 @@ integerToBS i
 
 -- Hexadecimal
 --
--- Hex is written by looking up the two digits of each byte in a table of
--- the 256 pairs. Measured on a 250-byte transaction, that is four times as
--- fast as base16, and twice as fast as the hex of the builder of
--- bytestring, which works a digit at a time; on a block of a megabyte, it
--- is 1.5 times as fast as the builder. Inside a builder, short input is
--- left to the builder's own hex, which costs as much there and writes in
--- place: copying in a table-made string would allocate for each one.
+-- Two ways of writing hex are used here, each where it measured fastest.
+--
+-- Inside a builder, the hex is the builder's own, 'lazyByteStringHex' of
+-- bytestring. It looks up the two digits of each byte in a table and writes
+-- them straight into the output buffer, so it allocates nothing of its own.
+-- Version 1.6.4 replaced it with a loop that made a strict string first and
+-- copied it in, and that was slower at every size, at @-O1@ and at @-O2@.
+--
+-- Outside a builder, the result is a strict string or text of a known
+-- length, so the bytes are allocated once and filled by a loop over the
+-- input that writes each pair of digits with 'BP.word8HexFixed', the same
+-- table lookup that the builder uses. On a transaction of 250 bytes that
+-- takes less than half the time of base16, which 'encodeHex' used until
+-- 1.6.3, and it costs less than running a builder for a short string.
+--
+-- The loop of 1.6.4 kept a table of its own in a 'ByteString'. GHC found
+-- where that table was once, before the loop, only at @-O2@, where its
+-- liberate-case pass runs. At @-O1@, the level this package is built at
+-- unless the user asks otherwise, it looked again for every byte, and
+-- 'encodeHex' was slower than the base16 it had replaced. The table of
+-- bytestring is a literal with a fixed address, so the loop below is as
+-- fast at @-O1@ as at @-O2@, and no option of the compiler is needed to
+-- get its speed.
+--
+-- The benchmark of this package measures every function below at both
+-- levels, next to what version 1.6.0 did. The README says how to run it.
 
--- | JSON string of the hex of bytes.
+-- | JSON string of the hex of bytes, in lowercase.
+--
+-- This is 'hexBuilder' between two quotes. Hex has no character that JSON
+-- escapes, so nothing else is needed. Use it to write a script, a
+-- transaction or a block as one field of a JSON object without building the
+-- text first.
 hexEncoding :: LB.ByteString -> Encoding
 hexEncoding b =
   unsafeToEncoding $
     char7 '"' <> hexBuilder b <> char7 '"'
 
 -- | Hex of bytes, in lowercase, to append to other output.
+--
+-- This is 'lazyByteStringHex' of bytestring, which writes the digits into
+-- the buffer of the builder. Version 1.6.4 used a loop of its own for chunks
+-- of 256 bytes and more. On a megabyte that took 1.5 times as long at @-O2@
+-- and five times as long at @-O1@, so version 2.0.0 went back. Use this
+-- function when the hex goes into a response or a file. For hex that you
+-- keep as a value, 'encodeHex' and 'encodeHexBytes' cost less than running
+-- a builder.
 hexBuilder :: LB.ByteString -> Builder
-hexBuilder = foldMap chunk . LB.toChunks
-  where
-    chunk c
-      | B.length c < 256 = byteStringHex c
-      | otherwise = byteString (encodeHexBytes c)
+hexBuilder = lazyByteStringHex
 
 -- | Hex of bytes, in lowercase.
+--
+-- The text is the digits of 'encodeHexBytes', which are ASCII.
 encodeHex :: ByteString -> Text
 encodeHex = T.decodeLatin1 . encodeHexBytes
 
 -- | Hex of bytes, in lowercase, as the bytes of its ASCII digits.
+--
+-- The result is allocated once, at twice the length of the input, and
+-- filled in one pass.
 encodeHexBytes :: ByteString -> ByteString
 encodeHexBytes bs =
   BI.unsafeCreate (2 * n) $ \out ->
@@ -166,59 +199,61 @@ encodeHexBytes bs =
             | i >= n = return ()
             | otherwise = do
                 w <- peekByteOff inp i
-                pokeDigits out (2 * i) w
+                pokeHex (out `plusPtr` (2 * i)) w
                 go (i + 1)
        in go 0
   where
     n = B.length bs
 
--- | Encode as string of human-readable hex characters.
+-- | Hex of lazy bytes, in lowercase, as lazy text with a chunk for each
+-- chunk of the input.
 encodeHexLazy :: LB.ByteString -> LT.Text
 encodeHexLazy = LT.fromChunks . map encodeHex . LB.toChunks
 
 -- | Hex of bytes in reverse order, as hashes are shown, in lowercase.
+--
+-- The hash of a block or of a transaction is kept in the order of its bytes
+-- on the wire and shown in the opposite order. Reading the bytes backwards
+-- while writing the digits saves serializing the hash and reversing it,
+-- which is what showing a hash cost until 1.6.3.
 encodeHexReversed :: ShortByteString -> Text
 encodeHexReversed h =
   T.decodeLatin1 . BI.unsafeCreate (2 * n) $ \out ->
     let go !i
           | i >= n = return ()
-          | otherwise = pokeDigits out (2 * i) (SBS.index h (n - 1 - i)) >> go (i + 1)
+          | otherwise = pokeHex (out `plusPtr` (2 * i)) (SBS.index h (n - 1 - i)) >> go (i + 1)
      in go 0
   where
     n = SBS.length h
 
 -- | JSON string of the hex of bytes in reverse order, as hashes are shown.
--- A hash of 32 bytes, the size of the hashes of blocks and transactions,
--- is written in one step, straight from its bytes: a fifth of the time of
--- serializing it, reversing it and writing its hex.
+--
+-- A hash of 32 bytes, the size of the hashes of blocks and transactions, is
+-- written in one step of 66 bytes, straight from its bytes into the buffer
+-- of the encoder. Any other length is reversed and given to 'hexEncoding'.
 hexEncodingReversed :: ShortByteString -> Encoding
 hexEncodingReversed h
   | SBS.length h == 32 = unsafeToEncoding (BP.primFixed quotedHash h)
   | otherwise = hexEncoding (LB.fromStrict (B.reverse (SBS.fromShort h)))
   where
     quotedHash = BPI.fixedPrim 66 $ \x p -> do
-      pokeByteOff p 0 (0x22 :: Word8)
+      pokeByteOff p 0 quote
       let go !i
             | i >= 32 = return ()
-            | otherwise = pokeDigits p (1 + 2 * i) (SBS.index x (31 - i)) >> go (i + 1)
+            | otherwise = pokeHex (p `plusPtr` (1 + 2 * i)) (SBS.index x (31 - i)) >> go (i + 1)
       go 0
-      pokeByteOff p 65 (0x22 :: Word8)
+      pokeByteOff p 65 quote
+    quote = 0x22 :: Word8
 
--- | Write the two hex digits of a byte at an offset, from the table.
-pokeDigits :: Ptr a -> Int -> Word8 -> IO ()
-pokeDigits out at w = do
-  let k = 2 * fromIntegral w
-  pokeByteOff out at (BU.unsafeIndex hexDigits k)
-  pokeByteOff out (at + 1) (BU.unsafeIndex hexDigits (k + 1))
-{-# INLINE pokeDigits #-}
+-- | Write the two lowercase hex digits of a byte at an address. The digits
+-- come from the table of bytestring, through the primitive that its builder
+-- writes hex with.
+pokeHex :: Ptr Word8 -> Word8 -> IO ()
+pokeHex out w = BPI.runF BP.word8HexFixed w out
+{-# INLINE pokeHex #-}
 
--- | The two lowercase hex digits of each byte, in order: 512 bytes.
-hexDigits :: ByteString
-hexDigits = B.pack (concat [[digit (w `shiftR` 4), digit (w .&. 15)] | w <- [0 .. 255]])
-  where
-    digit x = if x < 10 then 0x30 + x else 0x57 + x
-{-# NOINLINE hexDigits #-}
-
+-- | Bytes from their hex, in lowercase or uppercase. 'Nothing' for text that
+-- is not hex, or that has an odd number of digits.
 decodeHex :: Text -> Maybe ByteString
 decodeHex t =
   case parseBase16 u8 of

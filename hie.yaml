@@ -4,3 +4,5 @@ cradle:
       component: haskoin-core:lib
     - path: "./test"
       component: haskoin-core:test:spec
+    - path: "./bench"
+      component: haskoin-core:bench:bench

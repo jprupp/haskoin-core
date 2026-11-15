@@ -15,6 +15,7 @@ import Data.Aeson.Encoding (encodingToLazyByteString)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as B
 import Data.ByteString.Builder (byteStringHex, lazyByteStringHex, toLazyByteString)
+import Data.ByteString.Char8 qualified as C
 import Data.ByteString.Lazy qualified as BL
 import Data.ByteString.Short qualified as SBS
 import Data.Bytes.Get
@@ -29,6 +30,7 @@ import Data.List (isInfixOf, permutations)
 import Data.Maybe
 import Data.Sequence qualified as Seq
 import Data.Serialize qualified as S
+import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Text.Lazy.Encoding qualified as TLE
 import Data.Word (Word8)
@@ -106,9 +108,19 @@ spec =
         encodingToLazyByteString (hexEncoding "\xab\xcd") `shouldBe` "\"abcd\""
         toLazyByteString (hexBuilder "\xab\xcd") `shouldBe` "abcd"
       prop "decodeHex . encodeHex" $ forAll arbitraryBS fromToHex
-      -- the table-based hex against the hex of the builder of bytestring,
-      -- byte by byte, on every byte value and on chunks of every size
-      -- either side of where the builder's own hex takes over
+      -- every byte value against digits worked out here, without a table:
+      -- the library takes its digits from the table of bytestring, so the
+      -- builder of bytestring alone would not be an independent check
+      it "writes every byte value as its two lowercase digits" $ do
+        let every = B.pack [0 .. 255]
+            digit n = "0123456789abcdef" !! n
+            digits = concat [[digit (n `div` 16), digit (n `mod` 16)] | n <- [0 .. 255]]
+        encodeHexBytes every `shouldBe` C.pack digits
+        encodeHex every `shouldBe` T.pack digits
+        toLazyByteString (hexBuilder (BL.fromStrict every)) `shouldBe` BL.fromStrict (C.pack digits)
+        encodeHexReversed (SBS.toShort (B.reverse every)) `shouldBe` T.pack digits
+      -- and against the hex of the builder of bytestring, on chunks of
+      -- every size
       it "writes every byte value as the builder of bytestring does" $ do
         let every = B.pack [0 .. 255]
             reference = BL.toStrict (toLazyByteString (byteStringHex every))

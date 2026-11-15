@@ -39,6 +39,116 @@ is gone from the whole API.
   `decodeSerial` reads a value from bytes that hold it and nothing else, and
   fails on bytes left over, as `unmarshal` did for these types. Plain
   `runGetS deserialize` accepts a value followed by junk.
+- A benchmark suite, `bench/Bench.hs`, run with `stack bench`. It times hex,
+  `scriptToAddressBS`, the text of an address, the JSON of a transaction and
+  Base58, most of them next to a copy of what 1.6.0 did, and prints the ratio.
+  The README says how to run it at `-O1` and at `-O2`. CI compiles it. Every
+  timing in this entry comes from it.
+
+### Fixed
+
+A [report on 1.6.4](https://gist.github.com/tzwierzbicki/90c429e2fb829777cac7e5f27b07a601)
+compared it with 1.6.0. It found that 1.6.3 and 1.6.4, two releases made for
+speed, had made some paths slower, and that figures in this file did not hold.
+Its main findings were reproduced on another machine, and they are fixed
+here. The entries of 1.6.3 and 1.6.4 below are corrected, each with a note
+that says what was changed.
+
+The timings below are from an AMD Ryzen 9 3900X with GHC 9.12.4. Versions
+1.6.0 and 1.6.4 were built from their tags and this one from its source, each
+at `-O1` and at `-O2`, and all ran the same benchmark. `-O1` is the level the
+package is built at unless the user asks for another. Each figure is the lower
+of two runs. A timing moves by about a tenth from one run to the next, so a
+difference smaller than that between two columns means nothing.
+
+- **`hexBuilder` and `hexEncoding` are as fast as in 1.6.0 again.** They are
+  `lazyByteStringHex` of bytestring, as they were. Version 1.6.4 wrote chunks
+  of 256 bytes and more with a loop of its own, into a new string that it then
+  gave to the builder. The builder already looks its digits up in a table and
+  writes them straight into its buffer, so the loop only added work: 1.6 times
+  the time on a megabyte at `-O2`, and 5.3 times at `-O1`.
+
+  | `hexBuilder`, µs | 1.6.0 `-O1` | 1.6.4 `-O1` | 2.0.0 `-O1` | 1.6.0 `-O2` | 1.6.4 `-O2` | 2.0.0 `-O2` |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | 32 bytes | 0.24 | 0.30 | 0.22 | 0.23 | 0.28 | 0.21 |
+  | 250 bytes | 0.47 | 0.52 | 0.47 | 0.42 | 0.54 | 0.41 |
+  | 1,000 bytes | 1.03 | 3.63 | 0.98 | 1.01 | 1.46 | 1.01 |
+  | 1,000,000 bytes | 548 | 2,888 | 523 | 529 | 832 | 558 |
+  | 1,000,000 bytes, in the chunks of `runPutL` | 529 | 2,859 | 550 | 548 | 852 | 574 |
+  | 1,000,000 bytes, in chunks of 100 | 728 | 1,251 | 786 | 712 | 1,261 | 721 |
+
+- **The JSON of a transaction is faster than in 1.6.0.** Version 1.6.4 was
+  slower than 1.6.0 for a SegWit transaction, and at `-O1` for one with long
+  multisig inputs. The loss came from `hexEncoding` and is gone. The gain of
+  1.6.4 on hashes is kept.
+
+  | `toEncoding`, µs | 1.6.0 `-O1` | 1.6.4 `-O1` | 2.0.0 `-O1` | 1.6.0 `-O2` | 1.6.4 `-O2` | 2.0.0 `-O2` |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | legacy transaction, 2 inputs, 2 outputs | 4.15 | 3.87 | 3.21 | 3.90 | 3.60 | 3.30 |
+  | SegWit transaction, 2 inputs, 2 outputs | 4.25 | 4.89 | 3.43 | 4.22 | 4.66 | 3.45 |
+  | 2 multisig inputs of 254 and 296 bytes | 4.37 | 5.21 | 3.56 | 4.43 | 4.20 | 3.58 |
+  | 100 inputs, 100 outputs | 151 | 137 | 104 | 141 | 127 | 106 |
+  | `TxHash` | 0.51 | 0.32 | 0.23 | 0.50 | 0.26 | 0.23 |
+  | `BlockHeader` | 1.53 | 1.20 | 1.07 | 1.47 | 1.03 | 1.10 |
+
+- **`encodeHex`, `encodeHexBytes`, `encodeHexLazy`, `encodeHexReversed` and
+  the JSON of a hash are about as fast at `-O1` as at `-O2`.** The loop of 1.6.4
+  kept its table of digits in a `ByteString`. GHC found where the table was
+  once, before the loop, only at `-O2`. At `-O1` it looked again for every
+  byte, and `encodeHex` was slower than the base16 it had replaced. The loop
+  now writes each pair of digits with `word8HexFixed` of bytestring, whose
+  table is a literal. No compiler option is needed to get this speed.
+
+  | ns | 1.6.0 `-O1` | 1.6.4 `-O1` | 2.0.0 `-O1` | 1.6.0 `-O2` | 1.6.4 `-O2` | 2.0.0 `-O2` |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | `encodeHex`, 32 bytes | 132 | 143 | 67 | 123 | 74 | 58 |
+  | `encodeHex`, 250 bytes | 663 | 859 | 289 | 653 | 358 | 275 |
+  | `encodeHex`, 1,000 bytes | 2,378 | 3,223 | 873 | 2,441 | 1,178 | 856 |
+  | `encodeHex`, 1,000,000 bytes | 2,289,110 | 3,064,763 | 701,903 | 2,362,564 | 992,927 | 699,730 |
+  | `txHashToHex` | 415 | 149 | 65 | 379 | 73 | 59 |
+
+- **`scriptToAddressBS` is faster than 1.6.0 for every script.** Versions
+  1.6.3 and 1.6.4 read the four usual kinds by their bytes and were much
+  faster for them, but took nearly twice as long as 1.6.0 for every other
+  script: Taproot, `OP_RETURN`, and all that has no address. Removing the
+  context, earlier in this release, had brought those back to the time of
+  1.6.0. That time was itself long, because the parser ran through a class
+  dictionary. `decodeSerial` is now inlined where it is called, so the parser
+  that GHC compiled for the type is the one that runs. A Taproot output takes
+  a sixth of the time it took in 1.6.0, and an eleventh of the time it took
+  in 1.6.4. The answers are the same, and so is the text of every `Left`.
+
+  | `scriptToAddressBS`, ns | 1.6.0 `-O1` | 1.6.4 `-O1` | 2.0.0 `-O1` | 1.6.0 `-O2` | 1.6.4 `-O2` | 2.0.0 `-O2` |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | P2PKH | 1,613 | 66 | 71 | 1,549 | 67 | 67 |
+  | P2SH | 1,111 | 68 | 73 | 1,105 | 70 | 68 |
+  | P2WPKH | 934 | 70 | 73 | 892 | 75 | 69 |
+  | P2WSH | 936 | 59 | 62 | 892 | 64 | 57 |
+  | Taproot | 901 | 1,595 | 148 | 868 | 1,585 | 141 |
+  | witness version 2, 20 bytes | 914 | 1,581 | 148 | 872 | 1,521 | 142 |
+  | `OP_RETURN`, 20 bytes | 940 | 1,635 | 204 | 920 | 1,576 | 196 |
+  | `OP_RETURN`, 80 bytes | 973 | 1,797 | 193 | 963 | 1,649 | 189 |
+  | P2SH32 on Bitcoin Cash | 1,152 | 1,826 | 197 | 1,110 | 1,786 | 204 |
+  | P2WPKH form on Bitcoin Cash | 983 | 1,695 | 227 | 960 | 1,613 | 220 |
+  | empty script | 776 | 979 | 667 | 782 | 929 | 680 |
+  | non-standard script | 2,390 | 3,259 | 962 | 2,352 | 3,174 | 966 |
+  | pay to public key | 5,253 | 6,178 | 4,333 | 5,133 | 5,958 | 4,283 |
+  | multisig 2 of 3 | 14,869 | 16,663 | 13,143 | 14,762 | 15,898 | 13,219 |
+
+- **`encodeBase58` is faster than 1.6.0 at every length.** The limbs of 1.6.3
+  were faster for an address and slower than 1.6.0 from about 500 bytes up.
+  The bytes are now read into one number eight at a time, and the number is
+  divided by 58^10, the largest power of 58 that fits in a machine word, so
+  that each division of the big number gives ten digits. Nothing in Bitcoin
+  encodes more than the 82 bytes of an extended key, so the long lengths
+  matter only to a caller with data of its own.
+
+  | `encodeBase58`, µs | 1.6.0 `-O1` | 1.6.4 `-O1` | 2.0.0 `-O1` | 1.6.0 `-O2` | 1.6.4 `-O2` | 2.0.0 `-O2` |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | 25 bytes | 4.31 | 1.61 | 1.49 | 3.91 | 1.57 | 1.45 |
+  | 82 bytes | 15.88 | 8.00 | 5.12 | 14.70 | 7.82 | 5.09 |
+  | 2,000 bytes | 1,687 | 2,623 | 216 | 1,679 | 2,598 | 209 |
+  | 20,000 bytes | 144,478 | 264,988 | 11,462 | 132,856 | 255,077 | 11,387 |
 
 ### Removed
 
@@ -77,17 +187,33 @@ is gone from the whole API.
 
 ### Changed
 
-- **Hex is written faster.** `encodeHex`, `encodeHexLazy`, `hexBuilder` and
-  `hexEncoding` look up the two digits of each byte in a table. On a
-  250-byte transaction, that is four times as fast as base16, which
-  `encodeHex` used, and on a block of a megabyte, 1.5 times as fast as the
-  builder of bytestring, which `hexBuilder` used. Short input inside a
-  builder is still written by the builder's own hex, which is as fast
-  there and allocates nothing.
-- **Hashes of blocks and transactions are written five times as fast in
-  JSON**: 78 ns where it took 390, straight from their bytes, without
-  serializing and reversing them first. `txHashToHex`, `blockHashToHex`
-  and the hashes in a block header gain too.
+- **`encodeHex` and `encodeHexLazy` are faster when the package is built
+  with `-O2`, and `hexBuilder` and `hexEncoding` are slower.** The four
+  functions look up the two digits of each byte in a table. On a 250-byte
+  transaction at `-O2`, `encodeHex` takes 358 ns where base16, which it used
+  before, took 653. At `-O1`, the level the package is built at by default,
+  it takes 859 ns where base16 took 663: it is slower. `hexBuilder` and
+  `hexEncoding` use the same loop for chunks of 256 bytes and more, and are
+  slower than the builder of bytestring that they used before, at every
+  size: on a megabyte, 832 µs against 529 at `-O2`, and 2,888 µs against 548
+  at `-O1`. Shorter chunks are still written by the builder's own hex.
+  Version 2.0.0 fixes both.
+- **Hashes of blocks and transactions are written faster**, straight from
+  their bytes, without serializing and reversing them first. `txHashToHex`
+  takes 73 ns where it took 379 at `-O2`, and 149 ns where it took 415 at
+  `-O1`. The JSON encoding of a `TxHash`, run to bytes, takes 0.26 µs where
+  it took 0.50 at `-O2`, and 0.32 µs where it took 0.51 at `-O1`.
+  `blockHashToHex` and the hashes in a block header gain too.
+
+*Corrected on 2026-11-15, after the report cited under 2.0.0. This entry
+first said that hex was "four times as fast as base16" on a 250-byte
+transaction, that on a megabyte `hexBuilder` was "1.5 times as fast as the
+builder of bytestring", and that hashes were written "five times as fast in
+JSON: 78 ns where it took 390". The second was wrong at both levels of
+optimisation. The first is 1.8 times at `-O2` and a loss at `-O1`. The third
+is right for `txHashToHex` at `-O2`; in JSON a hash is written twice as fast
+at `-O2` and 1.6 times as fast at `-O1`. The figures above are from the
+benchmark suite of 2.0.0, on the machine named there.*
 
 ### Added
 
@@ -109,6 +235,18 @@ is gone from the whole API.
     addresses take 60 ms where they took 81.
   - `toBase32` reads five bits at a time from the bytes, and the Bech32
     checksum has no lists: SegWit addresses take 50 ms where they took 81.
+
+*Corrected on 2026-11-15, after the report cited under 2.0.0. The three
+figures above held, in proportion, when measured again with the benchmark
+suite of 2.0.0, at `-O1` and at `-O2`. But this entry left out two losses,
+which 2.0.0 fixes:*
+
+- *`scriptToAddressBS` got slower for every script that is not one of the
+  four kinds, such as a Taproot output or an `OP_RETURN`. A Taproot output
+  takes 1,595 ns where 1.6.2 took 944, at `-O1`.*
+- *`encodeBase58` got slower for long input. At 2,000 bytes it takes 2.6 ms
+  where 1.6.2 took 0.7, and it is slower than 1.6.0 from about 500 bytes up.
+  Nothing in Bitcoin is that long.*
 
 ## [1.6.2] - 2026-11-12
 

@@ -726,12 +726,25 @@ scriptToAddress net =
 -- | Decode a serialized script into the 'Address' it has on a network, if it
 -- has one there. See 'outputAddress'.
 --
--- The four kinds of output that nearly every transaction pays to are told
--- by their bytes, without parsing the script: a key hash, a script hash,
--- and on a network with SegWit a witness key hash and a witness script
--- hash. A server reads the address of every input and output that it shows,
--- and parsing took most of that time. Any other script is parsed, and gives
--- what it gave before; the tests hold both ways to the same answers.
+-- The four kinds of output that most transactions pay to are told by their
+-- bytes, without parsing the script: a key hash, a script hash, and on a
+-- network with SegWit a witness key hash and a witness script hash. A server
+-- reads the address of every input and output that it shows, and parsing
+-- took most of that time.
+--
+-- Any other script is parsed with 'decodeSerial', and gives what the parser
+-- gives, with the same text in a 'Left'; the tests hold both ways to the
+-- same answers. That covers Taproot and the other witness versions, the
+-- 256-bit script hash of Bitcoin Cash, and the scripts that have no address:
+-- data carriers, bare public keys and multisig, and everything that is not
+-- standard. A script with public keys in it costs the most, because each
+-- key is checked to be a point of the curve before the answer is no.
+--
+-- By the benchmark of this package, at @-O1@ as at @-O2@, one of the four
+-- kinds takes a twelfth or less of the time it took in version 1.6.0, which
+-- parsed every script, and a Taproot output or a data carrier takes about a
+-- fifth. Versions 1.6.3 and 1.6.4 were as fast for the four kinds, and
+-- nearly twice as slow as 1.6.0 for every script they parsed.
 scriptToAddressBS :: Network -> ByteString -> Either String Address
 scriptToAddressBS net bytes
   | Just a <- standard = Right a

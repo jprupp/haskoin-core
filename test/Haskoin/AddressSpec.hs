@@ -89,12 +89,23 @@ spec = do
     it "rejects a checked string shorter than a checksum" $
       decodeBase58Check "1" `shouldBe` Nothing
     prop "writes what the plain conversion through one big number writes" $
-      -- leading zero bytes, which are written as 1, and lengths of every
-      -- remainder by four, for the limbs of 32 bits
+      -- leading zero bytes, which are written as 1, and lengths either
+      -- side of the eight bytes of a machine word
       forAll ((<>) <$> (B.pack <$> listOf (pure 0)) <*> arbitraryBS) $ \bs ->
         encodeBase58 bs `shouldBe` slowBase58 bs
-    it "writes the numbers around the edges of a limb and of 58^5" $
-      forM_ [0, 1, 57, 58, 656356767, 656356768, 4294967295, 4294967296, 2 ^ (200 :: Int) - 1] $ \n -> do
+    prop "writes long input as the plain conversion does" $
+      -- longer than anything in Bitcoin, where the digits come from many
+      -- divisions by 58^10
+      forAll (choose (100, 1500) >>= arbitraryBSn) $ \bs ->
+        encodeBase58 bs `shouldBe` slowBase58 bs
+    it "writes the numbers around the edges of a machine word and of the powers of 58^10" $ do
+      let edges = [58, 58 ^ (5 :: Int), 2 ^ (32 :: Int), 58 ^ (10 :: Int), 2 ^ (64 :: Int), 58 ^ (20 :: Int), 2 ^ (200 :: Int)]
+      forM_ ([0, 1, 57] <> concat [[n - 1, n, n + 1] | n <- edges]) $ \n -> do
+        let bs = integerToBS n
+        assertEqual (show n) (slowBase58 bs) (encodeBase58 bs)
+    it "writes digits that are all zero after the first as the plain conversion does" $
+      -- multiples of 58^10 and of 58^20: every group of ten digits but the first is zero
+      forM_ [k * 58 ^ e | k <- [1, 57, 58, 12345], e <- [10, 20, 30 :: Int]] $ \n -> do
         let bs = integerToBS n
         assertEqual (show n) (slowBase58 bs) (encodeBase58 bs)
   describe "Smart constructors" $ do

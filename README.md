@@ -819,6 +819,59 @@ regenerates the file whenever it builds.
 The tests are in `test/` and use [hspec](https://hspec.github.io/). The test
 vectors from the BIPs, Bitcoin Core and other implementations are in `data/`.
 
+### Benchmarks
+
+The benchmarks are in `bench/Bench.hs` and use
+[tasty-bench](https://hackage.haskell.org/package/tasty-bench). They time the
+functions that a server calls for every input and output it shows: hex,
+`scriptToAddressBS`, the text of an address, the JSON of a transaction, and
+Base58.
+
+```sh
+stack bench                                                 # at -O1, as the package builds by default
+stack bench --ghc-options -O2                               # at -O2
+stack bench --benchmark-arguments '-p hexBuilder'           # one group
+stack bench --benchmark-arguments '--csv before.csv'        # keep the timings
+stack bench --benchmark-arguments '--baseline before.csv'   # compare with them
+```
+
+Run them at both levels. Most users build this package at `-O1`, so a change
+that is only faster at `-O2` is not faster for them. Stack does not always
+rebuild when only `--ghc-options` changes: add `--force-dirty` if the numbers
+of the two levels look the same.
+
+Most functions are timed next to a copy of what haskoin-core 1.6.0 did, kept
+in the benchmark as a reference. The reference is the line `as in 1.6.0`, and
+the function of the library is the line `now`, which ends with its time as a
+multiple of the reference:
+
+```
+encodeHex
+  250 B
+    as in 1.6.0:                                           OK
+      680  ns ±  55 ns
+    now:                                                   OK
+      310  ns ±  20 ns, 0.46x
+```
+
+Below `1.00x` the library is faster than the reference. `hexBuilder` and
+`hexEncoding` are the same code as their reference, so their lines show how
+much the timings move by themselves on your machine: about a tenth either way
+on a desktop with other programs open. A line that stays above `1.00x` by
+more than that, at either level, is a regression: fix it, or say in the
+changelog why it is worth it.
+
+Quote a timing in the changelog or in the documentation only with the level it
+was measured at, and only after running it here. The entries of 1.6.3 and
+1.6.4 in the changelog quoted timings that did not hold at `-O1`, and one that
+did not hold at either level, which is why this suite exists.
+
+A reference is a copy of the old code compiled into the benchmark, not the old
+library. To time an old release itself, check out its tag, copy `bench/` and
+the `benchmarks` section of `package.yaml` into it, and give
+`scriptToAddressBS` and the functions around it the `Ctx` argument that
+releases before 2.0.0 take.
+
 ### Contributing
 
 Pull requests are welcome.

@@ -2,3 +2,4 @@
 
 find src -type f -name "*.hs" | xargs ormolu -i
 find test -type f -name "*.hs" | xargs ormolu -i
+find bench -type f -name "*.hs" | xargs ormolu -i

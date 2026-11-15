@@ -80,39 +80,43 @@ decodeBase58I = B.foldl' step (Just 0)
 -- | Encode an arbitrary 'ByteString' into its 'Base58' representation,
 -- preserving leading zeroes.
 --
--- The bytes are read as one number in limbs of 32 bits, and divided by 58^5
--- (656,356,768) in machine words: each pass over the limbs gives five digits. An address
--- of 25 bytes takes seven passes over seven limbs. Building an 'Integer'
--- and dividing that, as this did until 1.6.2, took about five times as long,
--- and a server writes an address for every input and output it shows.
+-- The bytes are read as one number, and the number is divided by 58^10
+-- (430,804,206,899,405,824), the largest power of 58 that fits in a machine
+-- word: each division of the big number gives ten digits, which are then
+-- taken apart in machine words. Version 1.6.0 divided the big number by 58
+-- for every digit, ten times as many divisions. Versions 1.6.3 and 1.6.4
+-- kept the number as a list of limbs of 32 bits and divided it by 58^5,
+-- which was quicker than 1.6.0 for an address and slower from about 500
+-- bytes up. This way is quicker than both at every length, by the benchmark
+-- of this package, at @-O1@ as at @-O2@: about three times as fast as 1.6.0
+-- for an address of 25 bytes, and about twelve times for 20,000 bytes.
+--
+-- The time still grows with the square of the length, as for
+-- 'decodeBase58'. That does not matter for anything in Bitcoin, where the
+-- longest input is an extended key of 82 bytes, but Base58 is not a format
+-- for large data.
 encodeBase58 :: ByteString -> Base58
 encodeBase58 bs =
-  E.decodeLatin1 (B.replicate (B.length z) (b58 0) <> B.pack (map b58 (dropWhile (== 0) (groups (limbs b) []))))
+  E.decodeLatin1 (B.replicate (B.length z) (b58 0) <> B.pack (map b58 (dropWhile (== 0) (groups (number b) []))))
   where
     (z, b) = B.span (== 0) bs
-    -- the number, most significant limb first, each limb under 2^32
-    limbs bytes =
-      let padded = B.replicate ((4 - B.length bytes `mod` 4) `mod` 4) 0 <> bytes
-       in [ B.foldl' (\acc w -> acc `shiftL` 8 .|. fromIntegral w) 0 (BU.unsafeTake 4 (BU.unsafeDrop k padded))
-          | k <- [0, 4 .. B.length padded - 4]
-          ]
-    -- the digits, most significant first, five for each division
-    groups ls !acc = case dropWhile (== 0) ls of
-      [] -> acc
-      live -> let (q, r) = divide live in groups q (five (5 :: Int) r acc)
-    -- the number divided by 58^5, with the remainder; a remainder is under
-    -- 2^30, so with a limb after it it fits in 64 bits
-    divide = go 0 []
-      where
-        go !r qs [] = (reverse qs, r)
-        go !r qs (x : xs) =
-          let !cur = r `shiftL` 32 .|. x
-              !q = cur `quot` chunk
-           in go (cur `rem` chunk) (q : qs) xs
-    chunk = 656356768 :: Word64
-    five :: Int -> Word64 -> [Int] -> [Int]
-    five 0 _ acc = acc
-    five k !w acc = let !d = fromIntegral (w `rem` 58) in five (k - 1) (w `quot` 58) (d : acc)
+    -- the bytes as a number, most significant first: the two halves are
+    -- read on their own and joined, so that the big numbers are few
+    number :: ByteString -> Integer
+    number bytes
+      | B.length bytes <= 8 = toInteger (B.foldl' (\acc w -> acc `shiftL` 8 .|. fromIntegral w) (0 :: Word64) bytes)
+      | otherwise =
+          let (h, l) = B.splitAt (B.length bytes `div` 2) bytes
+           in number h `shiftL` (8 * B.length l) .|. number l
+    -- the digits, most significant first, ten for each division; the
+    -- first group starts with zeroes that are not digits of the number
+    groups :: Integer -> [Int] -> [Int]
+    groups 0 acc = acc
+    groups n !acc = let (q, r) = n `quotRem` chunk in groups q (ten (10 :: Int) (fromInteger r) acc)
+    chunk = 430804206899405824 :: Integer
+    ten :: Int -> Word64 -> [Int] -> [Int]
+    ten 0 _ acc = acc
+    ten k !w acc = let !d = fromIntegral (w `rem` 58) in ten (k - 1) (w `quot` 58) (d : acc)
 
 -- | Decode a 'Base58'-encoded 'Text' to a 'ByteString'. Returns 'Nothing' if
 -- the input contains any character outside the 'Base58' alphabet.

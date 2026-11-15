@@ -73,3 +73,16 @@ tests:
       - QuickCheck >= 2.13.2
       - lens-aeson >= 1.1
       - lens >= 4.18.1
+benchmarks:
+  bench:
+    main: Bench.hs
+    source-dirs: bench
+    # A large allocation area keeps the garbage collector out of the timings,
+    # as tasty-bench recommends.
+    ghc-options: -with-rtsopts=-A32m
+    dependencies:
+      - haskoin-core
+      - tasty-bench >= 0.3
+    when:
+      - condition: false
+        other-modules: Paths_haskoin_core
