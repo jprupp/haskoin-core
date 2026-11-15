@@ -12,7 +12,6 @@ module Haskoin.Util.Arbitrary.Message where
 
 import Data.List (nub, sort)
 import Data.Word (Word32)
-import Haskoin.Crypto (Ctx)
 import Haskoin.Network.BlockFilter
 import Haskoin.Network.CompactBlock
 import Haskoin.Network.Data
@@ -51,14 +50,14 @@ arbitraryPositions = arbitraryPositionsUpTo maxBound
 -- | Arbitrary 'CompactBlock' that a peer of the network can send: positions
 -- within the 'maxCompactBlockIndex' of the network, and transactions as
 -- 'arbitraryNetworkTx' makes them.
-arbitraryCompactBlock :: Network -> Ctx -> Gen CompactBlock
-arbitraryCompactBlock net ctx = do
+arbitraryCompactBlock :: Network -> Gen CompactBlock
+arbitraryCompactBlock net = do
   positions <- arbitraryPositionsUpTo net.maxCompactBlockIndex
   CompactBlock
     <$> arbitraryBlockHeader
     <*> arbitrary
     <*> listOf (choose (0, maxShortId))
-    <*> mapM (\i -> PrefilledTx i <$> arbitraryNetworkTx net ctx) positions
+    <*> mapM (\i -> PrefilledTx i <$> arbitraryNetworkTx net) positions
 
 -- | Arbitrary 'GetBlockTxn' with positions of up to 32 bits.
 arbitraryGetBlockTxn :: Gen GetBlockTxn
@@ -70,8 +69,8 @@ arbitraryNetworkGetBlockTxn net =
   GetBlockTxn <$> arbitraryBlockHash <*> arbitraryPositionsUpTo net.maxCompactBlockIndex
 
 -- | Arbitrary 'BlockTxn' that a peer of the network can send.
-arbitraryBlockTxn :: Network -> Ctx -> Gen BlockTxn
-arbitraryBlockTxn net ctx = BlockTxn <$> arbitraryBlockHash <*> listOf (arbitraryNetworkTx net ctx)
+arbitraryBlockTxn :: Network -> Gen BlockTxn
+arbitraryBlockTxn net = BlockTxn <$> arbitraryBlockHash <*> listOf (arbitraryNetworkTx net)
 
 -- | Arbitrary 'GetCFilters'.
 arbitraryGetCFilters :: Gen GetCFilters
@@ -103,8 +102,8 @@ arbitraryCFCheckpt :: Gen CFCheckpt
 arbitraryCFCheckpt = CFCheckpt <$> arbitrary <*> arbitraryBlockHash <*> listOf arbitraryHash256
 
 -- | Arbitrary 'Message' of every kind, including one of an unknown command.
-arbitraryMessage :: Network -> Ctx -> Gen Message
-arbitraryMessage net ctx =
+arbitraryMessage :: Network -> Gen Message
+arbitraryMessage net =
   oneof
     [ MVersion <$> arbitraryVersion,
       return MVerAck,
@@ -116,8 +115,8 @@ arbitraryMessage net ctx =
       MNotFound <$> arbitraryNotFound,
       MGetBlocks <$> arbitraryGetBlocks,
       MGetHeaders <$> arbitraryGetHeaders,
-      MTx <$> arbitraryNetworkTx net ctx,
-      MBlock <$> arbitraryBlock net ctx,
+      MTx <$> arbitraryNetworkTx net,
+      MBlock <$> arbitraryBlock net,
       MMerkleBlock <$> arbitraryMerkleBlock,
       MHeaders <$> arbitraryHeaders,
       return MGetAddr,
@@ -132,9 +131,9 @@ arbitraryMessage net ctx =
       return MSendHeaders,
       MFeeFilter <$> arbitraryFeeFilter,
       MSendCompact <$> arbitrarySendCompact,
-      MCompactBlock <$> arbitraryCompactBlock net ctx,
+      MCompactBlock <$> arbitraryCompactBlock net,
       MGetBlockTxn <$> arbitraryNetworkGetBlockTxn net,
-      MBlockTxn <$> arbitraryBlockTxn net ctx,
+      MBlockTxn <$> arbitraryBlockTxn net,
       MGetCFilters <$> arbitraryGetCFilters,
       MCFilter <$> arbitraryCFilter,
       MGetCFHeaders <$> arbitraryGetCFHeaders,

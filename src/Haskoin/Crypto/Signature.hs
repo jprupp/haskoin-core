@@ -54,15 +54,15 @@ hashToMsg =
     e = error "Could not convert 32-byte hash to secp256k1 message"
 
 -- | Sign a 256-bit hash using secp256k1 elliptic curve.
-signHash :: Ctx -> SecKey -> Hash256 -> Sig
-signHash ctx k = signMsg ctx k . hashToMsg
+signHash :: SecKey -> Hash256 -> Sig
+signHash k = signMsg k . hashToMsg
 
 -- | Verify an ECDSA signature for a 256-bit hash.
-verifyHashSig :: Ctx -> Hash256 -> Sig -> PubKey -> Bool
-verifyHashSig ctx h s p = verifySig ctx p (normalizeSig ctx s) (hashToMsg h)
+verifyHashSig :: Hash256 -> Sig -> PubKey -> Bool
+verifyHashSig h s p = verifySig p (normalizeSig s) (hashToMsg h)
 
-instance Marshal Ctx Sig where
-  marshalGet ctx = do
+instance Serial Sig where
+  deserialize = do
     l <- lookAhead $ do
       t <- getWord8
       -- 0x30 is DER sequence type
@@ -74,21 +74,31 @@ instance Marshal Ctx Sig where
       when (l >= 0x80) $ fail "Multi-octect length not supported"
       return $ fromIntegral l
     bs <- getByteString $ l + 2
-    case decodeStrictSig ctx bs of
+    case decodeStrictSig bs of
       Just s -> return s
       Nothing -> fail "Invalid signature"
 
-  marshalPut ctx s = putByteString $ exportSig ctx s
+  serialize s = putByteString $ exportSig s
 
-instance MarshalJSON Ctx Sig where
-  marshalValue ctx = String . encodeHex . exportSig ctx
-  marshalEncoding ctx = hexEncoding . L.fromStrict . exportSig ctx
+instance Binary Sig where
+  put = serialize
+  get = deserialize
+
+instance Serialize Sig where
+  put = serialize
+  get = deserialize
+
+instance ToJSON Sig where
+  toJSON = String . encodeHex . exportSig
+  toEncoding = hexEncoding . L.fromStrict . exportSig
+
+instance FromJSON Sig where
   -- Decoding applies the same rules as the binary form, 'decodeStrictSig'.
   -- The error message does not repeat the text. The text comes from outside
   -- and can be of any length.
-  unmarshalValue ctx =
+  parseJSON =
     withText "Sig" $ \t ->
-      case decodeHex t >>= decodeStrictSig ctx of
+      case decodeHex t >>= decodeStrictSig of
         Nothing -> fail "Could not decode signature"
         Just s -> return s
 
@@ -98,7 +108,7 @@ instance MarshalJSON Ctx Sig where
 -- rule, so a block may hold a signature with a high s. The decoders of this
 -- module do not apply it. Check it with this function where the relay rules
 -- matter. 'signHash' always makes a signature that passes.
-isCanonicalHalfOrder :: Ctx -> Sig -> Bool
+isCanonicalHalfOrder :: Sig -> Bool
 isCanonicalHalfOrder = isLowS
 
 -- | Decode a signature from its strict DER encoding, the encoding that BIP 66
@@ -111,7 +121,7 @@ isCanonicalHalfOrder = isLowS
 --
 -- A high s is accepted, since BIP 66 allows it and such signatures are in the
 -- block chain. Use 'isCanonicalHalfOrder' for the low-S relay rule.
-decodeStrictSig :: Ctx -> ByteString -> Maybe Sig
+decodeStrictSig :: ByteString -> Maybe Sig
 decodeStrictSig = importSig
 
 -- | Verify a Schnorr signature of Bitcoin Cash: 64 bytes, @r@ then @s@,
@@ -134,29 +144,29 @@ decodeStrictSig = importSig
 -- Node, and the tests hold it to the test vectors of that code. It only
 -- verifies: nothing here is secret, so it is not written to run in
 -- constant time.
-verifyCashSchnorr :: Ctx -> PubKey -> ByteString -> Hash256 -> Bool
-verifyCashSchnorr ctx pub sig h
+verifyCashSchnorr :: PubKey -> ByteString -> Hash256 -> Bool
+verifyCashSchnorr pub sig h
   | BS.length sig /= 64 = False
   | r >= fieldP || s >= orderN = False
   | otherwise = case combined of
       Nothing -> False
       Just point ->
-        let (x, y) = BS.splitAt 32 (BS.drop 1 (exportPubKey ctx False point))
+        let (x, y) = BS.splitAt 32 (BS.drop 1 (exportPubKey False point))
          in bsToInteger x == r && isSquare (bsToInteger y)
   where
     (rBytes, sBytes) = BS.splitAt 32 sig
     r = bsToInteger rBytes
     s = bsToInteger sBytes
     digest = runPutS (serialize h)
-    e = bsToInteger (runPutS (serialize (sha256 (rBytes <> exportPubKey ctx True pub <> digest)))) `mod` orderN
+    e = bsToInteger (runPutS (serialize (sha256 (rBytes <> exportPubKey True pub <> digest)))) `mod` orderN
     -- s*G, when s is not zero
-    sG = derivePubKey ctx <$> secKey (word256 s)
+    sG = derivePubKey <$> secKey (word256 s)
     -- -e*P, when e is not zero
-    eP = tweak (word256 ((orderN - e) `mod` orderN)) >>= tweakMulPubKey ctx pub
+    eP = tweak (word256 ((orderN - e) `mod` orderN)) >>= tweakMulPubKey pub
     -- their sum, which is nothing when it is the point at infinity
     combined = case catMaybes [sG, eP] of
       [] -> Nothing
-      points -> combinePubKeys ctx points
+      points -> combinePubKeys points
     -- Euler's criterion
     isSquare y = powMod y ((fieldP - 1) `div` 2) fieldP == 1
     word256 n = let b = integerToBS n in BS.replicate (32 - BS.length b) 0 <> b

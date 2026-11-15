@@ -137,7 +137,8 @@ wikiVersion =
 addrMessageHex :: Text
 addrMessageHex =
   "f9beb4d9"
-    <> "61646472" <> "0000000000000000" -- "addr"
+    <> "61646472"
+    <> "0000000000000000" -- "addr"
     <> "1f000000" -- 31 payload bytes
     <> "ed52399b" -- checksum
     <> "01" -- one entry
@@ -189,7 +190,6 @@ txPaying scripts =
 -- a bloom filter.
 outpointBytes :: Tx -> Word32 -> ByteString
 outpointBytes tx i = runPutS $ serialize $ OutPoint (txHash tx) i
-
 
 -- | 'txPaying' [p2pkhScript] serialized: version, one input (outpoint hash
 -- in internal byte order, index 1, empty script, sequence), one output
@@ -316,24 +316,24 @@ identityTests =
     }
 
 spec :: Spec
-spec = prepareContext $ \ctx -> do
+spec = do
   testIdentity identityTests
   describe "Custom identity tests" $ do
     prop "Data.Serialize Encoding for type Message" $
       forAll arbitraryNetwork $ \net ->
-        forAll (arbitraryMessage net ctx) $
+        forAll (arbitraryMessage net) $
           customCerealID (getMessage net) (putMessage net)
     prop "Binary encoding/decoding identity for CompactBlock" $
       forAll arbitraryNetwork $ \net ->
-        forAll (arbitraryCompactBlock net ctx) $ \c ->
+        forAll (arbitraryCompactBlock net) $ \c ->
           parse (runPutS (serialize c)) == Right c
     prop "Binary encoding/decoding identity for BlockTxn" $
       forAll arbitraryNetwork $ \net ->
-        forAll (arbitraryBlockTxn net ctx) $ \b ->
+        forAll (arbitraryBlockTxn net) $ \b ->
           parse (runPutS (serialize b)) == Right b
     prop "msgType is the command a message is sent with" $
       forAll arbitraryNetwork $ \net ->
-        forAll (arbitraryMessage net ctx) $ \m ->
+        forAll (arbitraryMessage net) $ \m ->
           fmap (.cmd) (parse (runPutS (putMessage net m)) :: Either String MessageHeader)
             == Right (msgType m)
   varIntSpec
@@ -346,7 +346,7 @@ spec = prepareContext $ \ctx -> do
   smallMessagesSpec
   rejectSpec
   framingSpec
-  bloomSpec ctx
+  bloomSpec
   compactBlockSpec
   blockFilterSpec
   constantsSpec
@@ -354,7 +354,7 @@ spec = prepareContext $ \ctx -> do
   itemLimitSpec
   compactPositionSpec
   witnessFormatSpec
-  bloomMatchSpec ctx
+  bloomMatchSpec
   boundarySpec
 
 -- VarInt ----------------------------------------------------------------------
@@ -744,12 +744,12 @@ framingSpec = describe "message framing" $ do
 
 -- Bloom filters ---------------------------------------------------------------
 
-bloomSpec :: Ctx -> Spec
-bloomSpec ctx = describe "bloom filters" $ do
+bloomSpec :: Spec
+bloomSpec = describe "bloom filters" $ do
   describe "test vectors of Bitcoin Core" $ do
     it "bloom filter vector 1" bloomFilter1
     it "bloom filter vector 2" bloomFilter2
-    it "bloom filter vector 3" $ bloomFilter3 ctx
+    it "bloom filter vector 3" $ bloomFilter3
   describe "bloomCreate" $ do
     it "sizes the filter for the elements and false positive rate" $ do
       -- 3 elements at 1%: 3 bytes and 5 hash functions, as in the vectors
@@ -875,35 +875,35 @@ bloomSpec ctx = describe "bloom filters" $ do
     it "gives Nothing for a transaction with no matching output" irrelevantOutputNotUpdated
     it "leaves the filter as it is for a matching pay-to-pubkey-hash output under BloomUpdateP2PubKeyOnly" $ do
       let bf = bloomInsert (bloomCreate 10 0.000001 0 BloomUpdateP2PubKeyOnly) p2pkhHash
-      bloomRelevantUpdate ctx bf (txPaying [p2pkhScript]) `shouldBe` Just bf
+      bloomRelevantUpdate bf (txPaying [p2pkhScript]) `shouldBe` Just bf
     it "inserts the outpoint of a matching pay-to-pubkey output under BloomUpdateP2PubKeyOnly" $ do
       let k = fromJust $ fromWif btc "5Kg1gnAjaLfKiwhhPpGS3QfRg2m6awQvaj98JCZBZQ5SuS2F15C"
-          p = derivePublicKey ctx k
-          bf = bloomInsert (bloomCreate 10 0.000001 0 BloomUpdateP2PubKeyOnly) (marshal ctx p)
-          tx = txPaying [marshal ctx (PayPK p)]
-      fmap (`bloomContains` outpointBytes tx 0) (bloomRelevantUpdate ctx bf tx) `shouldBe` Just True
+          p = derivePublicKey k
+          bf = bloomInsert (bloomCreate 10 0.000001 0 BloomUpdateP2PubKeyOnly) (encodeSerial p)
+          tx = txPaying [encodeSerial (PayPK p)]
+      fmap (`bloomContains` outpointBytes tx 0) (bloomRelevantUpdate bf tx) `shouldBe` Just True
     it "leaves the filter as it is under BloomUpdateNone" $ do
       let bf = bloomInsert (bloomCreate 10 0.000001 0 BloomUpdateNone) p2pkhHash
-      bloomRelevantUpdate ctx bf (txPaying [p2pkhScript]) `shouldBe` Just bf
+      bloomRelevantUpdate bf (txPaying [p2pkhScript]) `shouldBe` Just bf
     it "scans a non-standard output script without failing" $ do
       let bf = bloomInsert (bloomCreate 10 0.000001 0 BloomUpdateAll) p2pkhHash
-      bloomRelevantUpdate ctx bf (txPaying [hex "51"]) `shouldBe` Nothing
+      bloomRelevantUpdate bf (txPaying [hex "51"]) `shouldBe` Nothing
     it "matches a push inside a non-standard output script" $ do
       let bf = bloomInsert (bloomCreate 10 0.000001 0 BloomUpdateAll) p2pkhHash
           -- push the hash, drop it, then OP_TRUE
           tx = txPaying [hex "14" <> p2pkhHash <> hex "7551"]
-      fmap (`bloomContains` outpointBytes tx 0) (bloomRelevantUpdate ctx bf tx) `shouldBe` Just True
+      fmap (`bloomContains` outpointBytes tx 0) (bloomRelevantUpdate bf tx) `shouldBe` Just True
     it "still finds the matching output next to a non-standard one" $ do
       let bf = bloomInsert (bloomCreate 10 0.000001 0 BloomUpdateAll) p2pkhHash
           tx = txPaying [hex "51", p2pkhScript]
-      fmap (`bloomContains` outpointBytes tx 1) (bloomRelevantUpdate ctx bf tx) `shouldBe` Just True
+      fmap (`bloomContains` outpointBytes tx 1) (bloomRelevantUpdate bf tx) `shouldBe` Just True
     it "matches every output with an empty filter and changes nothing" $ do
       let bf = BloomFilter S.empty 0 0 BloomUpdateAll
-      bloomRelevantUpdate ctx bf (txPaying [hex "51"]) `shouldBe` Just bf
+      bloomRelevantUpdate bf (txPaying [hex "51"]) `shouldBe` Just bf
     it "does not insert the outpoint of an output that does not match" $ do
       let bf = bloomInsert (bloomCreate 10 0.000001 0 BloomUpdateAll) p2pkhHash
           tx = txPaying [p2pkhScript, hex "76a914" <> B.replicate 20 0x42 <> hex "88ac"]
-      fmap (`bloomContains` outpointBytes tx 1) (bloomRelevantUpdate ctx bf tx) `shouldBe` Just False
+      fmap (`bloomContains` outpointBytes tx 1) (bloomRelevantUpdate bf tx) `shouldBe` Just False
 
 bloomFilter :: Word32 -> Text -> Expectation
 bloomFilter n x = do
@@ -929,15 +929,15 @@ bloomFilter1 = bloomFilter 0 "03614e9b050000000000000001"
 bloomFilter2 :: Expectation
 bloomFilter2 = bloomFilter 2147483649 "03ce4299050000000100008001"
 
-bloomFilter3 :: Ctx -> Expectation
-bloomFilter3 ctx =
+bloomFilter3 :: Expectation
+bloomFilter3 =
   runPutS (serialize f2) `shouldBe` bs
   where
     f0 = bloomCreate 2 0.001 0 BloomUpdateAll
-    f1 = bloomInsert f0 $ marshal ctx p
-    f2 = bloomInsert f1 $ runPutS $ serialize $ fromJust $ addressHash160 $ pubKeyAddr ctx p
+    f1 = bloomInsert f0 $ encodeSerial p
+    f2 = bloomInsert f1 $ runPutS $ serialize $ fromJust $ addressHash160 $ pubKeyAddr p
     k = fromJust $ fromWif btc "5Kg1gnAjaLfKiwhhPpGS3QfRg2m6awQvaj98JCZBZQ5SuS2F15C"
-    p = derivePublicKey ctx k
+    p = derivePublicKey k
     bs = hex "038fc16b080000000000000001"
 
 -- | The first output of 'relevantTx' pays the hash in the filter. Its
@@ -951,18 +951,16 @@ relevantOutputUpdated = do
   where
     bf0 = bloomCreate 10 0.000001 0 BloomUpdateAll
     bf1 = bloomInsert bf0 p2pkhHash
-    bf2 = fromJust $ bloomRelevantUpdate undefined' bf1 relevantTx
+    bf2 = fromJust $ bloomRelevantUpdate bf1 relevantTx
     -- txid 57dc904f32ad4daab7b321dd469e8791ad09df784cdd273a73985150a4f225e9
     -- in internal byte order
     outpoint = hex "e925f2a4505198733a27dd4c78df09ad91879e46dd21b3b7aa4dad324f90dc57"
-    undefined' = error "bloomRelevantUpdate must not need the context for pay-to-pubkey-hash under BloomUpdateAll"
 
 irrelevantOutputNotUpdated :: Expectation
-irrelevantOutputNotUpdated = bloomRelevantUpdate undefined' bf1 unrelatedTx `shouldBe` Nothing
+irrelevantOutputNotUpdated = bloomRelevantUpdate bf1 unrelatedTx `shouldBe` Nothing
   where
     bf0 = bloomCreate 10 0.000001 0 BloomUpdateAll
     bf1 = bloomInsert bf0 p2pkhHash
-    undefined' = error "bloomRelevantUpdate must not need the context when nothing matches"
 
 -- Random transaction (57dc904f32ad4daab7b321dd469e8791ad09df784cdd273a73985150a4f225e9)
 relevantTx :: Tx
@@ -1088,7 +1086,8 @@ constantsSpec = describe "network constants" $ do
     map (.name) allNets `shouldBe` ["btc", "bch", "btctest", "btctest4", "bchtest4", "bchtest", "btcreg", "bchreg"]
     length (nub (map (.magic) allNets)) `shouldBe` 8
   it "finds every network by name" $
-    forM_ allNets $ \n -> netByName n.name `shouldBe` Just n
+    forM_ allNets $
+      \n -> netByName n.name `shouldBe` Just n
   it "finds nothing for an unknown name" $
     netByName "ltc" `shouldBe` Nothing
   it "uses the magic bytes of each network" $
@@ -1362,18 +1361,30 @@ witnessFormatSpec = describe "transaction format per network" $ do
   it "does not read the extended format in a blocktxn or a cmpctblock message on bitcoin cash" $ do
     let blockTxn = hex bh1Hex <> hex "01" <> witnessTx
         compact = hex (genesisHeaderHex <> "0000000000000000" <> "00" <> "0100") <> witnessTx
-    fmap (\m -> case m of MBlockTxn b -> map (\t -> length t.inputs) b.transactions; _ -> [])
+    fmap
+      (\m -> case m of MBlockTxn b -> map (\t -> length t.inputs) b.transactions; _ -> [])
       (runGetS (getMessage bch) (frame bch "blocktxn" blockTxn))
       `shouldBe` Right [0]
-    fmap (\m -> case m of MCompactBlock c -> map (\x -> length x.tx.inputs) c.prefilled; _ -> [])
+    fmap
+      (\m -> case m of MCompactBlock c -> map (\x -> length x.tx.inputs) c.prefilled; _ -> [])
       (runGetS (getMessage bch) (frame bch "cmpctblock" compact))
       `shouldBe` Right [0]
   it "reads an empty witness item as an empty byte string" $
     -- one input with a witness stack of three empty items
     let tx3 =
           hex $
-            "01000000" <> "0001" <> "01" <> h1Hex <> "00000000" <> "00" <> "ffffffff"
-              <> "01" <> "e803000000000000" <> "0151" <> "03000000" <> "00000000"
+            "01000000"
+              <> "0001"
+              <> "01"
+              <> h1Hex
+              <> "00000000"
+              <> "00"
+              <> "ffffffff"
+              <> "01"
+              <> "e803000000000000"
+              <> "0151"
+              <> "03000000"
+              <> "00000000"
      in fmap (.witness) (parse tx3 :: Either String Tx) `shouldBe` Right [["", "", ""]]
 
 -- Bloom filter matching -----------------------------------------------------------
@@ -1393,10 +1404,10 @@ bloomSpendingTx =
   either error id . parse . hex $
     "01000000016bff7fcd4f8565ef406dd5d63d4ff94f318fe82027fd4dc451b04474019f74b4000000008c493046022100da0dc6aecefe1e06efdf05773757deb168820930e3b0d03f46f5fcf150bf990c022100d25b5c87040076e4f253f8262e763e2dd51e7ff0be157727c4bc42807f17bd39014104e6c26ef67dc610d2cd192484789a6cf9aea9930b944b7e2db5342b9d9e5b9ff79aff9a2ee1978dd7fd01dfc522ee02283d3b06a9d03acf8096968d7dbb0f9178ffffffff028ba7940e000000001976a914badeecfdef0507247fc8f74241d73bc039972d7b88ac4094a802000000001976a914c10932483fec93ed51f5fe95e72559f2cc7043f988ac00000000"
 
-bloomMatchSpec :: Ctx -> Spec
-bloomMatchSpec ctx = describe "bloom filter matching, the bloom_match case of Bitcoin Core" $ do
+bloomMatchSpec :: Spec
+bloomMatchSpec = describe "bloom filter matching, the bloom_match case of Bitcoin Core" $ do
   let fresh = bloomCreate 10 0.000001 0 BloomUpdateAll
-      matches element = bloomRelevantUpdate ctx (bloomInsert fresh element) bloomMatchTx /= Nothing
+      matches element = bloomRelevantUpdate (bloomInsert fresh element) bloomMatchTx /= Nothing
       -- the outpoint 90c122d7...260b:n that the transaction spends
       spent n = hex "0b26e9b7735eb6aabdf358bab62f9816a21ba9ebdb719d5299e88607d722c190" <> hex n
   it "matches the transaction hash" $
@@ -1419,11 +1430,11 @@ bloomMatchSpec ctx = describe "bloom filter matching, the bloom_match case of Bi
     matches (spent "01000000") `shouldBe` False
   it "matches the transaction that spends a matched output" $
     -- "Simple Bloom filter didn't add output" in Bitcoin Core
-    let updated = bloomRelevantUpdate ctx (bloomInsert fresh (hex "04943fdd508053c75000106d3bc6e2754dbcff19")) bloomMatchTx
-     in fmap (\f -> bloomRelevantUpdate ctx f bloomSpendingTx /= Nothing) updated `shouldBe` Just True
+    let updated = bloomRelevantUpdate (bloomInsert fresh (hex "04943fdd508053c75000106d3bc6e2754dbcff19")) bloomMatchTx
+     in fmap (\f -> bloomRelevantUpdate f bloomSpendingTx /= Nothing) updated `shouldBe` Just True
   it "leaves the filter as it is when only the transaction hash matches" $
     let f = bloomInsert fresh (hex "6bff7fcd4f8565ef406dd5d63d4ff94f318fe82027fd4dc451b04474019f74b4")
-     in bloomRelevantUpdate ctx f bloomMatchTx `shouldBe` Just f
+     in bloomRelevantUpdate f bloomMatchTx `shouldBe` Just f
   describe "pay-to-pubkey test of BloomUpdateP2PubKeyOnly, as Solver in Bitcoin Core" $ do
     -- Solver checks the size and the first byte of a key, not the curve.
     let hybridKey = hex "06" <> B.replicate 64 0x11
@@ -1432,7 +1443,7 @@ bloomMatchSpec ctx = describe "bloom filter matching, the bloom_match case of Bi
         inserted key script =
           let bf = bloomInsert (bloomCreate 10 0.000001 0 BloomUpdateP2PubKeyOnly) key
               tx = txPaying [script]
-           in fmap (`bloomContains` outpointBytes tx 0) (bloomRelevantUpdate ctx bf tx)
+           in fmap (`bloomContains` outpointBytes tx 0) (bloomRelevantUpdate bf tx)
     it "inserts the outpoint of a pay-to-pubkey output with a hybrid key" $
       inserted hybridKey (hex "41" <> hybridKey <> hex "ac") `shouldBe` Just True
     it "inserts the outpoint of a pay-to-pubkey output whose key is not on the curve" $
@@ -1480,7 +1491,9 @@ boundarySpec = describe "boundaries" $ do
   it "reads a version message with negative fields as negative numbers" $
     -- Bitcoin Core reads int nVersion, int64_t nTime and int starting_height
     let payload =
-          hex "ffffffff" <> hex "0100000000000000" <> hex "ffffffffffffffff"
+          hex "ffffffff"
+            <> hex "0100000000000000"
+            <> hex "ffffffffffffffff"
             <> B.drop 20 (hex (T.take 160 versionPayloadHex))
             <> hex "00"
             <> hex "ffffffff"
@@ -1497,7 +1510,8 @@ boundarySpec = describe "boundaries" $ do
       parse (hex ("00000000" <> "00" <> "03" <> "05" <> "0102030405" <> "0000"))
         `shouldBe` Right (NetworkAddressV2 0 0 AddrTorV2 (hex "0102030405") 0)
     it "reads the entries after a Tor v2 entry of the wrong length" $
-      fmap (\(AddrV2 xs) -> map (.network) xs)
+      fmap
+        (\(AddrV2 xs) -> map (.network) xs)
         (parse (hex ("02" <> "00000000" <> "00" <> "03" <> "05" <> "0102030405" <> "0000" <> "e215104d" <> "01" <> "01" <> "04" <> "0a000001" <> "208d")))
         `shouldBe` Right [AddrTorV2, AddrIPv4]
     it "has no addr form for an IPv6 entry that holds an IPv4-mapped address" $

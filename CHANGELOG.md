@@ -5,6 +5,74 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/)
 and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-11-14
+
+This release breaks backwards compatibility on purpose: the secp256k1 context
+is gone from the whole API.
+
+### Changed
+
+- **No function takes a `Ctx` any more.** secp256k1-haskell 3.0.0 creates and
+  randomizes one context inside the library, on first use, and shares it
+  between all threads. Every function of Haskoin Core that took a `Ctx` lost
+  that argument and kept the order of the others: `derivePublicKey key`,
+  `pubKeyAddr public`, `outputAddress net output`, `signTx net tx inputs keys`,
+  `signPsbt net (keySigner key) psbt`, and so on through keys, addresses,
+  scripts, transactions, PSBT, Taproot and the bloom filter. The generators of
+  `Haskoin.Util.Arbitrary` lost it as well.
+- **`PublicKey`, `Sig`, `ScriptOutput` and `XOnlyPubKey` are ordinary `Serial`,
+  `Binary`, `Serialize`, `ToJSON` and `FromJSON` instances**, like `Tx` and
+  `OutPoint`, instead of `Marshal Ctx` and `MarshalJSON Ctx` instances.
+  `SigInput` is a `ToJSON` and `FromJSON` instance instead of a
+  `MarshalJSON Ctx` one. The bytes and the JSON are the same as before.
+- **`XPubKey`, `TxSignature` and `ScriptInput` take a `Network`** where they
+  took a `(Network, Ctx)` pair: `marshal net xpub`, `unmarshalValue net value`.
+  The bytes and the JSON are the same as before.
+- Requires secp256k1-haskell 3.0. With it, `show` of a `SecKey` prints
+  `SecKey <redacted>` and is no longer the inverse of `read`. `PrivateKey` and
+  `XPrvKey` already hid their secret.
+
+### Added
+
+- `encodeSerial` and `decodeSerial` in `Haskoin.Util.Marshal`, for the types
+  that are now `Serial`. `encodeSerial` is `runPutS . serialize`.
+  `decodeSerial` reads a value from bytes that hold it and nothing else, and
+  fails on bytes left over, as `unmarshal` did for these types. Plain
+  `runGetS deserialize` accepts a value followed by junk.
+
+### Removed
+
+- `Ctx`, `withContext`, `createContext`, `randomizeContext` and
+  `cloneContext`, which `Haskoin.Crypto` and `Haskoin` re-exported from
+  secp256k1-haskell.
+- `prepareContext` from `Haskoin.Util.Helpers`.
+- The `Marshal Ctx` and `MarshalJSON Ctx` instances, and the `Show Ctx`
+  instance of `Haskoin.Util.Arbitrary.Util`.
+
+### Migrating
+
+- Delete `withContext $ \ctx ->` or `createContext` at the start of the
+  program, and delete the `ctx` argument at every call.
+- Replace the marshalling calls that took a context:
+
+  | Before                    | After                      |
+  | ------------------------- | -------------------------- |
+  | `marshal ctx x`           | `encodeSerial x`           |
+  | `unmarshal ctx bytes`     | `decodeSerial bytes`       |
+  | `marshalPut ctx x`        | `serialize x`              |
+  | `marshalGet ctx`          | `deserialize`              |
+  | `marshalValue ctx x`      | `toJSON x`                 |
+  | `marshalEncoding ctx x`   | `toEncoding x`             |
+  | `unmarshalValue ctx v`    | `parseJSON v`              |
+  | `marshalJSON ctx x`       | `Data.Aeson.encode x`      |
+  | `unmarshalJSON ctx json`  | `Data.Aeson.decode json`   |
+  | `marshal (net, ctx) x`    | `marshal net x`            |
+  | `unmarshalValue (net, ctx) v` | `unmarshalValue net v` |
+
+- A type of your own that held a `Ctx` to encode a key can now derive or write
+  plain `Serial` and `ToJSON` instances.
+- In `stack.yaml`, name `haskoin-core-2.0.0` and `secp256k1-haskell-3.0.0`.
+
 ## [1.6.4] - 2026-11-14
 
 ### Changed

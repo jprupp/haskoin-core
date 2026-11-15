@@ -41,38 +41,38 @@ import Test.Hspec.QuickCheck
 import Test.QuickCheck
 import Text.Read (readMaybe)
 
-identityTests :: Ctx -> IdentityTests
-identityTests ctx =
+identityTests :: IdentityTests
+identityTests =
   def
     { readTests =
         [ ReadBox arbitraryTxHash,
-          ReadBox $ flip arbitraryTx ctx =<< arbitraryNetwork,
-          ReadBox $ flip arbitraryTxIn ctx =<< arbitraryNetwork,
-          ReadBox $ flip arbitraryTxOut ctx =<< arbitraryNetwork,
+          ReadBox $ arbitraryTx =<< arbitraryNetwork,
+          ReadBox $ arbitraryTxIn =<< arbitraryNetwork,
+          ReadBox $ arbitraryTxOut =<< arbitraryNetwork,
           ReadBox arbitraryOutPoint
         ],
       jsonTests =
         [ JsonBox arbitraryTxHash,
-          JsonBox $ flip arbitraryTx ctx =<< arbitraryNetwork,
-          JsonBox $ flip arbitraryWitnessTx ctx =<< arbitraryNetwork,
-          JsonBox $ flip arbitraryLegacyTx ctx =<< arbitraryNetwork,
-          JsonBox $ flip arbitraryTxIn ctx =<< arbitraryNetwork,
-          JsonBox $ flip arbitraryTxOut ctx =<< arbitraryNetwork,
+          JsonBox $ arbitraryTx =<< arbitraryNetwork,
+          JsonBox $ arbitraryWitnessTx =<< arbitraryNetwork,
+          JsonBox $ arbitraryLegacyTx =<< arbitraryNetwork,
+          JsonBox $ arbitraryTxIn =<< arbitraryNetwork,
+          JsonBox $ arbitraryTxOut =<< arbitraryNetwork,
           JsonBox arbitraryOutPoint
         ],
       serialTests =
-        [ SerialBox $ flip arbitraryTx ctx =<< arbitraryNetwork,
-          SerialBox $ flip arbitraryWitnessTx ctx =<< arbitraryNetwork,
-          SerialBox $ flip arbitraryLegacyTx ctx =<< arbitraryNetwork,
-          SerialBox $ flip arbitraryTxIn ctx =<< arbitraryNetwork,
-          SerialBox $ flip arbitraryTxOut ctx =<< arbitraryNetwork,
+        [ SerialBox $ arbitraryTx =<< arbitraryNetwork,
+          SerialBox $ arbitraryWitnessTx =<< arbitraryNetwork,
+          SerialBox $ arbitraryLegacyTx =<< arbitraryNetwork,
+          SerialBox $ arbitraryTxIn =<< arbitraryNetwork,
+          SerialBox $ arbitraryTxOut =<< arbitraryNetwork,
           SerialBox arbitraryOutPoint
         ]
     }
 
 spec :: Spec
-spec = prepareContext $ \ctx -> do
-  testIdentity $ identityTests ctx
+spec = do
+  testIdentity $ identityTests
   describe "Transaction properties" $ do
     prop "decode and encode txid" $
       forAll arbitraryTxHash $
@@ -82,48 +82,50 @@ spec = prepareContext $ \ctx -> do
         \h -> fromString (cs $ txHashToHex h) == h
     prop "building address tx" $
       forAll arbitraryNetAddress $ \(net, addr) ->
-        forAll (arbitrarySatoshi net) $ testBuildAddrTx net ctx addr
+        forAll (arbitrarySatoshi net) $ testBuildAddrTx net addr
     prop "the size guess is at least the virtual size of a signed legacy transaction, with little slack" $
       forAll arbitraryNetwork $ \net ->
-        forAll (arbitraryAddrOnlyTxFull net ctx) (testGuessSize net ctx)
+        forAll (arbitraryAddrOnlyTxFull net) (testGuessSize net)
     prop "the weight guess is at least the weight of a signed transaction whose inputs have a kind" $
-      forAll arbitraryNetwork $ \net -> testGuessWeight net ctx False
+      forAll arbitraryNetwork $
+        \net -> testGuessWeight net False
     prop "the weight guess is at least the weight of a signed transaction with its SegWit inputs nested" $
-      forAll arbitraryNetwork $ \net -> testGuessWeight net ctx True
+      forAll arbitraryNetwork $
+        \net -> testGuessWeight net True
     prop "choose coins" $
       forAll arbitraryNetwork $ \net ->
         forAll (listOf (arbitrarySatoshi net)) $ \coins ->
           forAll (listOf arbitraryOutputKind) (testChooseCoins coins)
     prop "sign and validate transaction" $
       forAll arbitraryNetwork $ \net ->
-        forAll (arbitrarySigningData net ctx) (testDetSignTx net ctx)
+        forAll (arbitrarySigningData net) (testDetSignTx net)
     prop "sign and validate (nested) transaction" $
       forAll arbitraryNetwork $ \net ->
-        forAll (arbitrarySigningData net ctx) (testDetSignNestedTx net ctx)
+        forAll (arbitrarySigningData net) (testDetSignNestedTx net)
     prop "merge partially signed transactions" $
       forAll arbitraryNetwork $ \net ->
-        property $ forAll (arbitraryPartialTxs net ctx) (testMergeTx net ctx)
+        property $ forAll (arbitraryPartialTxs net) (testMergeTx net)
     prop "nosigTxHash does not change when a transaction is signed, whether in the input scripts or in the witness" $
       forAll arbitraryNetwork $ \net ->
-        forAll (arbitrarySigningData net ctx) $ \(tx, sigis, prv) ->
-          nosigTxHash (either error id (signTx net ctx tx sigis (map (.key) prv))) === nosigTxHash tx
+        forAll (arbitrarySigningData net) $ \(tx, sigis, prv) ->
+          nosigTxHash (either error id (signTx net tx sigis (map (.key) prv))) === nosigTxHash tx
   describe "Transaction vectors" $ do
     it "compute txid from tx" $ mapM_ testTxidVector txidVectors
     it "build pkhash transaction (generated from bitcoind)" $
-      mapM_ (testPKHashVector ctx) pkHashVectors
+      mapM_ testPKHashVector pkHashVectors
   idsSpec
-  bytesSpec ctx
-  sizeSpec ctx
+  bytesSpec
+  sizeSpec
   coinSelectionSpec
-  buildSpec ctx
-  verificationSpec ctx
-  coreSignedSpec ctx
-  consensusSpec ctx
-  thiefSpec ctx
-  signerSpec ctx
-  mergeSpec ctx
-  taprootSigningSpec ctx
-  segwitSpec ctx
+  buildSpec
+  verificationSpec
+  coreSignedSpec
+  consensusSpec
+  thiefSpec
+  signerSpec
+  mergeSpec
+  taprootSigningSpec
+  segwitSpec
   genesisSpec
 
 -- Txid Vectors
@@ -192,14 +194,14 @@ txidVectors =
 
 -- Build address transactions vectors generated from bitcoin-core raw tx API
 
-testPKHashVector :: Ctx -> ([(Text, Word32)], [(Text, Word64)], Text) -> Assertion
-testPKHashVector ctx (is, os, res) =
+testPKHashVector :: ([(Text, Word32)], [(Text, Word64)], Text) -> Assertion
+testPKHashVector (is, os, res) =
   assertEqual
     "Build PKHash Tx"
     (Right res)
     (encodeHex . runPutS . serialize <$> txE)
   where
-    txE = buildAddrTx btc ctx (map f is) os
+    txE = buildAddrTx btc (map f is) os
     f (tid, ix) = OutPoint (fromJust $ hexToTxHash tid) ix
 
 pkHashVectors :: [([(Text, Word32)], [(Text, Word64)], Text)]
@@ -253,26 +255,26 @@ pkHashVectors =
 
 -- Transaction Properties --
 
-testBuildAddrTx :: Network -> Ctx -> Address -> TestCoin -> IO ()
-testBuildAddrTx net ctx a coin
+testBuildAddrTx :: Network -> Address -> TestCoin -> IO ()
+testBuildAddrTx net a coin
   | isPubKeyAddress a = (PayPKHash <$> addressHash160 a) `shouldBe` Just out
   | isScriptAddress a = (PayScriptHash <$> addressHash160 a) `shouldBe` Just out
   | otherwise = discard
   where
     out = either error id $ do
-      tx <- buildAddrTx net ctx [] [(fromJust (addrToText net a), coin.getTestCoin)]
-      unmarshal ctx (head tx.outputs).script
+      tx <- buildAddrTx net [] [(fromJust (addrToText net a), coin.getTestCoin)]
+      decodeSerial (head tx.outputs).script
 
 -- The guess is an upper bound on the virtual size that counts 72 bytes
 -- per signature. A signature with a short r or s is 1 or 2 bytes less.
-testGuessSize :: Network -> Ctx -> Tx -> Bool
-testGuessSize net ctx tx =
+testGuessSize :: Network -> Tx -> Bool
+testGuessSize net tx =
   guess >= size && guess <= size + 2 * signatures
   where
     guess = guessTxSize (map inputKind ins) (map outputKind outs)
     size = txVirtualSize tx
-    ins = map (either error id . unmarshal (net, ctx) . (.script)) tx.inputs
-    outs = map (either error id . unmarshal ctx . (.script)) tx.outputs
+    ins = map (either error id . unmarshal net . (.script)) tx.inputs
+    outs = map (either error id . decodeSerial . (.script)) tx.outputs
     inputKind (ScriptHashInput _ (PayMulSig keys r)) = InputMulSig r (length keys)
     inputKind _ = InputPKHash
     outputKind o
@@ -285,17 +287,17 @@ testGuessSize net ctx tx =
 -- The guess is an upper bound on the weight of the transaction once signed:
 -- by signTx, or by signNestedWitnessTx with its SegWit inputs nested. Only
 -- signing data whose inputs all have a kind is generated.
-testGuessWeight :: Network -> Ctx -> Bool -> Property
-testGuessWeight net ctx nested =
-  forAll (arbitrarySigningData net ctx `suchThat` allKnown) $ \(tx, sigis, keys) ->
-    let signed = either error id (sign net ctx tx sigis (map (.key) keys))
-        kinds = mapMaybe (sigInputKind ctx nested keys) sigis
-        guess = guessTxWeight kinds (map (txOutKind ctx) tx.outputs)
+testGuessWeight :: Network -> Bool -> Property
+testGuessWeight net nested =
+  forAll (arbitrarySigningData net `suchThat` allKnown) $ \(tx, sigis, keys) ->
+    let signed = either error id (sign net tx sigis (map (.key) keys))
+        kinds = mapMaybe (sigInputKind nested keys) sigis
+        guess = guessTxWeight kinds (map txOutKind tx.outputs)
      in counterexample ("weight " <> show (txWeight signed) <> ", guess " <> show guess) $
           txWeight signed <= guess
   where
     sign = if nested then signNestedWitnessTx else signTx
-    allKnown (_, sigis, keys) = all (isJust . sigInputKind ctx nested keys) sigis
+    allKnown (_, sigis, keys) = all (isJust . sigInputKind nested keys) sigis
 
 -- The kind of input a SigInput is signed as, when the estimator has one.
 -- The key of a public key hash is found among the signing keys, to tell
@@ -304,8 +306,8 @@ testGuessWeight net ctx nested =
 -- pay-to-witness-script-hash of a single key, multisig with an uncompressed
 -- key, and pay-to-witness-public-key-hash with an uncompressed key, which
 -- the estimator counts as compressed.
-sigInputKind :: Ctx -> Bool -> [PrivateKey] -> SigInput -> Maybe InputKind
-sigInputKind ctx nested keys si = case (si.script, si.redeem) of
+sigInputKind :: Bool -> [PrivateKey] -> SigInput -> Maybe InputKind
+sigInputKind nested keys si = case (si.script, si.redeem) of
   (PayPK _, Nothing) -> Just InputPK
   (PayPKHash h, Nothing) -> do
     k <- keyOfHash h
@@ -320,15 +322,15 @@ sigInputKind ctx nested keys si = case (si.script, si.redeem) of
   (PayWitness 1 program, Nothing) | B.length program == 32 -> Just InputTaproot
   _ -> Nothing
   where
-    keyOfHash h = find (\k -> addressHash160 (pubKeyAddr ctx (derivePublicKey ctx k)) == Just h) keys
+    keyOfHash h = find (\k -> addressHash160 (pubKeyAddr (derivePublicKey k)) == Just h) keys
     compressedMultisig kind ps m = do
       guard (all (.compress) ps)
       Just (kind m (length ps))
 
 -- The kind of an output, from its script. A script of no named kind is
 -- 'OutputScript' with its size.
-txOutKind :: Ctx -> TxOut -> OutputKind
-txOutKind ctx out = case unmarshal ctx out.script of
+txOutKind :: TxOut -> OutputKind
+txOutKind out = case decodeSerial out.script of
   Right (PayPKHash _) -> OutputPKHash
   Right (PayScriptHash _) -> OutputScriptHash
   Right (PayScript32Hash _) -> OutputScript32Hash
@@ -359,38 +361,38 @@ testChooseCoins coins outs target byteFee =
 
 {- Signing Transactions -}
 
-testDetSignTx :: Network -> Ctx -> (Tx, [SigInput], [PrivateKey]) -> Bool
-testDetSignTx net ctx (tx, sigis, prv) =
+testDetSignTx :: Network -> (Tx, [SigInput], [PrivateKey]) -> Bool
+testDetSignTx net (tx, sigis, prv) =
   not verify1 && not verify2 && verify3
   where
-    verify1 = verifyStdTx net ctx tx verData
-    verify2 = verifyStdTx net ctx txSigP verData
-    verify3 = verifyStdTx net ctx txSigC verData
-    txSigP = either error id $ signTx net ctx tx sigis (map (.key) (tail prv))
-    txSigC = either error id $ signTx net ctx txSigP sigis [(head prv).key]
+    verify1 = verifyStdTx net tx verData
+    verify2 = verifyStdTx net txSigP verData
+    verify3 = verifyStdTx net txSigC verData
+    txSigP = either error id $ signTx net tx sigis (map (.key) (tail prv))
+    txSigC = either error id $ signTx net txSigP sigis [(head prv).key]
     sigData SigInput {..} = (script, value, outpoint)
     verData = map sigData sigis
 
-testDetSignNestedTx :: Network -> Ctx -> (Tx, [SigInput], [PrivateKey]) -> Bool
-testDetSignNestedTx net ctx (tx, sigis, prv) =
+testDetSignNestedTx :: Network -> (Tx, [SigInput], [PrivateKey]) -> Bool
+testDetSignNestedTx net (tx, sigis, prv) =
   not verify1 && not verify2 && verify3
   where
-    verify1 = verifyStdTx net ctx tx verData
-    verify2 = verifyStdTx net ctx txSigP verData
-    verify3 = verifyStdTx net ctx txSigC verData
+    verify1 = verifyStdTx net tx verData
+    verify2 = verifyStdTx net txSigP verData
+    verify3 = verifyStdTx net txSigC verData
     txSigP =
       either error id $
-        signNestedWitnessTx net ctx tx sigis ((.key) <$> tail prv)
+        signNestedWitnessTx net tx sigis ((.key) <$> tail prv)
     txSigC =
       either error id $
-        signNestedWitnessTx net ctx txSigP sigis [(head prv).key]
+        signNestedWitnessTx net txSigP sigis [(head prv).key]
     verData = handleSegwit <$> sigis
     handleSegwit (SigInput s v o _ _)
-      | isSegwit s = (either error id (toP2SH =<< encodeOutput ctx s), v, o)
+      | isSegwit s = (either error id (toP2SH =<< encodeOutput s), v, o)
       | otherwise = (s, v, o)
 
-testMergeTx :: Network -> Ctx -> ([Tx], [(ScriptOutput, Word64, OutPoint, Int, Int)]) -> Bool
-testMergeTx net ctx (txs, os) =
+testMergeTx :: Network -> ([Tx], [(ScriptOutput, Word64, OutPoint, Int, Int)]) -> Bool
+testMergeTx net (txs, os) =
   and
     [ isRight mergeRes,
       length mergedTx.inputs == length os,
@@ -402,14 +404,14 @@ testMergeTx net ctx (txs, os) =
     ]
   where
     outs = map (\(so, val, op, _, _) -> (so, val, op)) os
-    mergeRes = mergeTxs net ctx txs outs
+    mergeRes = mergeTxs net txs outs
     mergedTx = fromRight (error "Could not merge") mergeRes
-    isValid = verifyStdTx net ctx mergedTx outs
+    isValid = verifyStdTx net mergedTx outs
     enoughSigs = all (\(m, c) -> c >= m) sigMap
     sigFun (_, _, _, m, _) inp = (m, sigCnt inp)
     sigMap = zipWith sigFun os mergedTx.inputs
     sigCnt inp =
-      case unmarshal (net, ctx) inp.script of
+      case unmarshal net inp.script of
         Right (RegularInput (SpendMulSig sigs)) -> length sigs
         Right (ScriptHashInput (SpendMulSig sigs) _) -> length sigs
         _ -> error "Invalid input script type"
@@ -434,20 +436,20 @@ parseTx = runGetS deserialize . hexBytes
 
 -- | The key pair whose secret key is the number given, in compressed form.
 -- Tests use these fixed keys, so that a failure can be run again.
-fixedKey :: Ctx -> Word8 -> (PrivateKey, PublicKey)
-fixedKey ctx n = (k, derivePublicKey ctx k)
+fixedKey :: Word8 -> (PrivateKey, PublicKey)
+fixedKey n = (k, derivePublicKey k)
   where
     k = wrapSecKey True (fromJust (secKey (B.replicate 31 0 <> B.singleton n)))
 
 -- | The same key pair with the public key in uncompressed form
-fixedKeyU :: Ctx -> Word8 -> (PrivateKey, PublicKey)
-fixedKeyU ctx n = (k, derivePublicKey ctx k)
+fixedKeyU :: Word8 -> (PrivateKey, PublicKey)
+fixedKeyU n = (k, derivePublicKey k)
   where
-    k = wrapSecKey False (fst (fixedKey ctx n)).key
+    k = wrapSecKey False (fst (fixedKey n)).key
 
 -- | HASH160 of a public key as it is serialized
-keyHash :: Ctx -> PublicKey -> Hash160
-keyHash ctx = addressHash . marshal ctx
+keyHash :: PublicKey -> Hash160
+keyHash = addressHash . encodeSerial
 
 -- | A coin to spend: an output of the genesis coinbase transaction id
 coinAt :: Word32 -> OutPoint
@@ -506,8 +508,8 @@ idsSpec =
 
 {- Bytes -}
 
-bytesSpec :: Ctx -> Spec
-bytesSpec ctx =
+bytesSpec :: Spec
+bytesSpec =
   describe "Transaction bytes" $ do
     -- The bytes of the first pkhash vector, with the input count written
     -- as 0xffffffffffffffff, which wraps around to -1 as an Int
@@ -617,8 +619,8 @@ bytesSpec ctx =
 
 {- Sizes and fees -}
 
-sizeSpec :: Ctx -> Spec
-sizeSpec ctx =
+sizeSpec :: Spec
+sizeSpec =
   describe "Size and fee estimation" $ do
     it "counts the bytes of each kind of input, without and with witness" $ do
       -- outpoint 36, sequence 4, script length 1, signature push 73
@@ -739,14 +741,14 @@ sizeSpec ctx =
       dustThreshold (OutputScript 37) `shouldBe` 582
 
     it "is at least the virtual size of a signed P2WPKH spend, and of a Taproot key path spend" $ do
-      let (k, p) = fixedKey ctx 1
-          h = fromJust (addressHash160 (pubKeyAddr ctx p))
+      let (k, p) = fixedKey 1
+          h = fromJust (addressHash160 (pubKeyAddr p))
           op = OutPoint (fromJust (hexToTxHash genesisTxId)) 0
-          witnessTx = buildTx ctx [op] [(PayWitnessPKHash h, 90000)]
-          taprootOutput = taprootScriptOutput ctx (TaprootOutput p.point Nothing)
-          taprootTx = buildTx ctx [op] [(taprootOutput, 90000)]
-      signedWitness <- either fail return (signTx btc ctx witnessTx [SigInput (PayWitnessPKHash h) 100000 op sigHashAll Nothing] [k.key])
-      signedTaproot <- either fail return (signTx btc ctx taprootTx [SigInput taprootOutput 100000 op sigHashDefault Nothing] [k.key])
+          witnessTx = buildTx [op] [(PayWitnessPKHash h, 90000)]
+          taprootOutput = taprootScriptOutput (TaprootOutput p.point Nothing)
+          taprootTx = buildTx [op] [(taprootOutput, 90000)]
+      signedWitness <- either fail return (signTx btc witnessTx [SigInput (PayWitnessPKHash h) 100000 op sigHashAll Nothing] [k.key])
+      signedTaproot <- either fail return (signTx btc taprootTx [SigInput taprootOutput 100000 op sigHashDefault Nothing] [k.key])
       -- 82 bytes without witness. The witness: marker and flag 2, count 1,
       -- the signature with its hash type after its length, 72 or 73, and
       -- the key after its length 34: 437 or 438 units, 110 virtual bytes
@@ -823,261 +825,261 @@ coinSelectionSpec =
 
 {- Building -}
 
-buildSpec :: Ctx -> Spec
-buildSpec ctx =
+buildSpec :: Spec
+buildSpec =
   describe "Building a transaction to addresses" $ do
     let address = "14LsRquZfURNFrzpcLVGdaHTfAPjjwiSPb"
     -- AmountFromValue of Bitcoin Core refuses an amount out of range when
     -- createrawtransaction builds a transaction
     it "refuses an amount above the 21 million coins that can exist" $ do
-      buildAddrTx btc ctx [coinAt 0] [(address, 2100000000000000)] `shouldSatisfy` isRight
-      buildAddrTx btc ctx [coinAt 0] [(address, 2100000000000001)] `shouldBe` Left "buildAddrTx: An amount is above the maximum of 2100000000000000 satoshi"
-      buildAddrTx btc ctx [coinAt 0] [(address, 18446744073709551615)] `shouldBe` Left "buildAddrTx: An amount is above the maximum of 2100000000000000 satoshi"
+      buildAddrTx btc [coinAt 0] [(address, 2100000000000000)] `shouldSatisfy` isRight
+      buildAddrTx btc [coinAt 0] [(address, 2100000000000001)] `shouldBe` Left "buildAddrTx: An amount is above the maximum of 2100000000000000 satoshi"
+      buildAddrTx btc [coinAt 0] [(address, 18446744073709551615)] `shouldBe` Left "buildAddrTx: An amount is above the maximum of 2100000000000000 satoshi"
 
     it "refuses an address of another network" $
-      buildAddrTx bch ctx [coinAt 0] [("bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu", 1000)] `shouldBe` Left "buildAddrTx: Invalid address bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
+      buildAddrTx bch [coinAt 0] [("bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu", 1000)] `shouldBe` Left "buildAddrTx: Invalid address bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
 
 {- Verification -}
 
-verificationSpec :: Ctx -> Spec
-verificationSpec ctx =
+verificationSpec :: Spec
+verificationSpec =
   describe "Verification" $ do
     let coinOf = OutPoint (fromJust (hexToTxHash genesisTxId))
     it "accepts a correct P2PKH spend, and refuses a witness on its input, a wrong key, a wrong amount and a missing coin" $ do
-      let (k, p) = fixedKey ctx 1
-          (_, other) = fixedKey ctx 2
-      let h = fromJust (addressHash160 (pubKeyAddr ctx p))
-          otherHash = fromJust (addressHash160 (pubKeyAddr ctx other))
+      let (k, p) = fixedKey 1
+          (_, other) = fixedKey 2
+      let h = fromJust (addressHash160 (pubKeyAddr p))
+          otherHash = fromJust (addressHash160 (pubKeyAddr other))
           op = coinOf 0
-          tx = buildTx ctx [op] [(PayPKHash h, 90000)]
-      signed <- either fail return (signTx btc ctx tx [SigInput (PayPKHash h) 100000 op sigHashAll Nothing] [k.key])
-      verifyStdTx btc ctx signed [(PayPKHash h, 100000, op)] `shouldBe` True
-      verifyStdTx btc ctx signed {witness = [["junk"]]} [(PayPKHash h, 100000, op)] `shouldBe` False
-      verifyStdTx btc ctx signed [(PayPKHash otherHash, 100000, op)] `shouldBe` False
+          tx = buildTx [op] [(PayPKHash h, 90000)]
+      signed <- either fail return (signTx btc tx [SigInput (PayPKHash h) 100000 op sigHashAll Nothing] [k.key])
+      verifyStdTx btc signed [(PayPKHash h, 100000, op)] `shouldBe` True
+      verifyStdTx btc signed {witness = [["junk"]]} [(PayPKHash h, 100000, op)] `shouldBe` False
+      verifyStdTx btc signed [(PayPKHash otherHash, 100000, op)] `shouldBe` False
       -- The legacy digest does not commit to the amount, but the outputs may not spend more than the coin
-      verifyStdTx btc ctx signed [(PayPKHash h, 89999, op)] `shouldBe` False
-      verifyStdTx btc ctx signed [(PayPKHash h, 100000, coinOf 1)] `shouldBe` False
-      verifyStdTx btc ctx signed [] `shouldBe` False
-      verifyStdInput btc ctx signed [(PayPKHash h, 100000, op)] 0 `shouldBe` True
-      verifyStdInput btc ctx signed [(PayPKHash h, 100000, op)] 1 `shouldBe` False
-      verifyStdInput btc ctx signed [(PayPKHash h, 100000, op)] (-1) `shouldBe` False
+      verifyStdTx btc signed [(PayPKHash h, 89999, op)] `shouldBe` False
+      verifyStdTx btc signed [(PayPKHash h, 100000, coinOf 1)] `shouldBe` False
+      verifyStdTx btc signed [] `shouldBe` False
+      verifyStdInput btc signed [(PayPKHash h, 100000, op)] 0 `shouldBe` True
+      verifyStdInput btc signed [(PayPKHash h, 100000, op)] 1 `shouldBe` False
+      verifyStdInput btc signed [(PayPKHash h, 100000, op)] (-1) `shouldBe` False
 
     it "refuses a transaction without inputs, and the outputs of a transaction spending more than its coins" $ do
-      let (k, p) = fixedKey ctx 1
-      let h = fromJust (addressHash160 (pubKeyAddr ctx p))
+      let (k, p) = fixedKey 1
+      let h = fromJust (addressHash160 (pubKeyAddr p))
           ops = [coinOf 0, coinOf 1]
-          tx = buildTx ctx ops [(PayPKHash h, 150000)]
+          tx = buildTx ops [(PayPKHash h, 150000)]
           sigis = [SigInput (PayPKHash h) 100000 op sigHashAll Nothing | op <- ops]
           coins = [(PayPKHash h, 100000, op) | op <- ops]
-      signed <- either fail return (signTx btc ctx tx sigis [k.key])
-      verifyStdTx btc ctx signed coins `shouldBe` True
-      verifyStdTx btc ctx signed (take 1 coins) `shouldBe` False
-      verifyStdTx btc ctx (buildTx ctx [] [(PayPKHash h, 1)]) [] `shouldBe` False
+      signed <- either fail return (signTx btc tx sigis [k.key])
+      verifyStdTx btc signed coins `shouldBe` True
+      verifyStdTx btc signed (take 1 coins) `shouldBe` False
+      verifyStdTx btc (buildTx [] [(PayPKHash h, 1)]) [] `shouldBe` False
       -- The same coins hold less than the outputs spend
-      verifyStdTx btc ctx signed [(PayPKHash h, 70000, op) | op <- ops] `shouldBe` False
+      verifyStdTx btc signed [(PayPKHash h, 70000, op) | op <- ops] `shouldBe` False
 
     it "signs SIGHASH_SINGLE on a legacy input with an output at its index and on a SegWit input, but refuses it on a legacy input without one" $ do
-      let (k, p) = fixedKey ctx 1
-      let h = fromJust (addressHash160 (pubKeyAddr ctx p))
+      let (k, p) = fixedKey 1
+      let h = fromJust (addressHash160 (pubKeyAddr p))
           ops = [coinOf 0, coinOf 1]
           -- one output, so input 1 has none at its index
-          tx = buildTx ctx ops [(PayPKHash h, 150000)]
+          tx = buildTx ops [(PayPKHash h, 150000)]
           legacy op = SigInput (PayPKHash h) 100000 op sigHashSingle Nothing
           segwit op = SigInput (PayWitnessPKHash h) 100000 op sigHashSingle Nothing
-      signedFirst <- either fail return (signTx btc ctx tx [legacy (coinOf 0)] [k.key])
-      verifyStdInput btc ctx signedFirst [(PayPKHash h, 100000, coinOf 0)] 0 `shouldBe` True
-      signTx btc ctx tx [legacy (coinOf 1)] [k.key] `shouldBe` Left "makeSignature: SIGHASH_SINGLE without an output at the input index"
+      signedFirst <- either fail return (signTx btc tx [legacy (coinOf 0)] [k.key])
+      verifyStdInput btc signedFirst [(PayPKHash h, 100000, coinOf 0)] 0 `shouldBe` True
+      signTx btc tx [legacy (coinOf 1)] [k.key] `shouldBe` Left "makeSignature: SIGHASH_SINGLE without an output at the input index"
       -- The BIP 143 digest commits to the coin even without an output
-      signedWitness <- either fail return (signTx btc ctx tx [segwit (coinOf 1)] [k.key])
-      verifyStdInput btc ctx signedWitness [(PayWitnessPKHash h, 100000, coinOf 1)] 1 `shouldBe` True
+      signedWitness <- either fail return (signTx btc tx [segwit (coinOf 1)] [k.key])
+      verifyStdInput btc signedWitness [(PayWitnessPKHash h, 100000, coinOf 1)] 1 `shouldBe` True
 
     -- A node accepts the signature over the constant digest 1 that a
     -- legacy SIGHASH_SINGLE input without an output has, so the verifier
     -- must too, although the signer refuses to make one
     it "accepts a legacy SIGHASH_SINGLE signature over the constant digest 1, as a node does" $ do
-      let (k, p) = fixedKey ctx 1
-      let h = fromJust (addressHash160 (pubKeyAddr ctx p))
+      let (k, p) = fixedKey 1
+      let h = fromJust (addressHash160 (pubKeyAddr p))
           ops = [coinOf 0, coinOf 1]
-          tx = buildTx ctx ops [(PayPKHash h, 150000)]
+          tx = buildTx ops [(PayPKHash h, 150000)]
           one = "0100000000000000000000000000000000000000000000000000000000000000" :: Hash256
-          overOne = marshal (btc, ctx) (RegularInput (SpendPKHash (TxSignature (signHash ctx k.key one) sigHashSingle) p))
+          overOne = marshal btc (RegularInput (SpendPKHash (TxSignature (signHash k.key one) sigHashSingle) p))
           spent = Tx tx.version [TxIn (coinOf 0) "" 0xffffffff, TxIn (coinOf 1) overOne 0xffffffff] tx.outputs [] tx.locktime
           spentFirst = Tx tx.version [TxIn (coinOf 0) overOne 0xffffffff, TxIn (coinOf 1) "" 0xffffffff] tx.outputs [] tx.locktime
-      verifyStdInput btc ctx spent [(PayPKHash h, 100000, coinOf 1)] 1 `shouldBe` True
+      verifyStdInput btc spent [(PayPKHash h, 100000, coinOf 1)] 1 `shouldBe` True
       -- The same signature on input 0, which has an output, does not verify
-      verifyStdInput btc ctx spentFirst [(PayPKHash h, 100000, coinOf 0)] 0 `shouldBe` False
+      verifyStdInput btc spentFirst [(PayPKHash h, 100000, coinOf 0)] 0 `shouldBe` False
 
     it "refuses a SegWit input with a non-empty input script and a wrong amount" $ do
-      let (k, p) = fixedKey ctx 1
-      let h = fromJust (addressHash160 (pubKeyAddr ctx p))
+      let (k, p) = fixedKey 1
+      let h = fromJust (addressHash160 (pubKeyAddr p))
           op = coinOf 0
-          tx = buildTx ctx [op] [(PayWitnessPKHash h, 90000)]
-      signed <- either fail return (signTx btc ctx tx [SigInput (PayWitnessPKHash h) 100000 op sigHashAll Nothing] [k.key])
-      verifyStdTx btc ctx signed [(PayWitnessPKHash h, 100000, op)] `shouldBe` True
+          tx = buildTx [op] [(PayWitnessPKHash h, 90000)]
+      signed <- either fail return (signTx btc tx [SigInput (PayWitnessPKHash h) 100000 op sigHashAll Nothing] [k.key])
+      verifyStdTx btc signed [(PayWitnessPKHash h, 100000, op)] `shouldBe` True
       -- The BIP 143 digest commits to the amount
-      verifyStdTx btc ctx signed [(PayWitnessPKHash h, 100001, op)] `shouldBe` False
+      verifyStdTx btc signed [(PayWitnessPKHash h, 100001, op)] `shouldBe` False
       let pushed = Tx signed.version [TxIn op "\x51" i.sequence | i <- signed.inputs] signed.outputs signed.witness signed.locktime
-      verifyStdTx btc ctx pushed [(PayWitnessPKHash h, 100000, op)] `shouldBe` False
+      verifyStdTx btc pushed [(PayWitnessPKHash h, 100000, op)] `shouldBe` False
 
 {- Merging -}
 
-mergeSpec :: Ctx -> Spec
-mergeSpec ctx =
+mergeSpec :: Spec
+mergeSpec =
   describe "Merging partially signed transactions" $ do
     it "leaves an input that no transaction signed unsigned, and merges the others" $ do
-      let (k1, p1) = fixedKey ctx 1
-          (k2, p2) = fixedKey ctx 2
+      let (k1, p1) = fixedKey 1
+          (k2, p2) = fixedKey 2
       let ms = PayMulSig [p1, p2] 2
-          so = PayScriptHash (fromJust (either (const Nothing) addressHash160 (payToScriptAddress ctx ms)))
+          so = PayScriptHash (fromJust (either (const Nothing) addressHash160 (payToScriptAddress ms)))
           ops = [OutPoint (fromJust (hexToTxHash genesisTxId)) 0, OutPoint (fromJust (hexToTxHash genesisTxId)) 1]
-          tx = buildTx ctx ops [(PayPKHash (fromJust (addressHash160 (pubKeyAddr ctx p1))), 90000)]
+          tx = buildTx ops [(PayPKHash (fromJust (addressHash160 (pubKeyAddr p1))), 90000)]
           coins = [(so, 100000, op) | op <- ops]
           sigi = SigInput so 100000 (head ops) sigHashAll (Just ms)
-      a <- either fail return (signTx btc ctx tx [sigi] [k1.key])
-      b <- either fail return (signTx btc ctx tx [sigi] [k2.key])
-      merged <- either fail return (mergeTxs btc ctx [a, b] coins)
+      a <- either fail return (signTx btc tx [sigi] [k1.key])
+      b <- either fail return (signTx btc tx [sigi] [k2.key])
+      merged <- either fail return (mergeTxs btc [a, b] coins)
       (merged.inputs !! 1).script `shouldBe` ""
-      verifyStdInput btc ctx merged coins 0 `shouldBe` True
-      verifyStdTx btc ctx merged coins `shouldBe` False
+      verifyStdInput btc merged coins 0 `shouldBe` True
+      verifyStdTx btc merged coins `shouldBe` False
       -- The second input signed by both completes the transaction
       let sigi2 = SigInput so 100000 (ops !! 1) sigHashAll (Just ms)
-      c <- either fail return (signTx btc ctx tx [sigi2] [k1.key])
-      d <- either fail return (signTx btc ctx tx [sigi2] [k2.key])
-      complete <- either fail return (mergeTxs btc ctx [a, b, c, d] coins)
-      verifyStdTx btc ctx complete coins `shouldBe` True
+      c <- either fail return (signTx btc tx [sigi2] [k1.key])
+      d <- either fail return (signTx btc tx [sigi2] [k2.key])
+      complete <- either fail return (mergeTxs btc [a, b, c, d] coins)
+      verifyStdTx btc complete coins `shouldBe` True
 
     it "keeps the witness of an input that is not merged" $ do
-      let (k1, p1) = fixedKey ctx 1
-          (k2, p2) = fixedKey ctx 2
-          (k3, p3) = fixedKey ctx 3
+      let (k1, p1) = fixedKey 1
+          (k2, p2) = fixedKey 2
+          (k3, p3) = fixedKey 3
           ms = PayMulSig [p1, p2] 2
-          so = either error id (toP2SH =<< encodeOutput ctx ms)
-          wpkh = PayWitnessPKHash (keyHash ctx p3)
-          tx = buildTx ctx [coinAt 0, coinAt 1] [(PayPKHash (keyHash ctx p1), 150000)]
+          so = either error id (toP2SH =<< encodeOutput ms)
+          wpkh = PayWitnessPKHash (keyHash p3)
+          tx = buildTx [coinAt 0, coinAt 1] [(PayPKHash (keyHash p1), 150000)]
           msSigi = SigInput so 100000 (coinAt 0) sigHashAll (Just ms)
           coins = [(so, 100000, coinAt 0), (wpkh, 100000, coinAt 1)]
-      withSegwit <- either fail return (signTx btc ctx tx [SigInput wpkh 100000 (coinAt 1) sigHashAll Nothing] [k3.key])
-      a <- either fail return (signTx btc ctx withSegwit [msSigi] [k1.key])
-      b <- either fail return (signTx btc ctx withSegwit [msSigi] [k2.key])
-      merged <- either fail return (mergeTxs btc ctx [a, b] [(so, 100000, coinAt 0)])
+      withSegwit <- either fail return (signTx btc tx [SigInput wpkh 100000 (coinAt 1) sigHashAll Nothing] [k3.key])
+      a <- either fail return (signTx btc withSegwit [msSigi] [k1.key])
+      b <- either fail return (signTx btc withSegwit [msSigi] [k2.key])
+      merged <- either fail return (mergeTxs btc [a, b] [(so, 100000, coinAt 0)])
       merged.witness `shouldBe` withSegwit.witness
-      verifyStdTx btc ctx merged coins `shouldBe` True
+      verifyStdTx btc merged coins `shouldBe` True
 
     it "mergeTxInput refuses an index that a transaction does not have" $ do
-      let (_, p1) = fixedKey ctx 1
+      let (_, p1) = fixedKey 1
           ms = PayMulSig [p1] 1
-          tx = buildTx ctx [coinAt 0] []
-          short = buildTx ctx [] []
-      mergeTxInput btc ctx [tx] tx ((ms, 100000), 3) `shouldBe` Left "mergeTxInput: input index out of range"
-      mergeTxInput btc ctx [tx, short] tx ((ms, 100000), 0) `shouldBe` Left "mergeTxInput: input index out of range"
+          tx = buildTx [coinAt 0] []
+          short = buildTx [] []
+      mergeTxInput btc [tx] tx ((ms, 100000), 3) `shouldBe` Left "mergeTxInput: input index out of range"
+      mergeTxInput btc [tx, short] tx ((ms, 100000), 0) `shouldBe` Left "mergeTxInput: input index out of range"
 
     it "refuses to merge inputs that carry different redeem scripts" $ do
-      let (k1, p1) = fixedKey ctx 1
-          (k2, p2) = fixedKey ctx 2
-          (_, p3) = fixedKey ctx 3
+      let (k1, p1) = fixedKey 1
+          (k2, p2) = fixedKey 2
+          (_, p3) = fixedKey 3
           msA = PayMulSig [p1, p2] 2
           msB = PayMulSig [p1, p2, p3] 2
-          hashOf ms = either error id (toP2SH =<< encodeOutput ctx ms)
-          tx = buildTx ctx [coinAt 0] [(PayPKHash (keyHash ctx p1), 90000)]
-      a <- either fail return (signTx btc ctx tx [SigInput (hashOf msA) 100000 (coinAt 0) sigHashAll (Just msA)] [k1.key])
-      b <- either fail return (signTx btc ctx tx [SigInput (hashOf msB) 100000 (coinAt 0) sigHashAll (Just msB)] [k2.key])
-      mergeTxs btc ctx [a, b] [(hashOf msA, 100000, coinAt 0)] `shouldBe` Left "Redeem scripts do not match"
+          hashOf ms = either error id (toP2SH =<< encodeOutput ms)
+          tx = buildTx [coinAt 0] [(PayPKHash (keyHash p1), 90000)]
+      a <- either fail return (signTx btc tx [SigInput (hashOf msA) 100000 (coinAt 0) sigHashAll (Just msA)] [k1.key])
+      b <- either fail return (signTx btc tx [SigInput (hashOf msB) 100000 (coinAt 0) sigHashAll (Just msB)] [k2.key])
+      mergeTxs btc [a, b] [(hashOf msA, 100000, coinAt 0)] `shouldBe` Left "Redeem scripts do not match"
 
     it "countMulSig counts the signatures that verify, in key order" $ do
-      let (k1, p1) = fixedKey ctx 1
-          (k2, p2) = fixedKey ctx 2
-          (k3, p3) = fixedKey ctx 3
+      let (k1, p1) = fixedKey 1
+          (k2, p2) = fixedKey 2
+          (k3, p3) = fixedKey 3
       let ms = PayMulSig [p1, p2, p3] 2
-          msScript = either error id (encodeOutput ctx ms)
+          msScript = either error id (encodeOutput ms)
           op = OutPoint (fromJust (hexToTxHash genesisTxId)) 0
-          tx = buildTx ctx [op] [(PayPKHash (fromJust (addressHash160 (pubKeyAddr ctx p1))), 90000)]
-          sigOf k = TxSignature (signHash ctx k.key (either error id (txSigHash btc tx msScript 100000 0 sigHashAll))) sigHashAll
-          count = countMulSig btc ctx tx msScript 100000 0 (map (.point) [p1, p2, p3])
+          tx = buildTx [op] [(PayPKHash (fromJust (addressHash160 (pubKeyAddr p1))), 90000)]
+          sigOf k = TxSignature (signHash k.key (either error id (txSigHash btc tx msScript 100000 0 sigHashAll))) sigHashAll
+          count = countMulSig btc tx msScript 100000 0 (map (.point) [p1, p2, p3])
       count [sigOf k1, sigOf k3] `shouldBe` 2
       count [sigOf k1, sigOf k2, sigOf k3] `shouldBe` 3
       -- The count is not a verdict: verifyStdInput refuses this input
       count [sigOf k1, TxSignatureEmpty, sigOf k3] `shouldBe` 2
       -- A signature out of key order is not counted, nor a signature of another digest
       count [sigOf k3, sigOf k1] `shouldBe` 1
-      count [TxSignature (signHash ctx k1.key (sha256 ("other" :: ByteString))) sigHashAll] `shouldBe` 0
+      count [TxSignature (signHash k1.key (sha256 ("other" :: ByteString))) sigHashAll] `shouldBe` 0
       count [] `shouldBe` 0
 
     it "findSigInput pairs the signing parameters with the index of their input" $ do
       let ops = [OutPoint (fromJust (hexToTxHash genesisTxId)) i | i <- [0 .. 2]]
-          tx = buildTx ctx ops []
+          tx = buildTx ops []
           sigi op = SigInput (PayPKHash "0000000000000000000000000000000000000000") 1 op sigHashAll Nothing
       map snd (findSigInput [sigi (ops !! 2), sigi (ops !! 0)] tx.inputs) `shouldBe` [0, 2]
       findSigInput [sigi (OutPoint (fromJust (hexToTxHash genesisTxId)) 9)] tx.inputs `shouldBe` []
 
     it "buildInput refuses an index out of range, a Taproot output and a mismatched redeem script" $ do
-      let (k, p) = fixedKey ctx 1
+      let (k, p) = fixedKey 1
       let op = OutPoint (fromJust (hexToTxHash genesisTxId)) 0
-          tx = buildTx ctx [op] []
-          sig = TxSignature (signHash ctx k.key (sha256 ("digest" :: ByteString))) sigHashAll
-          h = fromJust (addressHash160 (pubKeyAddr ctx p))
-      buildInput btc ctx tx 1 (PayPKHash h) 1 Nothing sig p `shouldBe` Left "buildInput: Invalid input index"
-      buildInput btc ctx tx 0 (taprootScriptOutput ctx (TaprootOutput p.point Nothing)) 1 Nothing sig p `shouldBe` Left "buildInput: a Taproot input has no input script"
-      buildInput btc ctx tx 0 (PayPKHash h) 1 (Just (PayPK p)) sig p `shouldBe` Left "buildInput: Invalid output/redeem script combination"
-      buildInput btc ctx tx 0 (PayPKHash h) 1 Nothing sig p `shouldBe` Right (RegularInput (SpendPKHash sig p))
+          tx = buildTx [op] []
+          sig = TxSignature (signHash k.key (sha256 ("digest" :: ByteString))) sigHashAll
+          h = fromJust (addressHash160 (pubKeyAddr p))
+      buildInput btc tx 1 (PayPKHash h) 1 Nothing sig p `shouldBe` Left "buildInput: Invalid input index"
+      buildInput btc tx 0 (taprootScriptOutput (TaprootOutput p.point Nothing)) 1 Nothing sig p `shouldBe` Left "buildInput: a Taproot input has no input script"
+      buildInput btc tx 0 (PayPKHash h) 1 (Just (PayPK p)) sig p `shouldBe` Left "buildInput: Invalid output/redeem script combination"
+      buildInput btc tx 0 (PayPKHash h) 1 Nothing sig p `shouldBe` Right (RegularInput (SpendPKHash sig p))
 
     it "refuses an empty list and transactions that differ" $ do
-      mergeTxs btc ctx [] [] `shouldBe` Left "Transaction list is empty"
+      mergeTxs btc [] [] `shouldBe` Left "Transaction list is empty"
       let op = OutPoint (fromJust (hexToTxHash genesisTxId)) 0
-          one = buildTx ctx [op] []
-          other = buildTx ctx [op] [(PayPK (PublicKey (derivePubKey ctx (fromJust (secKey (B.replicate 32 1)))) True), 1)]
-      mergeTxs btc ctx [one] [] `shouldBe` Right one
-      mergeTxs btc ctx [one, other] [] `shouldBe` Left "Transactions do not match"
+          one = buildTx [op] []
+          other = buildTx [op] [(PayPK (PublicKey (derivePubKey (fromJust (secKey (B.replicate 32 1)))) True), 1)]
+      mergeTxs btc [one] [] `shouldBe` Right one
+      mergeTxs btc [one, other] [] `shouldBe` Left "Transactions do not match"
 
 {- Taproot -}
 
-taprootSigningSpec :: Ctx -> Spec
-taprootSigningSpec ctx =
+taprootSigningSpec :: Spec
+taprootSigningSpec =
   describe "Taproot key path signing" $ do
     let op = OutPoint (fromJust (hexToTxHash genesisTxId)) 0
     it "signs with the internal key of an output without script tree, as BIP 86 spends, and with the output key itself" $ do
-      let (k, p) = fixedKey ctx 1
-      let so = taprootScriptOutput ctx (TaprootOutput p.point Nothing)
-          tx = buildTx ctx [op] [(so, 90000)]
+      let (k, p) = fixedKey 1
+      let so = taprootScriptOutput (TaprootOutput p.point Nothing)
+          tx = buildTx [op] [(so, 90000)]
           sigi = SigInput so 100000 op sigHashDefault Nothing
-          tweaked = fromJust (taprootOutputSecKey ctx k.key Nothing)
-      byInternal <- either fail return (signTx btc ctx tx [sigi] [k.key])
-      byOutput <- either fail return (signTx btc ctx tx [sigi] [tweaked])
+          tweaked = fromJust (taprootOutputSecKey k.key Nothing)
+      byInternal <- either fail return (signTx btc tx [sigi] [k.key])
+      byOutput <- either fail return (signTx btc tx [sigi] [tweaked])
       byInternal `shouldBe` byOutput
       map length byInternal.witness `shouldBe` [1]
       map (B.length . head) byInternal.witness `shouldBe` [64]
-      verifyStdTx btc ctx byInternal [(so, 100000, op)] `shouldBe` True
+      verifyStdTx btc byInternal [(so, 100000, op)] `shouldBe` True
       -- A signature with a hash type is 65 bytes and verifies as well
-      withType <- either fail return (signTx btc ctx tx [sigi {sighash = setAnyoneCanPay sigHashAll}] [k.key])
+      withType <- either fail return (signTx btc tx [sigi {sighash = setAnyoneCanPay sigHashAll}] [k.key])
       map (B.length . head) withType.witness `shouldBe` [65]
-      verifyStdTx btc ctx withType [(so, 100000, op)] `shouldBe` True
+      verifyStdTx btc withType [(so, 100000, op)] `shouldBe` True
       -- Another key does not sign
-      let (other, _) = fixedKey ctx 2
-      fmap (.witness) (signTx btc ctx tx [sigi] [other.key]) `shouldBe` Right []
+      let (other, _) = fixedKey 2
+      fmap (.witness) (signTx btc tx [sigi] [other.key]) `shouldBe` Right []
 
     it "needs the output every input spends, and refuses signInput" $ do
-      let (k, p) = fixedKey ctx 1
-      let so = taprootScriptOutput ctx (TaprootOutput p.point Nothing)
+      let (k, p) = fixedKey 1
+      let so = taprootScriptOutput (TaprootOutput p.point Nothing)
           other = OutPoint (fromJust (hexToTxHash genesisTxId)) 1
-          tx = buildTx ctx [op, other] [(so, 90000)]
+          tx = buildTx [op, other] [(so, 90000)]
           sigi = SigInput so 100000 op sigHashDefault Nothing
-      signTx btc ctx tx [sigi] [k.key] `shouldBe` Left "signTx: a Taproot signature needs the output every input spends"
-      signInput btc ctx tx 0 sigi k `shouldBe` Left "signInput: a Taproot input is signed with signTaprootInput"
-      signTaprootInput ctx tx [TxOut 100000 (marshal ctx so)] 0 sigHashDefault k.key `shouldBe` Left "taprootSigHash: one spent output per input is required"
-      signTaprootInput ctx tx [TxOut 100000 (marshal ctx so), TxOut 1 ""] 0 (setForkIdFlag sigHashAll) k.key `shouldBe` Left "taprootSigHash: invalid hash type 65"
+      signTx btc tx [sigi] [k.key] `shouldBe` Left "signTx: a Taproot signature needs the output every input spends"
+      signInput btc tx 0 sigi k `shouldBe` Left "signInput: a Taproot input is signed with signTaprootInput"
+      signTaprootInput tx [TxOut 100000 (encodeSerial so)] 0 sigHashDefault k.key `shouldBe` Left "taprootSigHash: one spent output per input is required"
+      signTaprootInput tx [TxOut 100000 (encodeSerial so), TxOut 1 ""] 0 (setForkIdFlag sigHashAll) k.key `shouldBe` Left "taprootSigHash: invalid hash type 65"
 
 {- SegWit helpers -}
 
-segwitSpec :: Ctx -> Spec
-segwitSpec ctx =
+segwitSpec :: Spec
+segwitSpec =
   describe "SegWit witness helpers" $ do
-    let (k, p) = fixedKey ctx 1
+    let (k, p) = fixedKey 1
         digest = sha256 ("message" :: ByteString)
-        sig = TxSignature (signHash ctx k.key digest) sigHashAll
-        sigBytes = encodeTxSig btc ctx sig
-        keyBytes = marshal ctx p
-        h = fromJust (addressHash160 (pubKeyAddr ctx p))
+        sig = TxSignature (signHash k.key digest) sigHashAll
+        sigBytes = encodeTxSig btc sig
+        keyBytes = encodeSerial p
+        h = fromJust (addressHash160 (pubKeyAddr p))
         multisig = PayMulSig [p] 1
-        multisigScript = either error id (encodeOutput ctx multisig)
+        multisigScript = either error id (encodeOutput multisig)
         wsh = either error id (toP2WSH multisigScript)
     it "isSegwit is true for the version 0 programs only" $ do
       isSegwit (PayWitnessPKHash h) `shouldBe` True
@@ -1086,33 +1088,33 @@ segwitSpec ctx =
       isSegwit (PayWitness 1 (B.replicate 32 0)) `shouldBe` False
 
     it "a simple input stacks its signatures, keys and the empty item of multisig" $ do
-      simpleInputStack btc ctx (SpendPK sig) `shouldBe` [sigBytes]
-      simpleInputStack btc ctx (SpendPKHash sig p) `shouldBe` [sigBytes, keyBytes]
-      simpleInputStack btc ctx (SpendMulSig [sig, TxSignatureEmpty]) `shouldBe` ["", sigBytes, ""]
+      simpleInputStack btc (SpendPK sig) `shouldBe` [sigBytes]
+      simpleInputStack btc (SpendPKHash sig p) `shouldBe` [sigBytes, keyBytes]
+      simpleInputStack btc (SpendMulSig [sig, TxSignatureEmpty]) `shouldBe` ["", sigBytes, ""]
 
     it "a witness program encodes to its stack, with the script last for P2WSH" $ do
-      toWitnessStack btc ctx (P2WPKH (WitnessProgramPKH sig p)) `shouldBe` [sigBytes, keyBytes]
-      toWitnessStack btc ctx (P2WSH (WitnessProgramSH ["", sigBytes] multisigScript)) `shouldBe` ["", sigBytes, runPutS (serialize multisigScript)]
-      toWitnessStack btc ctx EmptyWitnessProgram `shouldBe` []
+      toWitnessStack btc (P2WPKH (WitnessProgramPKH sig p)) `shouldBe` [sigBytes, keyBytes]
+      toWitnessStack btc (P2WSH (WitnessProgramSH ["", sigBytes] multisigScript)) `shouldBe` ["", sigBytes, runPutS (serialize multisigScript)]
+      toWitnessStack btc EmptyWitnessProgram `shouldBe` []
 
     it "a witness is read against the output it spends" $ do
-      viewWitnessProgram btc ctx (PayWitnessPKHash h) [sigBytes, keyBytes] `shouldBe` Right (P2WPKH (WitnessProgramPKH sig p))
-      viewWitnessProgram btc ctx (PayWitnessPKHash h) [sigBytes] `shouldBe` Left "viewWitnessProgram: Invalid witness program"
-      viewWitnessProgram btc ctx wsh ["", sigBytes, runPutS (serialize multisigScript)] `shouldBe` Right (P2WSH (WitnessProgramSH ["", sigBytes] multisigScript))
-      viewWitnessProgram btc ctx (PayPKHash h) [] `shouldBe` Right EmptyWitnessProgram
-      viewWitnessProgram btc ctx (PayPKHash h) [sigBytes] `shouldBe` Left "viewWitnessProgram: Invalid witness program"
+      viewWitnessProgram btc (PayWitnessPKHash h) [sigBytes, keyBytes] `shouldBe` Right (P2WPKH (WitnessProgramPKH sig p))
+      viewWitnessProgram btc (PayWitnessPKHash h) [sigBytes] `shouldBe` Left "viewWitnessProgram: Invalid witness program"
+      viewWitnessProgram btc wsh ["", sigBytes, runPutS (serialize multisigScript)] `shouldBe` Right (P2WSH (WitnessProgramSH ["", sigBytes] multisigScript))
+      viewWitnessProgram btc (PayPKHash h) [] `shouldBe` Right EmptyWitnessProgram
+      viewWitnessProgram btc (PayPKHash h) [sigBytes] `shouldBe` Left "viewWitnessProgram: Invalid witness program"
 
     it "a witness program decodes to the input it stands for" $ do
-      decodeWitnessInput btc ctx (P2WPKH (WitnessProgramPKH sig p)) `shouldBe` Right (Nothing, SpendPKHash sig p)
-      decodeWitnessInput btc ctx (P2WSH (WitnessProgramSH ["", sigBytes] multisigScript)) `shouldBe` Right (Just multisig, SpendMulSig [sig])
-      decodeWitnessInput btc ctx (P2WSH (WitnessProgramSH [sigBytes] multisigScript)) `shouldBe` Left "decodeWitnessInput: Non-standard script output"
-      decodeWitnessInput btc ctx EmptyWitnessProgram `shouldBe` Left "decodeWitnessInput: Empty witness program"
+      decodeWitnessInput btc (P2WPKH (WitnessProgramPKH sig p)) `shouldBe` Right (Nothing, SpendPKHash sig p)
+      decodeWitnessInput btc (P2WSH (WitnessProgramSH ["", sigBytes] multisigScript)) `shouldBe` Right (Just multisig, SpendMulSig [sig])
+      decodeWitnessInput btc (P2WSH (WitnessProgramSH [sigBytes] multisigScript)) `shouldBe` Left "decodeWitnessInput: Non-standard script output"
+      decodeWitnessInput btc EmptyWitnessProgram `shouldBe` Left "decodeWitnessInput: Empty witness program"
 
     it "a witness program is computed from a standard input, native or nested" $ do
-      calcWitnessProgram btc ctx (PayWitnessPKHash h) (RegularInput (SpendPKHash sig p)) `shouldBe` Right (P2WPKH (WitnessProgramPKH sig p))
-      calcWitnessProgram btc ctx (either error id (toP2SH =<< encodeOutput ctx (PayWitnessPKHash h))) (RegularInput (SpendPKHash sig p)) `shouldBe` Right (P2WPKH (WitnessProgramPKH sig p))
-      calcWitnessProgram btc ctx wsh (ScriptHashInput (SpendMulSig [sig]) multisig) `shouldBe` Right (P2WSH (WitnessProgramSH ["", sigBytes] multisigScript))
-      calcWitnessProgram btc ctx (PayPKHash h) (RegularInput (SpendPKHash sig p)) `shouldBe` Left "calcWitnessProgram: Invalid segwit SigInput"
+      calcWitnessProgram btc (PayWitnessPKHash h) (RegularInput (SpendPKHash sig p)) `shouldBe` Right (P2WPKH (WitnessProgramPKH sig p))
+      calcWitnessProgram btc (either error id (toP2SH =<< encodeOutput (PayWitnessPKHash h))) (RegularInput (SpendPKHash sig p)) `shouldBe` Right (P2WPKH (WitnessProgramPKH sig p))
+      calcWitnessProgram btc wsh (ScriptHashInput (SpendMulSig [sig]) multisig) `shouldBe` Right (P2WSH (WitnessProgramSH ["", sigBytes] multisigScript))
+      calcWitnessProgram btc (PayPKHash h) (RegularInput (SpendPKHash sig p)) `shouldBe` Left "calcWitnessProgram: Invalid segwit SigInput"
 
 {- Genesis -}
 
@@ -1141,13 +1143,13 @@ coreSignedVectors = readTestFileParser file "core_signed_txs.json"
 
 -- These signatures were made by Bitcoin Core 32.1 on regtest, not by the
 -- library, so they check the verifier against an independent signer.
-coreSignedSpec :: Ctx -> Spec
-coreSignedSpec ctx =
+coreSignedSpec :: Spec
+coreSignedSpec =
   describe "Transactions signed by Bitcoin Core" $ do
     let verdict coinAmount (_, txHex, scriptHex, amount) = do
           tx <- decodeTx (hexBytes txHex)
-          coin <- unmarshal ctx (hexBytes scriptHex)
-          return (verifyStdTx btcRegTest ctx tx [(coin, coinAmount amount, i.outpoint) | i <- tx.inputs])
+          coin <- decodeSerial (hexBytes scriptHex)
+          return (verifyStdTx btcRegTest tx [(coin, coinAmount amount, i.outpoint) | i <- tx.inputs])
         kindOf (kind, _, _, _) = kind
         -- The kinds whose digest commits to the amount of the coin
         commitsToAmount v = any (`isPrefixOf` kindOf v) ["p2w", "p2sh-p2w", "p2tr"]
@@ -1170,31 +1172,31 @@ coreSignedSpec ctx =
 -- A 2-of-3 multisig coin of the fixed keys 1, 2 and 3, in its three forms:
 -- bare, pay-to-script-hash and pay-to-witness-script-hash. Each test gives
 -- the signature items of the input, and gets the verdict for each form.
-consensusSpec :: Ctx -> Spec
-consensusSpec ctx =
+consensusSpec :: Spec
+consensusSpec =
   describe "Verification of inputs that no block can contain" $ do
-    let (k1, p1) = fixedKey ctx 1
-        (k2, p2) = fixedKey ctx 2
-        (k3, p3) = fixedKey ctx 3
-        (k4, _) = fixedKey ctx 4
+    let (k1, p1) = fixedKey 1
+        (k2, p2) = fixedKey 2
+        (k3, p3) = fixedKey 3
+        (k4, _) = fixedKey 4
         op = coinAt 0
-        tx = buildTx ctx [op] [(PayPKHash (keyHash ctx p1), 90000)]
+        tx = buildTx [op] [(PayPKHash (keyHash p1), 90000)]
         ms = PayMulSig [p1, p2, p3] 2
-        msScript = either error id (encodeOutput ctx ms)
+        msScript = either error id (encodeOutput ms)
         -- The digest that a signature of the bare and the pay-to-script-hash
         -- form signs, and the BIP 143 digest of the witness form
         legacyDigest = either error id (txSigHash btc tx msScript 100000 0 sigHashAll)
         witnessDigest = either error id (txSigHashForkId btc tx msScript 100000 0 sigHashAll)
-        sig digest k = TxSignature (signHash ctx k.key digest) sigHashAll
+        sig digest k = TxSignature (signHash k.key digest) sigHashAll
         p2sh = either error id (toP2SH msScript)
         p2wsh = either error id (toP2WSH msScript)
-        bare items = withInputScript tx 0 (marshal (btc, ctx) (RegularInput (SpendMulSig items)))
-        hashed items = withInputScript tx 0 (marshal (btc, ctx) (ScriptHashInput (SpendMulSig items) ms))
-        inWitness items = withWitness tx [simpleInputStack btc ctx (SpendMulSig items) <> [runPutS (serialize msScript)]]
+        bare items = withInputScript tx 0 (marshal btc (RegularInput (SpendMulSig items)))
+        hashed items = withInputScript tx 0 (marshal btc (ScriptHashInput (SpendMulSig items) ms))
+        inWitness items = withWitness tx [simpleInputStack btc (SpendMulSig items) <> [runPutS (serialize msScript)]]
         verdicts itemsOf =
-          ( verifyStdInput btc ctx (bare (itemsOf legacyDigest)) [(ms, 100000, op)] 0,
-            verifyStdInput btc ctx (hashed (itemsOf legacyDigest)) [(p2sh, 100000, op)] 0,
-            verifyStdInput btc ctx (inWitness (itemsOf witnessDigest)) [(p2wsh, 100000, op)] 0
+          ( verifyStdInput btc (bare (itemsOf legacyDigest)) [(ms, 100000, op)] 0,
+            verifyStdInput btc (hashed (itemsOf legacyDigest)) [(p2sh, 100000, op)] 0,
+            verifyStdInput btc (inWitness (itemsOf witnessDigest)) [(p2wsh, 100000, op)] 0
           )
 
     it "accepts a 2-of-3 multisig input with the signatures of two of its keys, in key order" $ do
@@ -1227,121 +1229,121 @@ consensusSpec ctx =
     -- BIP 141: the input script of a nested witness program "must be
     -- exactly a push of the BIP16 redeemScript"
     it "refuses a P2SH-P2WPKH input whose script pushes the program with OP_PUSHDATA1" $ do
-      let h = keyHash ctx p1
-          coin = either error id (toP2SH =<< encodeOutput ctx (PayWitnessPKHash h))
+      let h = keyHash p1
+          coin = either error id (toP2SH =<< encodeOutput (PayWitnessPKHash h))
           sigi = SigInput (PayWitnessPKHash h) 100000 op sigHashAll Nothing
           program = B.pack [0x00, 0x14] <> runPutS (serialize h)
-      signed <- either fail return (signNestedWitnessTx btc ctx tx [sigi] [k1.key])
+      signed <- either fail return (signNestedWitnessTx btc tx [sigi] [k1.key])
       (head signed.inputs).script `shouldBe` B.singleton 0x16 <> program
-      verifyStdInput btc ctx signed [(coin, 100000, op)] 0 `shouldBe` True
-      verifyStdInput btc ctx (withInputScript signed 0 (B.pack [0x4c, 0x16] <> program)) [(coin, 100000, op)] 0 `shouldBe` False
+      verifyStdInput btc signed [(coin, 100000, op)] 0 `shouldBe` True
+      verifyStdInput btc (withInputScript signed 0 (B.pack [0x4c, 0x16] <> program)) [(coin, 100000, op)] 0 `shouldBe` False
 
     it "refuses a Taproot input that has an input script" $ do
-      let so = taprootScriptOutput ctx (TaprootOutput p1.point Nothing)
-      signed <- either fail return (signTx btc ctx tx [SigInput so 100000 op sigHashDefault Nothing] [k1.key])
-      verifyStdInput btc ctx signed [(so, 100000, op)] 0 `shouldBe` True
-      verifyStdInput btc ctx (withInputScript signed 0 "\x51") [(so, 100000, op)] 0 `shouldBe` False
+      let so = taprootScriptOutput (TaprootOutput p1.point Nothing)
+      signed <- either fail return (signTx btc tx [SigInput so 100000 op sigHashDefault Nothing] [k1.key])
+      verifyStdInput btc signed [(so, 100000, op)] 0 `shouldBe` True
+      verifyStdInput btc (withInputScript signed 0 "\x51") [(so, 100000, op)] 0 `shouldBe` False
 
     -- CheckTransaction of Bitcoin Core: bad-txns-inputs-duplicate
     it "refuses a transaction that lists the same outpoint twice" $ do
-      let h = keyHash ctx p1
-          twice = buildTx ctx [op, op] [(PayPKHash h, 90000)]
+      let h = keyHash p1
+          twice = buildTx [op, op] [(PayPKHash h, 90000)]
           sigi = SigInput (PayPKHash h) 100000 op sigHashAll Nothing
-      signed <- either fail return (signTx btc ctx twice [sigi, sigi] [k1.key])
+      signed <- either fail return (signTx btc twice [sigi, sigi] [k1.key])
       map (B.null . (.script)) signed.inputs `shouldBe` [False, False]
-      verifyStdTx btc ctx signed [(PayPKHash h, 100000, op)] `shouldBe` False
-      verifyStdTx btc ctx signed [(PayPKHash h, 100000, op), (PayPKHash h, 100000, op)] `shouldBe` False
+      verifyStdTx btc signed [(PayPKHash h, 100000, op)] `shouldBe` False
+      verifyStdTx btc signed [(PayPKHash h, 100000, op), (PayPKHash h, 100000, op)] `shouldBe` False
 
     it "refuses a transaction with no inputs and no outputs" $
-      verifyStdTx btc ctx (Tx 1 [] [] [] 0) [] `shouldBe` False
+      verifyStdTx btc (Tx 1 [] [] [] 0) [] `shouldBe` False
 
     it "accepts outputs that spend exactly what the coins hold, and refuses one satoshi more" $ do
-      let h = keyHash ctx p1
+      let h = keyHash p1
           sigi = SigInput (PayPKHash h) 100000 op sigHashAll Nothing
-          exact = buildTx ctx [op] [(PayPKHash h, 100000)]
-          over = buildTx ctx [op] [(PayPKHash h, 100001)]
-      signedExact <- either fail return (signTx btc ctx exact [sigi] [k1.key])
-      signedOver <- either fail return (signTx btc ctx over [sigi] [k1.key])
-      verifyStdTx btc ctx signedExact [(PayPKHash h, 100000, op)] `shouldBe` True
-      verifyStdTx btc ctx signedOver [(PayPKHash h, 100000, op)] `shouldBe` False
+          exact = buildTx [op] [(PayPKHash h, 100000)]
+          over = buildTx [op] [(PayPKHash h, 100001)]
+      signedExact <- either fail return (signTx btc exact [sigi] [k1.key])
+      signedOver <- either fail return (signTx btc over [sigi] [k1.key])
+      verifyStdTx btc signedExact [(PayPKHash h, 100000, op)] `shouldBe` True
+      verifyStdTx btc signedOver [(PayPKHash h, 100000, op)] `shouldBe` False
 
     -- Bitcoin Cash has no SegWit, so a witness program is no template there
     it "refuses a witness spend on a network without SegWit" $ do
-      let h = keyHash ctx p1
+      let h = keyHash p1
           forkId = setForkIdFlag sigHashAll
-          code = either error id (encodeOutput ctx (PayPKHash h))
+          code = either error id (encodeOutput (PayPKHash h))
           digest = either error id (txSigHashForkId bch tx code 100000 0 forkId)
-          stack = [encodeTxSig bch ctx (TxSignature (signHash ctx k1.key digest) forkId), marshal ctx p1]
-      verifyStdInput bch ctx (withWitness tx [stack]) [(PayWitnessPKHash h, 100000, op)] 0 `shouldBe` False
+          stack = [encodeTxSig bch (TxSignature (signHash k1.key digest) forkId), encodeSerial p1]
+      verifyStdInput bch (withWitness tx [stack]) [(PayWitnessPKHash h, 100000, op)] 0 `shouldBe` False
 
 {- A coin spent with a key or a script that is not its own -}
 
 -- In each test the thief signs the right digest of the coin with key 2, and
 -- puts key 2, or a script of key 2, where the coin commits to key 1.
-thiefSpec :: Ctx -> Spec
-thiefSpec ctx =
+thiefSpec :: Spec
+thiefSpec =
   describe "Verification of a coin spent with a key or a script that is not its own" $ do
-    let (k1, p1) = fixedKey ctx 1
-        (k2, p2) = fixedKey ctx 2
-        h1 = keyHash ctx p1
-        h2 = keyHash ctx p2
+    let (k1, p1) = fixedKey 1
+        (k2, p2) = fixedKey 2
+        h1 = keyHash p1
+        h2 = keyHash p2
         op = coinAt 0
-        tx = buildTx ctx [op] [(PayPKHash h1, 90000)]
-        script = either error id . encodeOutput ctx
+        tx = buildTx [op] [(PayPKHash h1, 90000)]
+        script = either error id . encodeOutput
         legacy code = either error id (txSigHash btc tx (script code) 100000 0 sigHashAll)
         bip143 code = either error id (txSigHashForkId btc tx (script code) 100000 0 sigHashAll)
-        sig digest k = TxSignature (signHash ctx k.key digest) sigHashAll
-        owner sigi = either error id (signTx btc ctx tx [sigi] [k1.key])
-        ownerNested sigi = either error id (signNestedWitnessTx btc ctx tx [sigi] [k1.key])
+        sig digest k = TxSignature (signHash k.key digest) sigHashAll
+        owner sigi = either error id (signTx btc tx [sigi] [k1.key])
+        ownerNested sigi = either error id (signNestedWitnessTx btc tx [sigi] [k1.key])
 
     it "refuses a P2PKH coin spent with another key" $ do
       let coin = PayPKHash h1
-          thief = withInputScript tx 0 (marshal (btc, ctx) (RegularInput (SpendPKHash (sig (legacy coin) k2) p2)))
-      verifyStdInput btc ctx (owner (SigInput coin 100000 op sigHashAll Nothing)) [(coin, 100000, op)] 0 `shouldBe` True
-      verifyStdInput btc ctx thief [(coin, 100000, op)] 0 `shouldBe` False
+          thief = withInputScript tx 0 (marshal btc (RegularInput (SpendPKHash (sig (legacy coin) k2) p2)))
+      verifyStdInput btc (owner (SigInput coin 100000 op sigHashAll Nothing)) [(coin, 100000, op)] 0 `shouldBe` True
+      verifyStdInput btc thief [(coin, 100000, op)] 0 `shouldBe` False
 
     it "refuses a P2SH coin spent with another redeem script" $ do
       let coin = either error id (toP2SH (script (PayPK p1)))
-          thief = withInputScript tx 0 (marshal (btc, ctx) (ScriptHashInput (SpendPK (sig (legacy (PayPK p2)) k2)) (PayPK p2)))
-      verifyStdInput btc ctx (owner (SigInput coin 100000 op sigHashAll (Just (PayPK p1)))) [(coin, 100000, op)] 0 `shouldBe` True
-      verifyStdInput btc ctx thief [(coin, 100000, op)] 0 `shouldBe` False
+          thief = withInputScript tx 0 (marshal btc (ScriptHashInput (SpendPK (sig (legacy (PayPK p2)) k2)) (PayPK p2)))
+      verifyStdInput btc (owner (SigInput coin 100000 op sigHashAll (Just (PayPK p1)))) [(coin, 100000, op)] 0 `shouldBe` True
+      verifyStdInput btc thief [(coin, 100000, op)] 0 `shouldBe` False
 
     it "refuses a P2WPKH coin spent with another key" $ do
       let coin = PayWitnessPKHash h1
-          thief = withWitness tx [[encodeTxSig btc ctx (sig (bip143 (PayPKHash h1)) k2), marshal ctx p2]]
-      verifyStdInput btc ctx (owner (SigInput coin 100000 op sigHashAll Nothing)) [(coin, 100000, op)] 0 `shouldBe` True
-      verifyStdInput btc ctx thief [(coin, 100000, op)] 0 `shouldBe` False
+          thief = withWitness tx [[encodeTxSig btc (sig (bip143 (PayPKHash h1)) k2), encodeSerial p2]]
+      verifyStdInput btc (owner (SigInput coin 100000 op sigHashAll Nothing)) [(coin, 100000, op)] 0 `shouldBe` True
+      verifyStdInput btc thief [(coin, 100000, op)] 0 `shouldBe` False
 
     it "refuses a P2WSH coin spent with another witness script" $ do
       let own = PayMulSig [p1] 1
           other = PayMulSig [p2] 1
           coin = either error id (toP2WSH (script own))
-          thief = withWitness tx [["", encodeTxSig btc ctx (sig (bip143 other) k2), runPutS (serialize (script other))]]
-      verifyStdInput btc ctx (owner (SigInput coin 100000 op sigHashAll (Just own))) [(coin, 100000, op)] 0 `shouldBe` True
-      verifyStdInput btc ctx thief [(coin, 100000, op)] 0 `shouldBe` False
+          thief = withWitness tx [["", encodeTxSig btc (sig (bip143 other) k2), runPutS (serialize (script other))]]
+      verifyStdInput btc (owner (SigInput coin 100000 op sigHashAll (Just own))) [(coin, 100000, op)] 0 `shouldBe` True
+      verifyStdInput btc thief [(coin, 100000, op)] 0 `shouldBe` False
 
     it "refuses a P2SH-P2WPKH coin spent with the program of another key" $ do
       let coin = either error id (toP2SH (script (PayWitnessPKHash h1)))
           thief =
             withWitness
-              (withInputScript tx 0 (marshal (btc, ctx) (NestedWitnessInput (PayWitnessPKHash h2))))
-              [[encodeTxSig btc ctx (sig (bip143 (PayPKHash h2)) k2), marshal ctx p2]]
-      verifyStdInput btc ctx (ownerNested (SigInput (PayWitnessPKHash h1) 100000 op sigHashAll Nothing)) [(coin, 100000, op)] 0 `shouldBe` True
-      verifyStdInput btc ctx thief [(coin, 100000, op)] 0 `shouldBe` False
+              (withInputScript tx 0 (marshal btc (NestedWitnessInput (PayWitnessPKHash h2))))
+              [[encodeTxSig btc (sig (bip143 (PayPKHash h2)) k2), encodeSerial p2]]
+      verifyStdInput btc (ownerNested (SigInput (PayWitnessPKHash h1) 100000 op sigHashAll Nothing)) [(coin, 100000, op)] 0 `shouldBe` True
+      verifyStdInput btc thief [(coin, 100000, op)] 0 `shouldBe` False
 
 {- What the signer refuses -}
 
-signerSpec :: Ctx -> Spec
-signerSpec ctx =
+signerSpec :: Spec
+signerSpec =
   describe "What the signer refuses" $ do
-    let (k1, p1) = fixedKey ctx 1
-        (k2, _) = fixedKey ctx 2
-        (k1u, p1u) = fixedKeyU ctx 1
-        h1 = keyHash ctx p1
+    let (k1, p1) = fixedKey 1
+        (k2, _) = fixedKey 2
+        (k1u, p1u) = fixedKeyU 1
+        h1 = keyHash p1
         op = coinAt 0
         -- Two outputs, so that SIGHASH_SINGLE has one at the index of the input
-        tx = buildTx ctx [op] [(PayPKHash h1, 50000), (PayPKHash h1, 40000)]
-        signWith net coin sh = signTx net ctx tx [SigInput coin 100000 op sh Nothing] [k1.key]
+        tx = buildTx [op] [(PayPKHash h1, 50000), (PayPKHash h1, 40000)]
+        signWith net coin sh = signTx net tx [SigInput coin 100000 op sh Nothing] [k1.key]
 
     it "signs the six hash types that a node accepts" $
       forM_ [0x01, 0x02, 0x03, 0x81, 0x82, 0x83] $ \sh -> do
@@ -1372,84 +1374,84 @@ signerSpec ctx =
       signWith bch (PayPKHash h1) 0x21 `shouldBe` Left "makeSignature: the hash type 33 is not one a node accepts"
       signed <- either fail return (signWith bch (PayPKHash h1) 0x01)
       -- The signature is the first push of the input script, and its last byte the hash type
-      fmap (\si -> case si of RegularInput (SpendPKHash (TxSignature _ sh) _) -> Just sh; _ -> Nothing) (unmarshal (bch, ctx) (head signed.inputs).script)
+      fmap (\si -> case si of RegularInput (SpendPKHash (TxSignature _ sh) _) -> Just sh; _ -> Nothing) (unmarshal bch (head signed.inputs).script)
         `shouldBe` Right (Just 0x41)
 
     it "refuses a pay-to-script-hash coin whose redeem script is over 520 bytes" $ do
-      let rdm = PayMulSig [snd (fixedKey ctx n) | n <- [1 .. 16]] 1
+      let rdm = PayMulSig [snd (fixedKey n) | n <- [1 .. 16]] 1
           -- OP_1, 16 keys of 34 bytes with their push, OP_16, OP_CHECKMULTISIG: 547 bytes
-          h = addressHash (runPutS (serialize (either error id (encodeOutput ctx rdm))))
-      signTx btc ctx tx [SigInput (PayScriptHash h) 100000 op sigHashAll (Just rdm)] [k1.key]
+          h = addressHash (runPutS (serialize (either error id (encodeOutput rdm))))
+      signTx btc tx [SigInput (PayScriptHash h) 100000 op sigHashAll (Just rdm)] [k1.key]
         `shouldBe` Left "The redeem script is 547 bytes long, and a pay-to-script-hash redeem script can have at most 520"
 
     it "refuses a pay-to-witness-script-hash coin whose witness script is over 10000 bytes" $ do
       let rdm = DataCarrier [B.replicate 10000 0]
           -- OP_RETURN, OP_PUSHDATA2 with its two length bytes, 10000 bytes: 10004
-          h = sha256 (runPutS (serialize (either error id (encodeOutput ctx rdm))))
-      makeSignature btc ctx tx 0 (SigInput (PayWitnessScriptHash h) 100000 op sigHashAll (Just rdm)) k1
+          h = sha256 (runPutS (serialize (either error id (encodeOutput rdm))))
+      makeSignature btc tx 0 (SigInput (PayWitnessScriptHash h) 100000 op sigHashAll (Just rdm)) k1
         `shouldBe` Left "The witness script is 10004 bytes long, and a pay-to-witness-script-hash witness script can have at most 10000"
 
     it "refuses a redeem script or a witness script that does not hash to the coin, and a coin without its script" $ do
       let other = "0000000000000000000000000000000000000000" :: Hash160
           other32 = "0000000000000000000000000000000000000000000000000000000000000000" :: Hash256
           rdm = PayPK p1
-      makeSignature btc ctx tx 0 (SigInput (PayScriptHash other) 100000 op sigHashAll (Just rdm)) k1
+      makeSignature btc tx 0 (SigInput (PayScriptHash other) 100000 op sigHashAll (Just rdm)) k1
         `shouldBe` Left "makeSignature: the redeem script does not hash to the coin"
-      makeSignature btc ctx tx 0 (SigInput (PayWitnessScriptHash other32) 100000 op sigHashAll (Just rdm)) k1
+      makeSignature btc tx 0 (SigInput (PayWitnessScriptHash other32) 100000 op sigHashAll (Just rdm)) k1
         `shouldBe` Left "makeSignature: the witness script does not hash to the coin"
-      makeSignature btc ctx tx 0 (SigInput (PayScriptHash other) 100000 op sigHashAll Nothing) k1
+      makeSignature btc tx 0 (SigInput (PayScriptHash other) 100000 op sigHashAll Nothing) k1
         `shouldBe` Left "makeSignature: a pay-to-script-hash coin needs its redeem script"
-      makeSignature btc ctx tx 0 (SigInput (PayWitnessScriptHash other32) 100000 op sigHashAll Nothing) k1
+      makeSignature btc tx 0 (SigInput (PayWitnessScriptHash other32) 100000 op sigHashAll Nothing) k1
         `shouldBe` Left "makeSignature: a pay-to-witness-script-hash coin needs its witness script"
 
     -- SCRIPT_VERIFY_WITNESS_PUBKEYTYPE of Bitcoin Core: no node relays a
     -- SegWit version 0 spend with an uncompressed key
     it "signTx refuses a SegWit coin of an uncompressed key, native, in a witness script or nested" $ do
-      let hu = keyHash ctx p1u
+      let hu = keyHash p1u
           refusal = Left "sigKeys: a SegWit input is signed with a compressed key only, and this coin pays to an uncompressed key"
-          wsh rdm = PayWitnessScriptHash (sha256 (runPutS (serialize (either error id (encodeOutput ctx rdm)))))
-      signTx btc ctx tx [SigInput (PayWitnessPKHash hu) 100000 op sigHashAll Nothing] [k1.key] `shouldBe` refusal
-      signNestedWitnessTx btc ctx tx [SigInput (PayWitnessPKHash hu) 100000 op sigHashAll Nothing] [k1.key] `shouldBe` refusal
-      signTx btc ctx tx [SigInput (wsh (PayPK p1u)) 100000 op sigHashAll (Just (PayPK p1u))] [k1.key] `shouldBe` refusal
-      signTx btc ctx tx [SigInput (wsh (PayMulSig [p1u] 1)) 100000 op sigHashAll (Just (PayMulSig [p1u] 1))] [k1.key] `shouldBe` refusal
+          wsh rdm = PayWitnessScriptHash (sha256 (runPutS (serialize (either error id (encodeOutput rdm)))))
+      signTx btc tx [SigInput (PayWitnessPKHash hu) 100000 op sigHashAll Nothing] [k1.key] `shouldBe` refusal
+      signNestedWitnessTx btc tx [SigInput (PayWitnessPKHash hu) 100000 op sigHashAll Nothing] [k1.key] `shouldBe` refusal
+      signTx btc tx [SigInput (wsh (PayPK p1u)) 100000 op sigHashAll (Just (PayPK p1u))] [k1.key] `shouldBe` refusal
+      signTx btc tx [SigInput (wsh (PayMulSig [p1u] 1)) 100000 op sigHashAll (Just (PayMulSig [p1u] 1))] [k1.key] `shouldBe` refusal
       -- The same key signs a legacy coin in its uncompressed form
-      signTx btc ctx tx [SigInput (PayPKHash hu) 100000 op sigHashAll Nothing] [k1.key] `shouldSatisfy` isRight
+      signTx btc tx [SigInput (PayPKHash hu) 100000 op sigHashAll Nothing] [k1.key] `shouldSatisfy` isRight
 
     -- A block accepts such a spend, so one who knows what it does can still
     -- make it, with the key in the form to use
     it "signInput signs a SegWit coin with the uncompressed key it is given" $ do
-      let hu = keyHash ctx p1u
+      let hu = keyHash p1u
           sigi = SigInput (PayWitnessPKHash hu) 100000 op sigHashAll Nothing
-      signed <- either fail return (signInput btc ctx tx 0 sigi k1u)
+      signed <- either fail return (signInput btc tx 0 sigi k1u)
       map (map B.length) signed.witness `shouldSatisfy` (\w -> map (drop 1) w == [[65]])
-      verifyStdInput btc ctx signed [(PayWitnessPKHash hu, 100000, op)] 0 `shouldBe` True
+      verifyStdInput btc signed [(PayWitnessPKHash hu, 100000, op)] 0 `shouldBe` True
 
     it "refuses to sign a SegWit or a Taproot coin on a network without SegWit" $ do
-      let so = taprootScriptOutput ctx (TaprootOutput p1.point Nothing)
+      let so = taprootScriptOutput (TaprootOutput p1.point Nothing)
       signWith bch (PayWitnessPKHash h1) sigHashAll `shouldBe` Left "makeSignature: this network has no SegWit"
-      signTx bch ctx tx [SigInput so 100000 op sigHashDefault Nothing] [k1.key] `shouldBe` Left "signTx: this network has no Taproot"
+      signTx bch tx [SigInput so 100000 op sigHashDefault Nothing] [k1.key] `shouldBe` Left "signTx: this network has no Taproot"
 
     it "signInput refuses a key that is not a key of the coin" $ do
-      signInput btc ctx tx 0 (SigInput (PayPKHash h1) 100000 op sigHashAll Nothing) k2 `shouldBe` Left "signInput: the key is not a key of the coin"
-      signInput btc ctx tx 0 (SigInput (PayWitnessPKHash h1) 100000 op sigHashAll Nothing) k2 `shouldBe` Left "signInput: the key is not a key of the coin"
-      signInput btc ctx tx 0 (SigInput (PayMulSig [p1] 1) 100000 op sigHashAll Nothing) k2 `shouldBe` Left "signInput: the key is not a key of the coin"
-      signInput btc ctx tx 0 (SigInput (PayPKHash h1) 100000 op sigHashAll Nothing) k1 `shouldSatisfy` isRight
+      signInput btc tx 0 (SigInput (PayPKHash h1) 100000 op sigHashAll Nothing) k2 `shouldBe` Left "signInput: the key is not a key of the coin"
+      signInput btc tx 0 (SigInput (PayWitnessPKHash h1) 100000 op sigHashAll Nothing) k2 `shouldBe` Left "signInput: the key is not a key of the coin"
+      signInput btc tx 0 (SigInput (PayMulSig [p1] 1) 100000 op sigHashAll Nothing) k2 `shouldBe` Left "signInput: the key is not a key of the coin"
+      signInput btc tx 0 (SigInput (PayPKHash h1) 100000 op sigHashAll Nothing) k1 `shouldSatisfy` isRight
 
     it "signTaprootInput refuses a key that is not the key of the output, and an output that is not Taproot" $ do
-      let so = taprootScriptOutput ctx (TaprootOutput p1.point Nothing)
-          spent = [TxOut 100000 (marshal ctx so)]
-          tweaked = fromJust (taprootOutputSecKey ctx k1.key Nothing)
+      let so = taprootScriptOutput (TaprootOutput p1.point Nothing)
+          spent = [TxOut 100000 (encodeSerial so)]
+          tweaked = fromJust (taprootOutputSecKey k1.key Nothing)
       -- The internal key is not the key of the output: its tweak is
-      signTaprootInput ctx tx spent 0 sigHashDefault k1.key `shouldBe` Left "signTaprootInput: the key is not the key of the output"
-      signTaprootInput ctx tx spent 0 sigHashDefault tweaked `shouldSatisfy` isRight
-      signTaprootInput ctx tx [TxOut 100000 (marshal ctx (PayWitnessPKHash h1))] 0 sigHashDefault tweaked
+      signTaprootInput tx spent 0 sigHashDefault k1.key `shouldBe` Left "signTaprootInput: the key is not the key of the output"
+      signTaprootInput tx spent 0 sigHashDefault tweaked `shouldSatisfy` isRight
+      signTaprootInput tx [TxOut 100000 (encodeSerial (PayWitnessPKHash h1))] 0 sigHashDefault tweaked
         `shouldBe` Left "signTaprootInput: the output spent is not a Taproot output"
 
     it "refuses to sign a SegWit input of a transaction whose witness list does not match its inputs" $ do
-      let two = buildTx ctx [op, coinAt 1] [(PayPKHash h1, 90000)]
+      let two = buildTx [op, coinAt 1] [(PayPKHash h1, 90000)]
           sigi = SigInput (PayWitnessPKHash h1) 100000 (coinAt 1) sigHashAll Nothing
           ms = PayMulSig [p1] 1
-          wsh = either error id (toP2WSH =<< encodeOutput ctx ms)
-      signTx btc ctx (withWitness two [[]]) [sigi] [k1.key] `shouldBe` Left "Invalid number of witness stacks"
-      signTx btc ctx (withWitness two [[]]) [SigInput wsh 100000 (coinAt 1) sigHashAll (Just ms)] [k1.key] `shouldBe` Left "Invalid number of witness stacks"
-      signTx btc ctx two [sigi] [k1.key] `shouldSatisfy` isRight
+          wsh = either error id (toP2WSH =<< encodeOutput ms)
+      signTx btc (withWitness two [[]]) [sigi] [k1.key] `shouldBe` Left "Invalid number of witness stacks"
+      signTx btc (withWitness two [[]]) [SigInput wsh 100000 (coinAt 1) sigHashAll (Just ms)] [k1.key] `shouldBe` Left "Invalid number of witness stacks"
+      signTx btc two [sigi] [k1.key] `shouldSatisfy` isRight

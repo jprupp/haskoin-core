@@ -41,7 +41,7 @@ identityTests net =
     }
 
 spec :: Spec
-spec = prepareContext $ \ctx -> do
+spec = do
   forM_ allNets $ \net -> testIdentity $ identityTests net
   describe "Address properties" $ do
     prop "encodes and decodes base58 bytestring" $
@@ -58,12 +58,12 @@ spec = prepareContext $ \ctx -> do
       -- its plain form, and the others have no script. Both have a test below.
       forAll arbitraryNetAddress $ \(net, a) ->
         not (isCashAddress a) ==>
-          (scriptToAddressBS net ctx =<< maybeToEither "no script" (addressToScriptBS ctx a))
+          (scriptToAddressBS net =<< maybeToEither "no script" (addressToScriptBS a))
             `shouldBe` Right a
     prop "an address that outputAddress gives always has a text form on that network" $
       -- The output is of a kind of any network, not only of the one asked
-      forAll ((,) <$> arbitraryNetwork <*> (arbitraryNetwork >>= \other -> arbitraryScriptOutput other ctx)) $ \(net, out) ->
-        case outputAddress net ctx out of
+      forAll ((,) <$> arbitraryNetwork <*> (arbitraryNetwork >>= \other -> arbitraryScriptOutput other)) $ \(net, out) ->
+        case outputAddress net out of
           Nothing -> property True
           Just a -> property (isJust (addrToText net a))
   describe "Address vectors" $ do
@@ -76,7 +76,7 @@ spec = prepareContext $ \ctx -> do
     it "Passes Base58Check invalid decoding vectors" $
       mapM_ testBase58ChkInvalidVector base58ChkInvalidVectors
     it "Passes addresses witness p2sh(pwpkh) vectors" $
-      mapM_ (testCompatWitnessVector ctx) compatWitnessVectors
+      mapM_ testCompatWitnessVector compatWitnessVectors
   describe "Base58" $ do
     it "decodes digits by their position in the alphabet" $
       -- 2 is digit 1 and 1 is digit 0, so 1 × 58 + 0 = 58
@@ -280,21 +280,21 @@ spec = prepareContext $ \ctx -> do
         `shouldReturn` Just Nothing
   describe "Addresses from public keys" $ do
     it "pubKeyAddr hashes a compressed key" $
-      addrToText btc (pubKeyAddr ctx (compressedKey ctx))
+      addrToText btc (pubKeyAddr compressedKey)
         `shouldBe` Just "1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH"
     it "pubKeyAddr hashes an uncompressed key in its uncompressed form" $
-      addrToText btc (pubKeyAddr ctx (uncompressedKey ctx))
+      addrToText btc (pubKeyAddr uncompressedKey)
         `shouldBe` Just "1EHNa6Q4Jz2uvNExL497mE43ikXhwF6kZm"
     it "pubKeyWitnessAddr gives the P2WPKH address of a compressed key" $
-      (addrToText btc =<< pubKeyWitnessAddr ctx (compressedKey ctx))
+      (addrToText btc =<< pubKeyWitnessAddr compressedKey)
         `shouldBe` Just "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
     it "pubKeyWitnessAddr refuses an uncompressed key" $
-      pubKeyWitnessAddr ctx (uncompressedKey ctx) `shouldBe` Nothing
+      pubKeyWitnessAddr uncompressedKey `shouldBe` Nothing
     it "pubKeyCompatWitnessAddr gives the P2SH-P2WPKH address of a compressed key" $
-      (addrToText btc =<< pubKeyCompatWitnessAddr ctx (compressedKey ctx))
+      (addrToText btc =<< pubKeyCompatWitnessAddr compressedKey)
         `shouldBe` Just "3JvL6Ymt8MVWiCNHC7oWU6nLeHNJKLZGLN"
     it "pubKeyCompatWitnessAddr refuses an uncompressed key" $
-      pubKeyCompatWitnessAddr ctx (uncompressedKey ctx) `shouldBe` Nothing
+      pubKeyCompatWitnessAddr uncompressedKey `shouldBe` Nothing
     it "p2pkhAddr, p2shAddr, p2wpkhAddr and p2wshAddr wrap a hash" $ do
       addrToText btc (p2pkhAddr hash20) `shouldBe` Just "1BpEi6DfDAUFd7GtittLSdBeYJvcoaVggu"
       addrToText btc (p2shAddr hash20) `shouldBe` Just "3CWFddi6m4ndiGyKqzYvsFYagqDLPVMTzC"
@@ -302,13 +302,13 @@ spec = prepareContext $ \ctx -> do
       addrToText btc (p2wshAddr hash32) `shouldBe` Just "bc1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3qccfmv3"
   describe "Addresses from scripts" $ do
     it "payToScriptAddress hashes the output script with HASH160" $
-      (addrToText btc <$> payToScriptAddress ctx (multisig ctx))
+      (addrToText btc <$> payToScriptAddress multisig)
         `shouldBe` Right (Just "38fEX6RbBBMmpu3nbbuULku1xyrrzqqqnE")
     it "payToWitnessScriptAddress hashes the output script with SHA256" $
-      (addrToText btc <$> payToWitnessScriptAddress ctx (multisig ctx))
+      (addrToText btc <$> payToWitnessScriptAddress multisig)
         `shouldBe` Right (Just "bc1qd6e6c86xp56gw8pty8suuqhscpttea2c5m2fggzjkxzk5nl9faks5pehxu")
     it "payToNestedScriptAddress wraps the P2WSH script in P2SH" $
-      (addrToText btc <$> payToNestedScriptAddress ctx (multisig ctx))
+      (addrToText btc <$> payToNestedScriptAddress multisig)
         `shouldBe` Right (Just "3JSuZ22mPR2aD5bf77KsGi36V5ar3p87LX")
     it "p2shP2wpkhAddr is the P2SH address of the witness program of a key hash" $
       -- The P2SH-P2WPKH example of BIP 143: redeem script 0014 79091972…,
@@ -320,72 +320,72 @@ spec = prepareContext $ \ctx -> do
     -- base58) from the script bytes, not with this library.
     it "gives the P2SH address of a 1-of-15 multisig of compressed keys" $
       -- 3 + 15 × 34 = 513 bytes, which fits the 520 bytes of a push
-      (addrToText btc <$> payToScriptAddress ctx (multisigOf ctx 15))
+      (addrToText btc <$> payToScriptAddress (multisigOf 15))
         `shouldBe` Right (Just "32vPTRtH3XPKgBxBtEoiQdGzVEZydYKduQ")
     it "has no P2SH address for a 1-of-16 multisig of compressed keys" $
       -- 3 + 16 × 34 = 547 bytes: no input can push that redeem script
-      payToScriptAddress ctx (multisigOf ctx 16)
+      payToScriptAddress (multisigOf 16)
         `shouldBe` Left "The redeem script is 547 bytes long, and a pay-to-script-hash redeem script can have at most 520"
     it "has no P2SH address for a 1-of-20 multisig of compressed keys" $
       -- 3 + 20 × 34 + 1 = 684 bytes: the count 20 takes a one-byte push
-      payToScriptAddress ctx (multisigOf ctx 20)
+      payToScriptAddress (multisigOf 20)
         `shouldBe` Left "The redeem script is 684 bytes long, and a pay-to-script-hash redeem script can have at most 520"
     it "gives the P2SH address of a redeem script of exactly 520 bytes" $
       -- OP_RETURN, the three bytes of OP_PUSHDATA2 and its length, 516 bytes
-      (addrToText btc <$> payToScriptAddress ctx (DataCarrier [B.replicate 516 0xab]))
+      (addrToText btc <$> payToScriptAddress (DataCarrier [B.replicate 516 0xab]))
         `shouldBe` Right (Just "35xAkh7KgcziTpgBWPAoXGzGDgLujKCnLL")
     it "has no P2SH address for a redeem script of 521 bytes" $
-      payToScriptAddress ctx (DataCarrier [B.replicate 517 0xab])
+      payToScriptAddress (DataCarrier [B.replicate 517 0xab])
         `shouldBe` Left "The redeem script is 521 bytes long, and a pay-to-script-hash redeem script can have at most 520"
     it "gives the P2WSH and the P2SH-P2WSH address of a 1-of-20 multisig" $ do
-      (addrToText btc <$> payToWitnessScriptAddress ctx (multisigOf ctx 20))
+      (addrToText btc <$> payToWitnessScriptAddress (multisigOf 20))
         `shouldBe` Right (Just "bc1q5yfkferfc5w4t3chd0ghw6ume447rey75v8df4z6sjrhnegv50ysg5v7a5")
-      (addrToText btc <$> payToNestedScriptAddress ctx (multisigOf ctx 20))
+      (addrToText btc <$> payToNestedScriptAddress (multisigOf 20))
         `shouldBe` Right (Just "3KHeFzKKQySyJSVTdqkkxxaMGRUCNdPfay")
     it "gives the P2WSH and the P2SH-P2WSH address of a witness script of exactly 10,000 bytes" $ do
       -- OP_RETURN, the three bytes of OP_PUSHDATA2 and its length, 9996 bytes
-      (addrToText btc <$> payToWitnessScriptAddress ctx (DataCarrier [B.replicate 9996 0xab]))
+      (addrToText btc <$> payToWitnessScriptAddress (DataCarrier [B.replicate 9996 0xab]))
         `shouldBe` Right (Just "bc1q5w9futq5wnymeh5wfrak2388u0cmup9nhkwxsq56rraaxvfy22pqrzp44n")
-      (addrToText btc <$> payToNestedScriptAddress ctx (DataCarrier [B.replicate 9996 0xab]))
+      (addrToText btc <$> payToNestedScriptAddress (DataCarrier [B.replicate 9996 0xab]))
         `shouldBe` Right (Just "34v1ZTik6F9PmGBTcXnmbHF1NfTjufPgvv")
     it "has no P2WSH and no P2SH-P2WSH address for a witness script of 10,001 bytes" $ do
-      payToWitnessScriptAddress ctx (DataCarrier [B.replicate 9997 0xab])
+      payToWitnessScriptAddress (DataCarrier [B.replicate 9997 0xab])
         `shouldBe` Left "The witness script is 10001 bytes long, and a pay-to-witness-script-hash witness script can have at most 10000"
-      payToNestedScriptAddress ctx (DataCarrier [B.replicate 9997 0xab])
+      payToNestedScriptAddress (DataCarrier [B.replicate 9997 0xab])
         `shouldBe` Left "The witness script is 10001 bytes long, and a pay-to-witness-script-hash witness script can have at most 10000"
     it "gives an error value, not an exception, for a multisig that no script can express" $ do
-      payToScriptAddress ctx (PayMulSig [compressedKey ctx, secondKey ctx] 3)
+      payToScriptAddress (PayMulSig [compressedKey, secondKey] 3)
         `shouldBe` Left "encodeOutput: multisig requires more signatures than it has keys"
-      payToScriptAddress ctx (PayMulSig [compressedKey ctx] 0)
+      payToScriptAddress (PayMulSig [compressedKey] 0)
         `shouldBe` Left "encodeOutput: multisig must require at least one signature"
-      payToWitnessScriptAddress ctx (PayMulSig [] 1)
+      payToWitnessScriptAddress (PayMulSig [] 1)
         `shouldBe` Left "encodeOutput: multisig requires more signatures than it has keys"
-      payToNestedScriptAddress ctx (PayMulSig (replicate 21 (compressedKey ctx)) 1)
+      payToNestedScriptAddress (PayMulSig (replicate 21 compressedKey) 1)
         `shouldBe` Left "encodeOutput: multisig has more than 20 keys"
   describe "addressToOutput, addressToScript and addressToScriptBS" $ do
     it "builds the locking script of every address kind" $
       forM_ scriptTable $ \(_, a, hex) ->
-        assertEqual (T.unpack hex) (Just hex) (encodeHex <$> addressToScriptBS ctx a)
+        assertEqual (T.unpack hex) (Just hex) (encodeHex <$> addressToScriptBS a)
     it "pays a token-aware address and its plain form with the same script" $ do
       let script = Just "76a91476a04053bda0a88bda5177b86a15c3b29f55987388ac"
-      (encodeHex <$> (addressToScriptBS ctx =<< textToAddr bch "bitcoincash:zpm2qsznhks23z7629mms6s4cwef74vcwvrqekrq9w"))
+      (encodeHex <$> (addressToScriptBS =<< textToAddr bch "bitcoincash:zpm2qsznhks23z7629mms6s4cwef74vcwvrqekrq9w"))
         `shouldBe` script
-      (encodeHex <$> (addressToScriptBS ctx =<< textToAddr bch "bitcoincash:qpm2qsznhks23z7629mms6s4cwef74vcwvy22gdx6a"))
+      (encodeHex <$> (addressToScriptBS =<< textToAddr bch "bitcoincash:qpm2qsznhks23z7629mms6s4cwef74vcwvy22gdx6a"))
         `shouldBe` script
     it "the script of a token-aware address has the plain address, which is another value" $ do
       -- An index keyed by address must look a token-aware address up by its
       -- script, or by its plain form
-      (scriptToAddressBS bch ctx =<< maybeToEither "no script" (addressToScriptBS ctx tokenP2pkh))
+      (scriptToAddressBS bch =<< maybeToEither "no script" (addressToScriptBS tokenP2pkh))
         `shouldBe` Right p2pkh
       tokenP2pkh `shouldNotBe` p2pkh
     it "pays a token-aware P2PKH address with the plain P2PKH script" $
-      (encodeHex <$> addressToScriptBS ctx tokenP2pkh)
+      (encodeHex <$> addressToScriptBS tokenP2pkh)
         `shouldBe` Just "76a91476a04053bda0a88bda5177b86a15c3b29f55987388ac"
     it "pays a token-aware P2SH address with the plain P2SH script" $
-      (encodeHex <$> addressToScriptBS ctx tokenP2sh)
+      (encodeHex <$> addressToScriptBS tokenP2sh)
         `shouldBe` Just "a91476a04053bda0a88bda5177b86a15c3b29f55987387"
     it "pays a token-aware P2SH32 address with the plain P2SH32 script" $
-      (encodeHex <$> addressToScriptBS ctx tokenP2sh32)
+      (encodeHex <$> addressToScriptBS tokenP2sh32)
         `shouldBe` Just "aa201863143c14c5166804bd19203356da136c985678cd4d27a1b8c632960490326287"
     it "has no script for a CashAddr type with no known script" $ do
       addressToOutput cash15 `shouldBe` Nothing
@@ -397,14 +397,14 @@ spec = prepareContext $ \ctx -> do
       addressToOutput p2tr `shouldBe` Just (PayWitness 1 hash32Bytes)
       addressToOutput tokenP2sh32 `shouldBe` Just (PayScript32Hash hash32)
     it "addressToScript gives the script AST" $
-      ((.ops) <$> addressToScript ctx p2sh)
+      ((.ops) <$> addressToScript p2sh)
         `shouldBe` Just [OP_HASH160, OP_PUSHDATA hash20Bytes OPCODE, OP_EQUAL]
   describe "outputAddress, scriptToAddress and scriptToAddressBS" $ do
     prop "reads the standard kinds by their bytes as the parser reads them" $
       -- outputs of every kind, of any network, read on any network
-      forAll ((,) <$> arbitraryNetwork <*> (arbitraryNetwork >>= \other -> arbitraryScriptOutput other ctx)) $ \(net, out) ->
-        let bytes = marshal ctx out
-         in scriptToAddressBS net ctx bytes `shouldBe` parsed ctx net bytes
+      forAll ((,) <$> arbitraryNetwork <*> (arbitraryNetwork >>= \other -> arbitraryScriptOutput other)) $ \(net, out) ->
+        let bytes = encodeSerial out
+         in scriptToAddressBS net bytes `shouldBe` parsed net bytes
     prop "reads bytes that are nearly of a standard kind as the parser reads them" $
       -- a standard script with one byte changed, or one too many or too few
       forAll ((,,) <$> arbitraryNetwork <*> elements standardShapes <*> arbitrary) $ \(net, hex, (i, w, cut)) -> do
@@ -415,69 +415,69 @@ spec = prepareContext $ \ctx -> do
               0 -> changed
               1 -> changed <> "\x00"
               _ -> B.take (B.length changed - 1) changed
-        scriptToAddressBS net ctx bytes `shouldBe` parsed ctx net bytes
+        scriptToAddressBS net bytes `shouldBe` parsed net bytes
     it "recovers the address of every standard locking script on a network that has its kind" $
       forM_ scriptTable $ \(net, a, hex) ->
-        assertEqual (T.unpack hex) (Right a) (scriptToAddressBS net ctx (fromJust (decodeHex hex)))
+        assertEqual (T.unpack hex) (Right a) (scriptToAddressBS net (fromJust (decodeHex hex)))
     it "scriptToAddress works on the script AST" $
-      (scriptToAddress btc ctx =<< runGetS deserialize (fromJust (decodeHex "76a91476a04053bda0a88bda5177b86a15c3b29f55987388ac")))
+      (scriptToAddress btc =<< runGetS deserialize (fromJust (decodeHex "76a91476a04053bda0a88bda5177b86a15c3b29f55987388ac")))
         `shouldBe` Right p2pkh
     it "has no address for a pay-to-public-key script" $
-      scriptToAddressBS btc ctx (fromJust (decodeHex p2pkScript))
+      scriptToAddressBS btc (fromJust (decodeHex p2pkScript))
         `shouldBe` Left "Could not decode address"
     it "has no address for a bare multisig script" $
-      scriptToAddressBS btc ctx (fromJust (decodeHex multisigScript))
+      scriptToAddressBS btc (fromJust (decodeHex multisigScript))
         `shouldBe` Left "Could not decode address"
     it "has no address for a data carrier script" $
-      scriptToAddressBS btc ctx (fromJust (decodeHex "6a04deadbeef"))
+      scriptToAddressBS btc (fromJust (decodeHex "6a04deadbeef"))
         `shouldBe` Left "Could not decode address"
     it "fails on a script that is not standard" $
-      scriptToAddressBS btc ctx (fromJust (decodeHex "51")) `shouldSatisfy` isLeft
+      scriptToAddressBS btc (fromJust (decodeHex "51")) `shouldSatisfy` isLeft
     it "outputAddress has no address for a pay-to-public-key output" $
-      outputAddress btc ctx (PayPK (compressedKey ctx)) `shouldBe` Nothing
+      outputAddress btc (PayPK compressedKey) `shouldBe` Nothing
     it "a script of the 256-bit script hash shape has no address on Bitcoin" $ do
       -- Output 0 of mainnet transaction a4bfa8ab…bc31b, in block 211997.
       -- Bitcoin Core reports it as non-standard, with no address.
       let puzzle = fromJust (decodeHex "aa206fe28c0ab6f1b372c1a6a246ae63f74f931e8365e15a089c68d619000000000087")
       forM_ [btc, btcTest, btcTest4, btcRegTest] $ \net ->
-        assertEqual net.name (Left "Could not decode address") (scriptToAddressBS net ctx puzzle)
+        assertEqual net.name (Left "Could not decode address") (scriptToAddressBS net puzzle)
       -- On Bitcoin Cash the same bytes are pay-to-script-hash with a 32-byte hash
-      (addrToText bch =<< eitherToMaybe (scriptToAddressBS bch ctx puzzle))
+      (addrToText bch =<< eitherToMaybe (scriptToAddressBS bch puzzle))
         `shouldBe` Just "bitcoincash:pdh79rq2kmcmxukp563ydtnr7a8ex85rvhs45zyudrtpjqqqqqqqqgss5hn0j"
     it "a witness program has no address on Bitcoin Cash" $
       forM_ [bch, bchTest, bchTest4, bchRegTest] $ \net -> do
         -- version 0 with 20 bytes, version 0 with 32 bytes, and Taproot
         assertEqual net.name (Left "Could not decode address") $
-          scriptToAddressBS net ctx (fromJust (decodeHex "001476a04053bda0a88bda5177b86a15c3b29f559873"))
+          scriptToAddressBS net (fromJust (decodeHex "001476a04053bda0a88bda5177b86a15c3b29f559873"))
         assertEqual net.name (Left "Could not decode address") $
-          scriptToAddressBS net ctx (fromJust (decodeHex "00201863143c14c5166804bd19203356da136c985678cd4d27a1b8c6329604903262"))
+          scriptToAddressBS net (fromJust (decodeHex "00201863143c14c5166804bd19203356da136c985678cd4d27a1b8c6329604903262"))
         assertEqual net.name (Left "Could not decode address") $
-          scriptToAddressBS net ctx (fromJust (decodeHex "51201863143c14c5166804bd19203356da136c985678cd4d27a1b8c6329604903262"))
+          scriptToAddressBS net (fromJust (decodeHex "51201863143c14c5166804bd19203356da136c985678cd4d27a1b8c6329604903262"))
     it "outputAddress gives an output kind an address only where the network has that kind" $ do
-      outputAddress btc ctx (PayScript32Hash hash32) `shouldBe` Nothing
-      outputAddress bch ctx (PayScript32Hash hash32) `shouldBe` Just p2sh32
-      outputAddress bch ctx (PayWitnessPKHash hash20) `shouldBe` Nothing
-      outputAddress bch ctx (PayWitnessScriptHash hash32) `shouldBe` Nothing
-      outputAddress bch ctx (PayWitness 1 hash32Bytes) `shouldBe` Nothing
-      outputAddress btc ctx (PayWitnessPKHash hash20) `shouldBe` Just p2wpkh
-      outputAddress btc ctx (PayWitness 1 hash32Bytes) `shouldBe` Just p2tr
+      outputAddress btc (PayScript32Hash hash32) `shouldBe` Nothing
+      outputAddress bch (PayScript32Hash hash32) `shouldBe` Just p2sh32
+      outputAddress bch (PayWitnessPKHash hash20) `shouldBe` Nothing
+      outputAddress bch (PayWitnessScriptHash hash32) `shouldBe` Nothing
+      outputAddress bch (PayWitness 1 hash32Bytes) `shouldBe` Nothing
+      outputAddress btc (PayWitnessPKHash hash20) `shouldBe` Just p2wpkh
+      outputAddress btc (PayWitness 1 hash32Bytes) `shouldBe` Just p2tr
     it "the address of the mainnet 256-bit hash lock script is not written as JSON, because it has none" $
       -- This is the value an indexer encodes for that output
-      marshalValue btc <$> eitherToMaybe (scriptToAddressBS btc ctx (fromJust (decodeHex "aa206fe28c0ab6f1b372c1a6a246ae63f74f931e8365e15a089c68d619000000000087")))
+      marshalValue btc <$> eitherToMaybe (scriptToAddressBS btc (fromJust (decodeHex "aa206fe28c0ab6f1b372c1a6a246ae63f74f931e8365e15a089c68d619000000000087")))
         `shouldBe` Nothing
   describe "inputAddress" $ do
     it "gives the P2PKH address of the key in a public key hash input" $
-      (addrToText btc =<< inputAddress ctx (RegularInput (SpendPKHash TxSignatureEmpty (compressedKey ctx))))
+      (addrToText btc =<< inputAddress (RegularInput (SpendPKHash TxSignatureEmpty compressedKey)))
         `shouldBe` Just "1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH"
     it "gives the P2SH address of the redeem script in a script hash input" $
-      (addrToText btc =<< inputAddress ctx (ScriptHashInput (SpendMulSig [TxSignatureEmpty]) (multisig ctx)))
+      (addrToText btc =<< inputAddress (ScriptHashInput (SpendMulSig [TxSignatureEmpty]) multisig))
         `shouldBe` Just "38fEX6RbBBMmpu3nbbuULku1xyrrzqqqnE"
     it "gives the hash of the redeem script bytes of a decoded P2SH input" $ do
       -- OP_0, an empty signature, and the push of the 37-byte redeem script
       -- 51 21 <key of private key 1> 51 ae. Its HASH160 is
       -- 83eebb7d79aa1d388e3b0ac65b98ac580c4da01a (Python, hashlib).
       let script = fromJust (decodeHex "00002551210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179851ae")
-      (addrToText btc =<< inputAddress ctx =<< eitherToMaybe (decodeInput btc ctx =<< runGetS deserialize script))
+      (addrToText btc =<< inputAddress =<< eitherToMaybe (decodeInput btc =<< runGetS deserialize script))
         `shouldBe` Just "3DicS6C8JZm59RsrgXr56iVHzYdQngiehV"
     it "gives no address for a P2SH input whose redeem script pushes its key with OP_PUSHDATA1" $ do
       -- The redeem script 51 4c 21 <key> 51 ae hashes to
@@ -485,20 +485,20 @@ spec = prepareContext $ \ctx -> do
       -- 3BUbubs2pJzko1Xg5KBVDpoRa7V3kRAsVP. Written back in the form of this
       -- library it would hash to 3DicS6C8…, an address that held no coin.
       let script = fromJust (decodeHex "000026514c210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179851ae")
-      (inputAddress ctx =<< eitherToMaybe (decodeInput btc ctx =<< runGetS deserialize script))
+      (inputAddress =<< eitherToMaybe (decodeInput btc =<< runGetS deserialize script))
         `shouldBe` Nothing
     it "has no address for a redeem script that is too long to be pushed" $
-      inputAddress ctx (ScriptHashInput (SpendMulSig [TxSignatureEmpty]) (multisigOf ctx 16))
+      inputAddress (ScriptHashInput (SpendMulSig [TxSignatureEmpty]) (multisigOf 16))
         `shouldBe` Nothing
     it "gives the P2SH address of the wrapped program in a nested witness input" $
       -- The P2SH-P2WPKH example of BIP 143: redeem script 0014 79091972…,
       -- script hash 4733f37cf4db86fbc2efed2500b4f4e49f312023.
-      (addrToText btc =<< inputAddress ctx (NestedWitnessInput (PayWitnessPKHash "79091972186c449eb1ded22b78e40d009bdf0089")))
+      (addrToText btc =<< inputAddress (NestedWitnessInput (PayWitnessPKHash "79091972186c449eb1ded22b78e40d009bdf0089")))
         `shouldBe` Just "38BW8nqpHSWpkf5sXrQd2xYwvnPJwP59ic"
     it "has no address for a pay-to-public-key input" $
-      inputAddress ctx (RegularInput (SpendPK TxSignatureEmpty)) `shouldBe` Nothing
+      inputAddress (RegularInput (SpendPK TxSignatureEmpty)) `shouldBe` Nothing
     it "has no address for a bare multisig input" $
-      inputAddress ctx (RegularInput (SpendMulSig [TxSignatureEmpty])) `shouldBe` Nothing
+      inputAddress (RegularInput (SpendMulSig [TxSignatureEmpty])) `shouldBe` Nothing
   describe "Binary serialization" $ do
     it "writes a P2PKH address as a type byte and the hash" $
       encodeHex (runPutS (serialize p2pkh))
@@ -685,27 +685,27 @@ longestCashAddr :: Text
 longestCashAddr = "bitcoincash:quqqzqsrqszsvpcgpy9qkrqdpc83qygjzv2p29shrqv35xcur50p7gppyg3jgffxyu5zj23t9skjutesxyerxdp4xcmnswf68v7r603lr3frdfp5"
 
 -- | A 1-of-n multisig of the compressed public key of private key 1.
-multisigOf :: Ctx -> Int -> ScriptOutput
-multisigOf ctx n = PayMulSig (replicate n (compressedKey ctx)) 1
+multisigOf :: Int -> ScriptOutput
+multisigOf n = PayMulSig (replicate n compressedKey) 1
 
 -- | Public key of private key 1, in both forms.
-compressedKey, uncompressedKey :: Ctx -> PublicKey
-compressedKey ctx =
-  derivePublicKey ctx . fromJust $
+compressedKey, uncompressedKey :: PublicKey
+compressedKey =
+  derivePublicKey . fromJust $
     fromWif btc "KwDiBf89QgGbjEhKnhXJuH7LrciVrZi3qYjgd9M7rFU73sVHnoWn"
-uncompressedKey ctx =
-  derivePublicKey ctx . fromJust $
+uncompressedKey =
+  derivePublicKey . fromJust $
     fromWif btc "5HpHagT65TZzG1PH3CSu63k8DbpvD8s5ip4nEB3kEsreAnchuDf"
 
 -- | Public key of private key 2.
-secondKey :: Ctx -> PublicKey
-secondKey ctx =
-  either error id . unmarshal ctx . fromJust $
+secondKey :: PublicKey
+secondKey =
+  either error id . decodeSerial . fromJust $
     decodeHex "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"
 
 -- | 1-of-2 multisig of the keys of private keys 1 and 2.
-multisig :: Ctx -> ScriptOutput
-multisig ctx = PayMulSig [compressedKey ctx, secondKey ctx] 1
+multisig :: ScriptOutput
+multisig = PayMulSig [compressedKey, secondKey] 1
 
 multisigScript :: Text
 multisigScript =
@@ -847,12 +847,12 @@ base58ChkInvalidVectors =
     ("3vQB7B6MrGQZaxCuFg4oh\00IOl", Nothing)
   ]
 
-testCompatWitnessVector :: Ctx -> (Network, Text, Text) -> Assertion
-testCompatWitnessVector ctx (net, seckey, addr) = do
+testCompatWitnessVector :: (Network, Text, Text) -> Assertion
+testCompatWitnessVector (net, seckey, addr) = do
   let seckeyM = fromWif net seckey
   assertBool "decode seckey" (isJust seckeyM)
-  let pubkey = derivePublicKey ctx (fromJust seckeyM)
-  let addrM = addrToText btcTest =<< pubKeyCompatWitnessAddr ctx pubkey
+  let pubkey = derivePublicKey (fromJust seckeyM)
+  let addrM = addrToText btcTest =<< pubKeyCompatWitnessAddr pubkey
   assertBool "address can be encoded" (isJust addrM)
   assertEqual "witness address matches" addr (fromJust addrM)
 
@@ -878,8 +878,8 @@ slowBase58 bs = T.replicate (B.length zeros) "1" <> T.pack (map (T.index alphabe
 
 -- | The address of a script as the parser reads it, which is what
 -- 'scriptToAddressBS' did for every script until haskoin-core 1.6.2.
-parsed :: Ctx -> Network -> ByteString -> Either String Address
-parsed ctx net bytes = maybeToEither "Could not decode address" . outputAddress net ctx =<< unmarshal ctx bytes
+parsed :: Network -> ByteString -> Either String Address
+parsed net bytes = maybeToEither "Could not decode address" . outputAddress net =<< decodeSerial bytes
 
 -- | The four kinds of script that 'scriptToAddressBS' reads by their bytes.
 standardShapes :: [Text]

@@ -38,8 +38,8 @@ import Test.Hspec.QuickCheck
 import Test.QuickCheck
 import Text.Read
 
-identityTests :: Ctx -> IdentityTests
-identityTests ctx =
+identityTests :: IdentityTests
+identityTests =
   def
     { readTests =
         [ ReadBox arbitrarySigHash,
@@ -47,65 +47,56 @@ identityTests ctx =
           ReadBox arbitraryScript,
           ReadBox arbitraryPushDataType,
           ReadBox arbitraryScriptOp,
-          ReadBox ((`arbitraryScriptOutput` ctx) =<< arbitraryNetwork),
-          ReadBox ((`arbitraryScriptInput` ctx) =<< arbitraryNetwork)
+          ReadBox (arbitraryScriptOutput =<< arbitraryNetwork),
+          ReadBox (arbitraryScriptInput =<< arbitraryNetwork)
         ],
       jsonTests =
         [ JsonBox arbitraryScript,
           JsonBox arbitraryOutPoint,
-          JsonBox arbitrarySigHash
+          JsonBox arbitrarySigHash,
+          JsonBox (arbitraryScriptOutput =<< arbitraryNetwork),
+          JsonBox (fst <$> (arbitrarySigInput =<< arbitraryNetwork))
         ],
       marshalJsonTests =
         [ MarshalJsonBox $ do
             n <- arbitraryNetwork
-            (_, _, ts) <- arbitraryTxSignature n ctx
-            return ((n, ctx), ts),
-          MarshalJsonBox $ do
-            n <- arbitraryNetwork
-            o <- arbitraryScriptOutput n ctx
-            return (ctx, o),
-          MarshalJsonBox $ do
-            n <- arbitraryNetwork
-            (i, _) <- arbitrarySigInput n ctx
-            return (ctx, i)
+            (_, _, ts) <- arbitraryTxSignature n
+            return (n, ts)
         ],
       serialTests =
         [ SerialBox arbitraryScriptOp,
-          SerialBox arbitraryScript
+          SerialBox arbitraryScript,
+          SerialBox (arbitraryScriptOutput =<< arbitraryNetwork)
         ],
       marshalTests =
         [ MarshalBox $ do
             n <- arbitraryNetwork
-            (_, _, ts) <- arbitraryTxSignature n ctx
-            return ((n, ctx), ts),
+            (_, _, ts) <- arbitraryTxSignature n
+            return (n, ts),
           MarshalBox $ do
             n <- arbitraryNetwork
-            o <- arbitraryScriptOutput n ctx
-            return (ctx, o),
-          MarshalBox $ do
-            n <- arbitraryNetwork
-            i <- arbitraryScriptInput n ctx
-            return ((n, ctx), i)
+            i <- arbitraryScriptInput n
+            return (n, i)
         ]
     }
 
 spec :: Spec
-spec = prepareContext $ \ctx -> do
-  testIdentity $ identityTests ctx
+spec = do
+  testIdentity $ identityTests
   describe "opcodes" opcodeSpec
   describe "push operations" pushSpec
   describe "small integer opcodes" smallIntSpec
-  describe "standard outputs" $ outputSpec ctx
-  describe "standard inputs" $ inputSpec ctx
+  describe "standard outputs" $ outputSpec
+  describe "standard inputs" $ inputSpec
   describe "sighash types" sigHashTypeSpec
-  describe "sighash digests" $ digestSpec ctx
-  describe "transaction signatures" $ txSignatureSpec ctx
-  describe "btc scripts" $ props btc ctx
-  describe "bch scripts" $ props bch ctx
+  describe "sighash digests" $ digestSpec
+  describe "transaction signatures" $ txSignatureSpec
+  describe "btc scripts" $ props btc
+  describe "bch scripts" $ props bch
   describe "multi signatures" $
-    zipWithM_ (curry (mapMulSigVector ctx)) mulSigVectors [0 ..]
+    zipWithM_ (curry mapMulSigVector) mulSigVectors [0 ..]
   describe "signature decoding" $
-    zipWithM_ (curry (sigDecodeMap btc ctx)) scriptSigSignatures [0 ..]
+    zipWithM_ (curry (sigDecodeMap btc)) scriptSigSignatures [0 ..]
   describe "Script vectors" $
     it "Can encode script vectors" encodeScriptVector
 
@@ -127,8 +118,8 @@ gUncompressedXY =
   "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\
   \483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8"
 
-gKey :: Ctx -> PublicKey
-gKey ctx = either error id $ unmarshal ctx $ hex gKeyHex
+gKey :: PublicKey
+gKey = either error id $ decodeSerial $ hex gKeyHex
 
 gHash :: Hash160
 gHash = "751e76e8199196d454941c45d1b3a323f1433bd6"
@@ -139,8 +130,8 @@ bip67KeyA, bip67KeyB :: Text
 bip67KeyA = "02ff12471208c14bd580709cb2358d98975247d8765f92bc25eab3b2763ed605f8"
 bip67KeyB = "02fe6f0a5a297eb38c391581c4413e084773ea23954d93f7753db7dc0adc188b2f"
 
-bip67Key :: Ctx -> Text -> PublicKey
-bip67Key ctx = either error id . unmarshal ctx . hex
+bip67Key :: Text -> PublicKey
+bip67Key = either error id . decodeSerial . hex
 
 -- | The 2-of-2 script of the first BIP 67 test vector, keys sorted: 71 bytes.
 bip67ScriptHex :: Text
@@ -155,8 +146,8 @@ sigDerHex =
   "304402205ca6249f43538908151fe67b26d020306c0e59fa206cf9f3ccf641f33357119d\
   \02206c82f244d04ac0a48024fb9cc246b66e58598acf206139bdb7b75a2941a2b1e4"
 
-sigDer :: Ctx -> Sig
-sigDer ctx = fromJust $ decodeStrictSig ctx $ hex sigDerHex
+sigDer :: Sig
+sigDer = fromJust $ decodeStrictSig $ hex sigDerHex
 
 -- | The signature with SIGHASH_ALL, pushed in a script.
 sigAllPushHex :: Text
@@ -365,8 +356,8 @@ pushSpec = do
       forM_ [OP_RESERVED, OP_NOP, OP_DUP, OP_CHECKSIG, OP_PUBKEYHASH, OP_INVALIDOPCODE 0xff] $ \op ->
         (op, isPushOp op) `shouldBe` (op, False)
   describe "isMinimalPush" $ do
-    it "is true for the shortest encoding of the data" $
-      forM_
+    it "is true for the shortest encoding of the data"
+      $ forM_
         [ OP_0,
           OP_1,
           OP_16,
@@ -378,9 +369,9 @@ pushSpec = do
           OP_PUSHDATA (B.replicate 256 0) OPDATA2,
           OP_PUSHDATA (B.replicate 65536 0) OPDATA4
         ]
-        $ \op -> (B.length (runPutS (serialize op)), isMinimalPush op) `shouldSatisfy` snd
-    it "is false for a longer encoding of the same data" $
-      forM_
+      $ \op -> (B.length (runPutS (serialize op)), isMinimalPush op) `shouldSatisfy` snd
+    it "is false for a longer encoding of the same data"
+      $ forM_
         [ OP_PUSHDATA "" OPCODE,
           OP_PUSHDATA "\x01" OPCODE,
           OP_PUSHDATA "\x81" OPCODE,
@@ -388,7 +379,7 @@ pushSpec = do
           OP_PUSHDATA (B.replicate 255 0) OPDATA2,
           OP_PUSHDATA (B.replicate 256 0) OPDATA4
         ]
-        $ \op -> (B.length (runPutS (serialize op)), isMinimalPush op) `shouldSatisfy` (not . snd)
+      $ \op -> (B.length (runPutS (serialize op)), isMinimalPush op) `shouldSatisfy` (not . snd)
     it "is false for an opcode that pushes nothing" $
       isMinimalPush OP_DUP `shouldBe` False
 
@@ -415,8 +406,8 @@ smallIntSpec = do
 {- Standard outputs -}
 
 -- | Standard output scripts with their decoded form: name, hex, value.
-standardOutputs :: Ctx -> [(String, Text, ScriptOutput)]
-standardOutputs ctx =
+standardOutputs :: [(String, Text, ScriptOutput)]
+standardOutputs =
   [ ("P2PK", "21" <> gKeyHex <> "ac", PayPK g),
     ("P2PKH", "76a914751e76e8199196d454941c45d1b3a323f1433bd688ac", PayPKHash gHash),
     -- The P2SH-P2WPKH example of BIP 143.
@@ -442,7 +433,7 @@ standardOutputs ctx =
     ("witness v16 of 40 bytes", "6028" <> T.replicate 40 "01", PayWitness 16 (B.replicate 40 1)),
     ("witness v1 of 2 bytes", "51020102", PayWitness 1 "\x01\x02"),
     -- The first BIP 67 test vector.
-    ("2-of-2 multisig", bip67ScriptHex, PayMulSig [bip67Key ctx bip67KeyB, bip67Key ctx bip67KeyA] 2),
+    ("2-of-2 multisig", bip67ScriptHex, PayMulSig [bip67Key bip67KeyB, bip67Key bip67KeyA] 2),
     -- 17 and 20 are one-byte pushes, as Bitcoin Core writes counts above 16.
     ( "17-of-20 multisig",
       "0111" <> T.concat (replicate 20 ("21" <> gKeyHex)) <> "0114ae",
@@ -456,7 +447,7 @@ standardOutputs ctx =
     ("OP_RETURN with OP_1NEGATE", "6a4f", DataCarrier ["\x81"])
   ]
   where
-    g = gKey ctx
+    g = gKey
     thirtyTwo = "5d1b56b63d714eebe542309525f484b7e9d6f686b3781b6f61ef925d66d6f6a0"
 
 -- | Scripts that look like a standard output but are not one: name, hex.
@@ -511,16 +502,16 @@ nonStandardOutputs =
     twenty = T.replicate 20 "ab"
     thirtyTwo = T.replicate 32 "cd"
 
-outputSpec :: Ctx -> Spec
-outputSpec ctx = do
-  let g = gKey ctx
-      decodeHexOutput = unmarshal ctx . hex :: Text -> Either String ScriptOutput
-      encodeHexOutput = fmap (encodeHex . runPutS . serialize) . encodeOutput ctx
+outputSpec :: Spec
+outputSpec = do
+  let g = gKey
+      decodeHexOutput = decodeSerial . hex :: Text -> Either String ScriptOutput
+      encodeHexOutput = fmap (encodeHex . runPutS . serialize) . encodeOutput
   it "decodes the standard output templates" $
-    forM_ (standardOutputs ctx) $ \(name, h, out) ->
+    forM_ standardOutputs $ \(name, h, out) ->
       (name, decodeHexOutput h) `shouldBe` (name, Right out)
   it "encodes the standard outputs to their templates" $
-    forM_ (standardOutputs ctx) $ \(name, h, out) ->
+    forM_ standardOutputs $ \(name, h, out) ->
       (name, encodeHexOutput out) `shouldBe` (name, Right h)
   it "rejects scripts that only look like a standard output" $
     forM_ nonStandardOutputs $ \(name, h) ->
@@ -555,22 +546,22 @@ outputSpec ctx = do
   it "has 20 as the most multisig keys" $
     maxMultisigKeys `shouldBe` 20
   it "refuses to encode a multisig that no script can express" $ do
-    encodeOutput ctx (PayMulSig [] 0) `shouldSatisfy` isLeft
-    encodeOutput ctx (PayMulSig [g] 0) `shouldSatisfy` isLeft
-    encodeOutput ctx (PayMulSig [g] 2) `shouldSatisfy` isLeft
-    encodeOutput ctx (PayMulSig (replicate 21 g) 1) `shouldSatisfy` isLeft
+    encodeOutput (PayMulSig [] 0) `shouldSatisfy` isLeft
+    encodeOutput (PayMulSig [g] 0) `shouldSatisfy` isLeft
+    encodeOutput (PayMulSig [g] 2) `shouldSatisfy` isLeft
+    encodeOutput (PayMulSig (replicate 21 g) 1) `shouldSatisfy` isLeft
   it "refuses to encode a witness program outside the versions and lengths of BIP 141" $ do
-    encodeOutput ctx (PayWitness 0 (B.replicate 20 1)) `shouldSatisfy` isLeft
-    encodeOutput ctx (PayWitness 17 (B.replicate 20 1)) `shouldSatisfy` isLeft
-    encodeOutput ctx (PayWitness 1 "\x01") `shouldSatisfy` isLeft
-    encodeOutput ctx (PayWitness 1 (B.replicate 41 1)) `shouldSatisfy` isLeft
+    encodeOutput (PayWitness 0 (B.replicate 20 1)) `shouldSatisfy` isLeft
+    encodeOutput (PayWitness 17 (B.replicate 20 1)) `shouldSatisfy` isLeft
+    encodeOutput (PayWitness 1 "\x01") `shouldSatisfy` isLeft
+    encodeOutput (PayWitness 1 (B.replicate 41 1)) `shouldSatisfy` isLeft
   it "fails with an error call when marshalling an output that cannot be encoded" $
-    evaluate (marshal ctx (PayMulSig [] 0)) `shouldThrow` anyErrorCall
+    evaluate (encodeSerial (PayMulSig [] 0)) `shouldThrow` anyErrorCall
   it "marshals an output to JSON as the hex of its script" $ do
-    marshalValue ctx (PayPKHash gHash) `shouldBe` A.String "76a914751e76e8199196d454941c45d1b3a323f1433bd688ac"
-    A.parseMaybe (unmarshalValue ctx) (A.String "76a914751e76e8199196d454941c45d1b3a323f1433bd688ac")
+    toJSON (PayPKHash gHash) `shouldBe` A.String "76a914751e76e8199196d454941c45d1b3a323f1433bd688ac"
+    A.parseMaybe parseJSON (A.String "76a914751e76e8199196d454941c45d1b3a323f1433bd688ac")
       `shouldBe` Just (PayPKHash gHash)
-    A.parseMaybe (unmarshalValue ctx) (A.String ("004c14" <> T.replicate 20 "ab"))
+    A.parseMaybe parseJSON (A.String ("004c14" <> T.replicate 20 "ab"))
       `shouldBe` (Nothing :: Maybe ScriptOutput)
   describe "toP2SH and toP2WSH" $ do
     it "hashes the redeem script of the P2SH-P2WPKH example of BIP 143" $
@@ -603,15 +594,15 @@ outputSpec ctx = do
       maxWitnessScriptSize `shouldBe` 10000
   describe "sortMulSig" $ do
     it "sorts the keys of the first BIP 67 test vector" $ do
-      let unsorted = PayMulSig [bip67Key ctx bip67KeyA, bip67Key ctx bip67KeyB] 2
-      encodeHexOutput (sortMulSig ctx unsorted) `shouldBe` Right bip67ScriptHex
-      (addrToText btc <$> payToScriptAddress ctx (sortMulSig ctx unsorted))
+      let unsorted = PayMulSig [bip67Key bip67KeyA, bip67Key bip67KeyB] 2
+      encodeHexOutput (sortMulSig unsorted) `shouldBe` Right bip67ScriptHex
+      (addrToText btc <$> payToScriptAddress (sortMulSig unsorted))
         `shouldBe` Right (Just "39bgKC7RFbpoCRbtD5KEdkYKtNyhpsNa3Z")
     it "leaves any other output unchanged" $
-      sortMulSig ctx (PayPKHash gHash) `shouldBe` PayPKHash gHash
+      sortMulSig (PayPKHash gHash) `shouldBe` PayPKHash gHash
     prop "sorts the keys by their serialized bytes" $
-      forAll (arbitraryMSOutput ctx) $ \out ->
-        let keyList = map (marshal ctx) (sortMulSig ctx out).keys
+      forAll arbitraryMSOutput $ \out ->
+        let keyList = map encodeSerial (sortMulSig out).keys
          in keyList `shouldBe` sort keyList
   it "classifies every output type with exactly its own predicate" $ do
     let samples =
@@ -649,8 +640,8 @@ outputSpec ctx = do
 {- Standard inputs -}
 
 -- | Standard input scripts with their decoded form: name, hex, value.
-standardInputs :: Ctx -> [(String, Text, ScriptInput)]
-standardInputs ctx =
+standardInputs :: [(String, Text, ScriptInput)]
+standardInputs =
   [ ("P2PK", sigAllPushHex, RegularInput (SpendPK sig)),
     ("P2PKH", sigAllPushHex <> "21" <> gKeyHex, RegularInput (SpendPKHash sig g)),
     ("2-of-n multisig", "00" <> sigAllPushHex <> sigAllPushHex, RegularInput (SpendMulSig [sig, sig])),
@@ -674,9 +665,9 @@ standardInputs ctx =
     )
   ]
   where
-    g = gKey ctx
-    sig = TxSignature (sigDer ctx) sigHashAll
-    multisig = PayMulSig [bip67Key ctx bip67KeyB, bip67Key ctx bip67KeyA] 2
+    g = gKey
+    sig = TxSignature sigDer sigHashAll
+    multisig = PayMulSig [bip67Key bip67KeyB, bip67Key bip67KeyA] 2
 
 -- | Scripts that are not a standard input: name, hex.
 nonStandardInputs :: [(String, Text)]
@@ -702,16 +693,16 @@ nonStandardInputs =
     ("a non-push opcode", "76")
   ]
 
-inputSpec :: Ctx -> Spec
-inputSpec ctx = do
-  let g = gKey ctx
-      decodeHexInput = unmarshal (btc, ctx) . hex :: Text -> Either String ScriptInput
-      encodeHexInput = encodeHex . marshal (btc, ctx)
+inputSpec :: Spec
+inputSpec = do
+  let g = gKey
+      decodeHexInput = unmarshal btc . hex :: Text -> Either String ScriptInput
+      encodeHexInput = encodeHex . marshal btc
   it "decodes the standard input scripts" $
-    forM_ (standardInputs ctx) $ \(name, h, inp) ->
+    forM_ standardInputs $ \(name, h, inp) ->
       (name, decodeHexInput h) `shouldBe` (name, Right inp)
   it "encodes the standard inputs to their scripts" $
-    forM_ (standardInputs ctx) $ \(name, h, inp) ->
+    forM_ standardInputs $ \(name, h, inp) ->
       (name, encodeHexInput inp) `shouldBe` (name, h)
   it "rejects scripts that are not a standard input" $
     forM_ nonStandardInputs $ \(name, h) ->
@@ -735,9 +726,9 @@ inputSpec ctx = do
   it "reads a single empty push as a pay-to-public-key input with an empty signature" $ do
     -- The same script is a multisig input without signatures. Without the
     -- output script, the single-signature reading is taken.
-    decodeInput btc ctx (Script [OP_0]) `shouldBe` Right (RegularInput (SpendPK TxSignatureEmpty))
-    decodeInput btc ctx (Script [OP_0, OP_0]) `shouldBe` Right (RegularInput (SpendMulSig [TxSignatureEmpty]))
-    decodeInput btc ctx (Script [OP_0, OP_0, OP_0, OP_0])
+    decodeInput btc (Script [OP_0]) `shouldBe` Right (RegularInput (SpendPK TxSignatureEmpty))
+    decodeInput btc (Script [OP_0, OP_0]) `shouldBe` Right (RegularInput (SpendMulSig [TxSignatureEmpty]))
+    decodeInput btc (Script [OP_0, OP_0, OP_0, OP_0])
       `shouldBe` Right (RegularInput (SpendMulSig (replicate 3 TxSignatureEmpty)))
   it "writes an empty signature as OP_0" $ do
     encodeHexInput (RegularInput (SpendPK TxSignatureEmpty)) `shouldBe` "00"
@@ -843,8 +834,8 @@ sigHashTypeSpec = do
 
 {- Digests -}
 
-digestSpec :: Ctx -> Spec
-digestSpec ctx = do
+digestSpec :: Spec
+digestSpec = do
   it "computes the BIP 143 digest of the P2WPKH example" $
     txSigHashForkId btc bip143Tx bip143ScriptCode bip143Value 1 sigHashAll
       `shouldBe` Right bip143Digest
@@ -863,7 +854,8 @@ digestSpec ctx = do
       `shouldBe` Right "c46030820cbc48402a47cc5b5d3d41648f4e3a711f56b804d601d09dc112a6a4"
     txSigHash btc bip143Tx bip143ScriptCode bip143Value 1 0x101
       `shouldBe` Right "8e4ac2d7b4f759fdd01de9b78a2c46fe361316f397b214c7f0f98f073128aa4c"
-  it "computes the fork id digest of Bitcoin Cash for each of its six hash types" $
+  it "computes the fork id digest of Bitcoin Cash for each of its six hash types"
+    $
     -- The fork id of Bitcoin Cash is 0, so the last four bytes of the
     -- preimage are the hash type byte and three zero bytes
     forM_
@@ -874,8 +866,8 @@ digestSpec ctx = do
         (0xc2, "e58ebfd50f957a45c5f68439e55c6ae6054a3310ff2a116efa07d2bda2527bd3"),
         (0xc3, "4e303851715b6ee36582740f43cc288c969e88afc641f14e3e8e68d32c406c1b")
       ]
-      $ \(sh, digest) ->
-        (sh, txSigHashForkId bch bip143Tx bip143ScriptCode bip143Value 1 sh) `shouldBe` (sh, Right digest)
+    $ \(sh, digest) ->
+      (sh, txSigHashForkId bch bip143Tx bip143ScriptCode bip143Value 1 sh) `shouldBe` (sh, Right digest)
   it "fails for an input index the transaction does not have" $ do
     txSigHash btc bip143Tx bip143ScriptCode bip143Value 2 sigHashAll `shouldSatisfy` isLeft
     txSigHash btc bip143Tx bip143ScriptCode bip143Value (-1) sigHashAll `shouldSatisfy` isLeft
@@ -902,87 +894,87 @@ digestSpec ctx = do
 
 {- Transaction signatures -}
 
-txSignatureSpec :: Ctx -> Spec
-txSignatureSpec ctx = do
-  let sig = sigDer ctx
+txSignatureSpec :: Spec
+txSignatureSpec = do
+  let sig = sigDer
   it "writes the signature followed by its hash type byte" $ do
-    encodeTxSig btc ctx (TxSignature sig sigHashAll) `shouldBe` hex (sigDerHex <> "01")
-    encodeTxSig btc ctx (TxSignature sig 0x81) `shouldBe` hex (sigDerHex <> "81")
-    encodeTxSig bch ctx (TxSignature sig 0x41) `shouldBe` hex (sigDerHex <> "41")
+    encodeTxSig btc (TxSignature sig sigHashAll) `shouldBe` hex (sigDerHex <> "01")
+    encodeTxSig btc (TxSignature sig 0x81) `shouldBe` hex (sigDerHex <> "81")
+    encodeTxSig bch (TxSignature sig 0x41) `shouldBe` hex (sigDerHex <> "41")
   it "writes an empty signature as the empty string" $
-    encodeTxSig btc ctx TxSignatureEmpty `shouldBe` ""
+    encodeTxSig btc TxSignatureEmpty `shouldBe` ""
   it "reads a signature with its hash type byte" $ do
-    decodeTxSig btc ctx (hex (sigDerHex <> "01")) `shouldBe` Right (TxSignature sig 0x01)
-    decodeTxSig btc ctx (hex (sigDerHex <> "82")) `shouldBe` Right (TxSignature sig 0x82)
-    decodeTxSig bch ctx (hex (sigDerHex <> "c3")) `shouldBe` Right (TxSignature sig 0xc3)
+    decodeTxSig btc (hex (sigDerHex <> "01")) `shouldBe` Right (TxSignature sig 0x01)
+    decodeTxSig btc (hex (sigDerHex <> "82")) `shouldBe` Right (TxSignature sig 0x82)
+    decodeTxSig bch (hex (sigDerHex <> "c3")) `shouldBe` Right (TxSignature sig 0xc3)
   it "reads the empty string as an empty signature" $
-    decodeTxSig btc ctx "" `shouldBe` Right TxSignatureEmpty
+    decodeTxSig btc "" `shouldBe` Right TxSignatureEmpty
   it "requires the SIGHASH_FORKID flag exactly on networks with a fork id" $ do
-    decodeTxSig btc ctx (hex (sigDerHex <> "41")) `shouldSatisfy` isLeft
-    decodeTxSig btc ctx (hex (sigDerHex <> "c1")) `shouldSatisfy` isLeft
-    decodeTxSig bch ctx (hex (sigDerHex <> "01")) `shouldSatisfy` isLeft
-    decodeTxSig bch ctx (hex (sigDerHex <> "81")) `shouldSatisfy` isLeft
+    decodeTxSig btc (hex (sigDerHex <> "41")) `shouldSatisfy` isLeft
+    decodeTxSig btc (hex (sigDerHex <> "c1")) `shouldSatisfy` isLeft
+    decodeTxSig bch (hex (sigDerHex <> "01")) `shouldSatisfy` isLeft
+    decodeTxSig bch (hex (sigDerHex <> "81")) `shouldSatisfy` isLeft
   it "rejects a hash type byte that no node accepts" $
     forM_ ["00", "04", "20", "21", "ff"] $ \sh ->
-      (sh, decodeTxSig btc ctx (hex (sigDerHex <> sh))) `shouldSatisfy` (isLeft . snd)
+      (sh, decodeTxSig btc (hex (sigDerHex <> sh))) `shouldSatisfy` (isLeft . snd)
   it "rejects a signature with a high S, the LOW_S rule of the relay policy" $ do
     -- r = 1 and s = n - 1. The encoding is strict DER, and consensus
     -- accepts it. decodeStrictSig reads it, decodeTxSig does not.
     let highS = "3026020101022100fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364140"
-    decodeTxSig btc ctx (hex (highS <> "01"))
+    decodeTxSig btc (hex (highS <> "01"))
       `shouldBe` Left "Failed reading: Non-canonical signature: S value is unnecessarily high\nEmpty call stack\n"
-    isJust (decodeStrictSig ctx (hex highS)) `shouldBe` True
+    isJust (decodeStrictSig (hex highS)) `shouldBe` True
   it "names the rule when it rejects an undefined hash type byte, the STRICTENC rule" $
-    decodeTxSig btc ctx (hex (sigDerHex <> "04"))
+    decodeTxSig btc (hex (sigDerHex <> "04"))
       `shouldBe` Left "Failed reading: Non-canonical signature: unknown hashtype byte\nEmpty call stack\n"
   it "rejects a signature whose r is padded with a zero byte, the DERSIG rule of BIP 66" $
     -- 02 02 00 01 is the integer 1 with a needless leading zero
-    decodeTxSig btc ctx (hex "300702020001020101" <> "\x01") `shouldSatisfy` isLeft
+    decodeTxSig btc (hex "300702020001020101" <> "\x01") `shouldSatisfy` isLeft
   it "rejects bytes after the hash type byte" $
-    decodeTxSig btc ctx (hex (sigDerHex <> "0101")) `shouldSatisfy` isLeft
+    decodeTxSig btc (hex (sigDerHex <> "0101")) `shouldSatisfy` isLeft
   it "rejects bytes after the hash type byte in the binary form too" $
-    (unmarshal (btc, ctx) (hex (sigDerHex <> "01deadbeef")) :: Either String TxSignature)
+    (unmarshal btc (hex (sigDerHex <> "01deadbeef")) :: Either String TxSignature)
       `shouldSatisfy` isLeft
   it "does not read a Schnorr signature on Bitcoin Cash, which this type cannot hold" $
     -- 64 bytes and the hash type byte 0x41. Bitcoin Cash Node takes a
     -- 64-byte signature as Schnorr.
-    decodeTxSig bch ctx (B.replicate 64 0x11 <> "\x41") `shouldSatisfy` isLeft
+    decodeTxSig bch (B.replicate 64 0x11 <> "\x41") `shouldSatisfy` isLeft
   it "does not read SIGHASH_UTXOS on Bitcoin Cash, which the digest does not support" $
     -- 0x61 is SIGHASH_ALL with SIGHASH_UTXOS and SIGHASH_FORKID
-    decodeTxSig bch ctx (hex (sigDerHex <> "61"))
+    decodeTxSig bch (hex (sigDerHex <> "61"))
       `shouldBe` Left "Failed reading: Non-canonical signature: unknown hashtype byte\nEmpty call stack\n"
   it "rejects a signature without a hash type byte" $
-    decodeTxSig btc ctx (hex sigDerHex) `shouldSatisfy` isLeft
+    decodeTxSig btc (hex sigDerHex) `shouldSatisfy` isLeft
   it "rejects a signature that is not strict DER" $
-    decodeTxSig btc ctx (hex ("3045022100" <> T.drop 8 sigDerHex <> "01")) `shouldSatisfy` isLeft
+    decodeTxSig btc (hex ("3045022100" <> T.drop 8 sigDerHex <> "01")) `shouldSatisfy` isLeft
   it "marshals a signature to JSON as its hex" $ do
-    marshalValue (btc, ctx) (TxSignature sig sigHashAll) `shouldBe` A.String (sigDerHex <> "01")
-    A.parseMaybe (unmarshalValue (btc, ctx)) (A.String (sigDerHex <> "01")) `shouldBe` Just (TxSignature sig sigHashAll)
-    A.parseMaybe (unmarshalValue (btc, ctx)) (A.String (sigDerHex <> "41")) `shouldBe` (Nothing :: Maybe TxSignature)
+    marshalValue btc (TxSignature sig sigHashAll) `shouldBe` A.String (sigDerHex <> "01")
+    A.parseMaybe (unmarshalValue btc) (A.String (sigDerHex <> "01")) `shouldBe` Just (TxSignature sig sigHashAll)
+    A.parseMaybe (unmarshalValue btc) (A.String (sigDerHex <> "41")) `shouldBe` (Nothing :: Maybe TxSignature)
 
 {- Per-network properties and vectors -}
 
-props :: Network -> Ctx -> Spec
-props net ctx = do
-  standardSpec net ctx
-  strictSigSpec net ctx
-  scriptSpec net ctx
+props :: Network -> Spec
+props net = do
+  standardSpec net
+  strictSigSpec net
+  scriptSpec net
   txSigHashForkIdSpec net
-  forkIdScriptSpec net ctx
-  sigHashSpec net ctx
+  forkIdScriptSpec net
+  sigHashSpec net
   txSigHashSpec net
 
-standardSpec :: Network -> Ctx -> Spec
-standardSpec net ctx = do
+standardSpec :: Network -> Spec
+standardSpec net = do
   prop "has decodeOutput . encodeOutput identity" $
-    forAll (arbitraryScriptOutput net ctx) $ \so ->
-      (decodeOutput ctx =<< encodeOutput ctx so) `shouldBe` Right so
+    forAll (arbitraryScriptOutput net) $ \so ->
+      (decodeOutput =<< encodeOutput so) `shouldBe` Right so
   prop "has decodeInput . encodeInput identity" $
-    forAll (arbitraryScriptInput net ctx) $ \si ->
-      (decodeInput net ctx . encodeInput net ctx) si `shouldBe` Right si
+    forAll (arbitraryScriptInput net) $ \si ->
+      (decodeInput net . encodeInput net) si `shouldBe` Right si
   prop "gives every encodable output a script that decodes to it" $
-    forAll (arbitraryScriptOutput net ctx) $ \so ->
-      unmarshal ctx (marshal ctx so) `shouldBe` Right so
+    forAll (arbitraryScriptOutput net) $ \so ->
+      decodeSerial (encodeSerial so) `shouldBe` Right so
 
 -- | The file @data/script_tests.json@ is not the @script_tests.json@ of
 -- Bitcoin Core, which has more than a thousand vectors for its interpreter.
@@ -1001,8 +993,8 @@ standardSpec net ctx = do
 -- * One vector, about the fork id flag, is not in Bitcoin Core.
 --
 -- So 45 vectors run: 9 valid spends and 36 refusals.
-scriptSpec :: Network -> Ctx -> Spec
-scriptSpec net ctx =
+scriptSpec :: Network -> Spec
+scriptSpec net =
   when (net.name == "btc") $
     it "verifies the 45 standard-template vectors selected from script_tests.json of Bitcoin Core" $ do
       xs <- readTestFile "script_tests.json" :: IO [A.Value]
@@ -1023,10 +1015,10 @@ scriptSpec net ctx =
       forM_ enabled $ \([val], siStr, soStr, _, res, desc) -> do
         let scriptSig = parseScript siStr
             scriptPubKey = parseScript soStr
-            out = unmarshal ctx scriptPubKey
+            out = decodeSerial scriptPubKey
             sat = val * 100000000
             tx = spendTx scriptPubKey sat scriptSig
-            ver o = verifyStdInput net ctx tx [(o, sat, (head tx.inputs).outpoint)] 0
+            ver o = verifyStdInput net tx [(o, sat, (head tx.inputs).outpoint)] 0
             valid = either (const False) ver out
         assertBool desc $ if res == "OK" then valid else not valid
         -- A vector refused for the form of its input, not for a wrong
@@ -1034,7 +1026,7 @@ scriptSpec net ctx =
         -- tells such a refusal from an unrelated one.
         when (res `elem` encodingErrors) $
           assertBool (desc <> ": the input is not in the relay form") $
-            isLeft (decodeInput net ctx =<< runGetS deserialize scriptSig)
+            isLeft (decodeInput net =<< runGetS deserialize scriptSig)
   where
     -- The results of Bitcoin Core that name a rule on the form of an input,
     -- and NONSTRICT, which this file uses for a form only consensus accepts
@@ -1048,8 +1040,8 @@ scriptSpec net ctx =
         "NONSTRICT"
       ]
 
-forkIdScriptSpec :: Network -> Ctx -> Spec
-forkIdScriptSpec net ctx =
+forkIdScriptSpec :: Network -> Spec
+forkIdScriptSpec net =
   when (isJust net.sigHashForkId) $
     it "can verify scripts from forkid_script_tests.json file" $ do
       xs <- readTestFile "forkid_script_tests.json" :: IO [A.Value]
@@ -1068,9 +1060,9 @@ forkIdScriptSpec net ctx =
         let val = valBTC * 100000000
             scriptSig = parseScript siStr
             scriptPubKey = parseScript soStr
-            out = unmarshal ctx scriptPubKey
+            out = decodeSerial scriptPubKey
             tx = spendTx scriptPubKey val scriptSig
-            ver o = verifyStdInput net ctx tx [(o, val, (head tx.inputs).outpoint)] 0
+            ver o = verifyStdInput net tx [(o, val, (head tx.inputs).outpoint)] 0
             valid = either (const False) ver out
         case res of
           "OK" -> valid `shouldBe` True
@@ -1114,8 +1106,8 @@ replaceToken str = case readMaybe $ "OP_" <> str of
   Just opcode -> "0x" <> cs (encodeHex $ runPutS $ serialize (opcode :: ScriptOp))
   _ -> str
 
-strictSigSpec :: Network -> Ctx -> Spec
-strictSigSpec net ctx =
+strictSigSpec :: Network -> Spec
+strictSigSpec net =
   when (net.name == "btc") $ do
     it "can decode strict signatures" $ do
       xs <- readTestFile "sig_strict.json"
@@ -1123,7 +1115,7 @@ strictSigSpec net ctx =
       length vectors `shouldBe` 3
       forM_ vectors $ \sig ->
         let eitherSig :: Either String TxSignature
-            eitherSig = decodeTxSig net ctx sig
+            eitherSig = decodeTxSig net sig
          in eitherSig `shouldSatisfy` isRight
     it "refuses the non-strict signatures, each for the rule its label names" $ do
       xs <- readTestFile "sig_nonstrict.json" :: IO [Text]
@@ -1133,8 +1125,8 @@ strictSigSpec net ctx =
       length labelled `shouldBe` 17
       forM_ labelled $ \(label, sig) -> do
         let name = cs label <> " " <> cs (encodeHex sig)
-            strictDer = isJust (decodeStrictSig ctx (B.init sig))
-            refusal = either id (const "accepted") (decodeTxSig net ctx sig)
+            strictDer = isJust (decodeStrictSig (B.init sig))
+            refusal = either id (const "accepted") (decodeTxSig net sig)
         case label of
           -- Strict DER, and a hash type byte that is not defined
           "hashtype:" -> do
@@ -1211,27 +1203,26 @@ txSigHashForkIdSpec net =
         res `shouldSatisfy` isJust
         eitherToMaybe (txSigHashForkId net tx s val i sh) `shouldBe` res
 
-sigHashSpec :: Network -> Ctx -> Spec
-sigHashSpec net ctx = do
+sigHashSpec :: Network -> Spec
+sigHashSpec net = do
   it "can decodeTxSig . encode a TxSignature" $
     property $
-      forAll (arbitraryTxSignature net ctx) $ \(_, _, ts) ->
-        let f = decodeTxSig net ctx . encodeTxSig net ctx
+      forAll (arbitraryTxSignature net) $ \(_, _, ts) ->
+        let f = decodeTxSig net . encodeTxSig net
          in f ts `shouldBe` Right ts
   if isNothing net.sigHashForkId
     then
       it "can produce the sighash one" $
         property $
-          forAll (arbitraryTx net ctx) $
+          forAll (arbitraryTx net) $
             forAll arbitraryScript . testSigHashOne net
-    else
-      it "never produces the sighash one, since the fork id digest has no such case" $
-        property $
-          forAll (arbitraryTx net ctx) $ \tx ->
-            forAll arbitraryScript $ \s ->
-              not (null tx.inputs) ==>
-                txSigHash net tx s 0 (length tx.inputs - 1) (setForkIdFlag sigHashSingle)
-                  `shouldSatisfy` \res -> isRight res && res /= Right sigHashOne
+    else it "never produces the sighash one, since the fork id digest has no such case" $
+      property $
+        forAll (arbitraryTx net) $ \tx ->
+          forAll arbitraryScript $ \s ->
+            not (null tx.inputs) ==>
+              txSigHash net tx s 0 (length tx.inputs - 1) (setForkIdFlag sigHashSingle)
+                `shouldSatisfy` \res -> isRight res && res /= Right sigHashOne
 
 -- | The digest that the legacy algorithm gives for SIGHASH_SINGLE without a
 -- matching output.
@@ -1253,33 +1244,33 @@ testSigHashOne net tx s val acp =
 
 {- Parse tests from bitcoin-qt repository -}
 
-mapMulSigVector :: Ctx -> ((Text, Text), Int) -> Spec
-mapMulSigVector ctx (v, i) =
-  it name $ runMulSigVector ctx v
+mapMulSigVector :: ((Text, Text), Int) -> Spec
+mapMulSigVector (v, i) =
+  it name $ runMulSigVector v
   where
     name = "check multisig vector " <> show i
 
-runMulSigVector :: Ctx -> (Text, Text) -> Assertion
-runMulSigVector ctx (a, ops) = assertBool "multisig vector" $ Just a == b
+runMulSigVector :: (Text, Text) -> Assertion
+runMulSigVector (a, ops) = assertBool "multisig vector" $ Just a == b
   where
     s = do
       s' <- decodeHex ops
       eitherToMaybe $ runGetS deserialize s'
     b = do
       o <- s
-      d <- eitherToMaybe $ decodeOutput ctx o
-      addrToText btc =<< eitherToMaybe (payToScriptAddress ctx d)
+      d <- eitherToMaybe $ decodeOutput o
+      addrToText btc =<< eitherToMaybe (payToScriptAddress d)
 
-sigDecodeMap :: Network -> Ctx -> (Text, Int) -> Spec
-sigDecodeMap net ctx (_, i) =
+sigDecodeMap :: Network -> (Text, Int) -> Spec
+sigDecodeMap net (_, i) =
   it ("check signature " ++ show i) func
   where
-    func = testSigDecode net ctx $ scriptSigSignatures !! i
+    func = testSigDecode net $ scriptSigSignatures !! i
 
-testSigDecode :: Network -> Ctx -> Text -> Assertion
-testSigDecode net ctx str =
+testSigDecode :: Network -> Text -> Assertion
+testSigDecode net str =
   let bs = fromJust $ decodeHex str
-      eitherSig = decodeTxSig net ctx bs
+      eitherSig = decodeTxSig net bs
    in assertBool
         ( unwords
             [ "Decode failed:",

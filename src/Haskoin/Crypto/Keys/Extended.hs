@@ -121,12 +121,11 @@ import Data.Aeson as Aeson
   )
 import Data.Aeson.Encoding (Encoding, string, text)
 import Data.Aeson.Types (Parser)
-import Data.Binary (Binary (get, put))
 import Data.Bifunctor (first)
+import Data.Binary (Binary (get, put))
 import Data.Bits (clearBit, setBit, testBit)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as B
-import Data.Char (isDigit)
 import Data.Bytes.Get
   ( MonadGet
       ( getByteString,
@@ -144,6 +143,7 @@ import Data.Bytes.Put
     runPutS,
   )
 import Data.Bytes.Serial (Serial (..))
+import Data.Char (isDigit)
 import Data.Either (fromRight)
 import Data.Hashable (Hashable)
 import Data.List (foldl')
@@ -210,8 +210,9 @@ data XPrvKey = XPrvKey
 -- must not reveal them. There is no 'Read' instance for the same reason:
 -- use 'xPrvExport' and 'xPrvImport' to write a key out and read it back.
 --
--- The @key@ field is a 'SecKey', whose own 'Show' instance prints the secret
--- in hex. Do not show that field by itself.
+-- The @key@ field is a 'SecKey', whose own 'Show' instance prints
+-- @SecKey \<redacted\>@ since secp256k1-haskell 3.0.0, so showing that field
+-- by itself does not reveal the secret either.
 instance Show XPrvKey where
   showsPrec d k =
     showParen (d > 10) $
@@ -268,8 +269,8 @@ data XPubKey = XPubKey
   }
   deriving (Generic, Eq, Show, Read, Hashable, NFData)
 
-instance Marshal (Network, Ctx) XPubKey where
-  marshalGet (net, ctx) = do
+instance Marshal Network XPubKey where
+  marshalGet net = do
     ver <- getWord32be
     unless (ver == net.xPubPrefix) $
       fail "Get: Invalid version for extended public key"
@@ -277,36 +278,36 @@ instance Marshal (Network, Ctx) XPubKey where
     p <- deserialize
     i <- getWord32be
     checkMasterFields d p i
-    XPubKey d p i <$> deserialize <*> getCompressedPubKey ctx
+    XPubKey d p i <$> deserialize <*> getCompressedPubKey
 
-  marshalPut (net, ctx) k = do
+  marshalPut net k = do
     putWord32be net.xPubPrefix
     putWord8 k.depth
     serialize k.parent
     putWord32be k.index
     serialize k.chain
-    marshalPut ctx $ wrapPubKey True k.key
+    serialize $ wrapPubKey True k.key
 
-instance MarshalJSON (Network, Ctx) XPubKey where
-  unmarshalValue (net, ctx) =
+instance MarshalJSON Network XPubKey where
+  unmarshalValue net =
     withText "XPubKey" $ \t ->
-      case xPubImport net ctx t of
+      case xPubImport net t of
         Nothing -> fail "could not read xpub"
         Just x -> return x
 
-  marshalValue (net, ctx) = Aeson.String . xPubExport net ctx
+  marshalValue net = Aeson.String . xPubExport net
 
-  marshalEncoding (net, ctx) = text . xPubExport net ctx
+  marshalEncoding net = text . xPubExport net
 
 -- | Read the public key of an extended key. BIP32 serializes it in 33 bytes,
 -- the compressed form. The 65-byte form is refused, so that an extended key
 -- has one binary form of 78 bytes.
-getCompressedPubKey :: (MonadGet m) => Ctx -> m PubKey
-getCompressedPubKey ctx = do
+getCompressedPubKey :: (MonadGet m) => m PubKey
+getCompressedPubKey = do
   bs <- getByteString 33
   unless (B.head bs `elem` [0x02, 0x03]) $
     fail "Extended key must hold a compressed public key"
-  case importPubKey ctx bs of
+  case importPubKey bs of
     Nothing -> fail "Extended key holds an invalid public key"
     Just k -> return k
 
@@ -344,8 +345,8 @@ makeXPrvKey bs
 -- | Derive an extended public key from an extended private key. This function
 -- will preserve the depth, parent, index and chaincode fields of the extended
 -- private keys.
-deriveXPubKey :: Ctx -> XPrvKey -> XPubKey
-deriveXPubKey ctx (XPrvKey d p i c k) = XPubKey d p i c (derivePubKey ctx k)
+deriveXPubKey :: XPrvKey -> XPubKey
+deriveXPubKey (XPrvKey d p i c k) = XPubKey d p i c (derivePubKey k)
 
 -- | Compute a private, soft child key derivation. A private soft derivation
 -- will allow the equivalent extended public key to derive the public key for
@@ -357,52 +358,50 @@ deriveXPubKey ctx (XPrvKey d p i c k) = XPubKey d p i c (derivePubKey ctx k)
 -- and one of the extended child private keys as this would compromise the
 -- extended parent private key.
 prvSubKey ::
-  Ctx ->
   -- | extended parent private key
   XPrvKey ->
   -- | child derivation index
   KeyIndex ->
   -- | extended child private key
   XPrvKey
-prvSubKey ctx xkey child = orThrow (tryPrvSubKey ctx xkey child)
+prvSubKey xkey child = orThrow (tryPrvSubKey xkey child)
 
 -- | 'prvSubKey' with its failures as an error value.
-tryPrvSubKey :: Ctx -> XPrvKey -> KeyIndex -> Either String XPrvKey
-tryPrvSubKey ctx xkey child = do
+tryPrvSubKey :: XPrvKey -> KeyIndex -> Either String XPrvKey
+tryPrvSubKey xkey child = do
   unless (child < 0x80000000) $ Left hardIndexError
   depth <- nextDepth xkey.depth
   k <-
     maybeToEither "Invalid prvSubKey derivation" $
-      tweakSecKey ctx xkey.key a
-  return $ XPrvKey depth (xPrvFP ctx xkey) child c k
+      tweakSecKey xkey.key a
+  return $ XPrvKey depth (xPrvFP xkey) child c k
   where
-    pK = (deriveXPubKey ctx xkey).key
-    m = B.append (exportPubKey ctx True pK) (runPutS (serialize child))
+    pK = (deriveXPubKey xkey).key
+    m = B.append (exportPubKey True pK) (runPutS (serialize child))
     (a, c) = split512 $ hmac512 (runPutS $ serialize xkey.chain) m
 
 -- | Compute a public, soft child key derivation. Given a parent key /M/
 -- and a derivation index /i/, this function will compute /M\/i/.
 pubSubKey ::
-  Ctx ->
   -- | extended parent public key
   XPubKey ->
   -- | child derivation index
   KeyIndex ->
   -- | extended child public key
   XPubKey
-pubSubKey ctx xKey child = orThrow (tryPubSubKey ctx xKey child)
+pubSubKey xKey child = orThrow (tryPubSubKey xKey child)
 
 -- | 'pubSubKey' with its failures as an error value.
-tryPubSubKey :: Ctx -> XPubKey -> KeyIndex -> Either String XPubKey
-tryPubSubKey ctx xKey child = do
+tryPubSubKey :: XPubKey -> KeyIndex -> Either String XPubKey
+tryPubSubKey xKey child = do
   unless (child < 0x80000000) $ Left hardIndexError
   depth <- nextDepth xKey.depth
   pK <-
     maybeToEither "Invalid pubSubKey derivation" $
-      tweakPubKey ctx xKey.key a
-  return $ XPubKey depth (xPubFP ctx xKey) child c pK
+      tweakPubKey xKey.key a
+  return $ XPubKey depth (xPubFP xKey) child c pK
   where
-    m = B.append (exportPubKey ctx True xKey.key) (runPutS $ serialize child)
+    m = B.append (exportPubKey True xKey.key) (runPutS $ serialize child)
     (a, c) = split512 $ hmac512 (runPutS $ serialize xKey.chain) m
 
 -- | Compute a hard child key derivation. Hard derivations can only be computed
@@ -412,24 +411,23 @@ tryPubSubKey ctx xKey child = do
 -- parent private key. Given a parent key /m/ and a derivation index /i/, this
 -- function will compute /m\/i'/.
 hardSubKey ::
-  Ctx ->
   -- | extended parent private key
   XPrvKey ->
   -- | child derivation index
   KeyIndex ->
   -- | extended child private key
   XPrvKey
-hardSubKey ctx xkey child = orThrow (tryHardSubKey ctx xkey child)
+hardSubKey xkey child = orThrow (tryHardSubKey xkey child)
 
 -- | 'hardSubKey' with its failures as an error value.
-tryHardSubKey :: Ctx -> XPrvKey -> KeyIndex -> Either String XPrvKey
-tryHardSubKey ctx xkey child = do
+tryHardSubKey :: XPrvKey -> KeyIndex -> Either String XPrvKey
+tryHardSubKey xkey child = do
   unless (child < 0x80000000) $ Left hardIndexError
   depth <- nextDepth xkey.depth
   k <-
     maybeToEither "Invalid hardSubKey derivation" $
-      tweakSecKey ctx xkey.key a
-  return $ XPrvKey depth (xPrvFP ctx xkey) i c k
+      tweakSecKey xkey.key a
+  return $ XPrvKey depth (xPrvFP xkey) i c k
   where
     i = setBit child 31
     m = B.append (bsPadPrvKey xkey.key) (runPutS $ serialize i)
@@ -480,70 +478,70 @@ xPubChild :: XPubKey -> KeyIndex
 xPubChild k = clearBit k.index 31
 
 -- | Computes the key identifier of an extended private key.
-xPrvID :: Ctx -> XPrvKey -> Hash160
-xPrvID ctx = xPubID ctx . deriveXPubKey ctx
+xPrvID :: XPrvKey -> Hash160
+xPrvID = xPubID . deriveXPubKey
 
 -- | Computes the key identifier of an extended public key.
-xPubID :: Ctx -> XPubKey -> Hash160
-xPubID ctx =
+xPubID :: XPubKey -> Hash160
+xPubID =
   ripemd160
     . runPutS
     . serialize
     . sha256
-    . exportPubKey ctx True
+    . exportPubKey True
     . (.key)
 
 -- | Computes the key fingerprint of an extended private key.
-xPrvFP :: Ctx -> XPrvKey -> Fingerprint
-xPrvFP ctx =
+xPrvFP :: XPrvKey -> Fingerprint
+xPrvFP =
   fromRight err
     . runGetS deserialize
     . B.take 4
     . runPutS
     . serialize
-    . xPrvID ctx
+    . xPrvID
   where
     err = error "Could not decode xPrvFP"
 
 -- | Computes the key fingerprint of an extended public key.
-xPubFP :: Ctx -> XPubKey -> Fingerprint
-xPubFP ctx =
+xPubFP :: XPubKey -> Fingerprint
+xPubFP =
   fromRight err
     . runGetS deserialize
     . B.take 4
     . runPutS
     . serialize
-    . xPubID ctx
+    . xPubID
   where
     err = error "Could not decode xPubFP"
 
 -- | Compute a standard P2PKH address for an extended public key.
-xPubAddr :: Ctx -> XPubKey -> Address
-xPubAddr ctx xkey = pubKeyAddr ctx (wrapPubKey True xkey.key)
+xPubAddr :: XPubKey -> Address
+xPubAddr xkey = pubKeyAddr (wrapPubKey True xkey.key)
 
 -- | Compute a SegWit P2WPKH address for an extended public key. Extended
 -- public keys are always compressed, so the address always exists.
-xPubWitnessAddr :: Ctx -> XPubKey -> Address
-xPubWitnessAddr ctx xkey = p2wpkhAddr (xPubKeyHash ctx xkey)
+xPubWitnessAddr :: XPubKey -> Address
+xPubWitnessAddr xkey = p2wpkhAddr (xPubKeyHash xkey)
 
 -- | Compute a backwards-compatible SegWit P2SH-P2WPKH address for an extended
 -- public key. Extended public keys are always compressed, so the address
 -- always exists.
-xPubCompatWitnessAddr :: Ctx -> XPubKey -> Address
-xPubCompatWitnessAddr ctx xkey =
-  p2shP2wpkhAddr (xPubKeyHash ctx xkey)
+xPubCompatWitnessAddr :: XPubKey -> Address
+xPubCompatWitnessAddr xkey =
+  p2shP2wpkhAddr (xPubKeyHash xkey)
 
 -- | HASH160 of the compressed public key of an extended public key.
-xPubKeyHash :: Ctx -> XPubKey -> Hash160
-xPubKeyHash ctx xkey = addressHash (marshal ctx (wrapPubKey True xkey.key))
+xPubKeyHash :: XPubKey -> Hash160
+xPubKeyHash xkey = addressHash (encodeSerial (wrapPubKey True xkey.key))
 
 -- | Exports an extended private key to the BIP32 key export format ('Base58').
 xPrvExport :: Network -> XPrvKey -> Base58
 xPrvExport net = encodeBase58Check . marshal net
 
 -- | Exports an extended public key to the BIP32 key export format ('Base58').
-xPubExport :: Network -> Ctx -> XPubKey -> Base58
-xPubExport net ctx = encodeBase58Check . marshal (net, ctx)
+xPubExport :: Network -> XPubKey -> Base58
+xPubExport net = encodeBase58Check . marshal net
 
 -- | Decodes a BIP32 encoded extended private key. This function will fail if
 -- invalid base 58 characters are detected, if the checksum fails, if the
@@ -555,9 +553,9 @@ xPrvImport net =
 -- | Decodes a BIP32 encoded extended public key. This function will fail if
 -- invalid base 58 characters are detected, if the checksum fails, if the
 -- payload is not exactly 78 bytes, or if the key fails the checks of BIP32.
-xPubImport :: Network -> Ctx -> Base58 -> Maybe XPubKey
-xPubImport net ctx =
-  eitherToMaybe . unmarshal (net, ctx) <=< decodeExtendedKey
+xPubImport :: Network -> Base58 -> Maybe XPubKey
+xPubImport net =
+  eitherToMaybe . unmarshal net <=< decodeExtendedKey
 
 -- | Size in bytes of a serialized extended key, without its checksum.
 extendedKeySize :: Int
@@ -588,66 +586,66 @@ xPrvWif net xkey = toWif net (wrapSecKey True xkey.key)
 
 -- | Cyclic list of all private soft child key derivations of a parent key
 -- starting from an offset index.
-prvSubKeys :: Ctx -> XPrvKey -> KeyIndex -> [(XPrvKey, KeyIndex)]
-prvSubKeys ctx k = map (\i -> (prvSubKey ctx k i, i)) . cycleIndex
+prvSubKeys :: XPrvKey -> KeyIndex -> [(XPrvKey, KeyIndex)]
+prvSubKeys k = map (\i -> (prvSubKey k i, i)) . cycleIndex
 
 -- | Cyclic list of all public soft child key derivations of a parent key
 -- starting from an offset index.
-pubSubKeys :: Ctx -> XPubKey -> KeyIndex -> [(XPubKey, KeyIndex)]
-pubSubKeys ctx k = map (\i -> (pubSubKey ctx k i, i)) . cycleIndex
+pubSubKeys :: XPubKey -> KeyIndex -> [(XPubKey, KeyIndex)]
+pubSubKeys k = map (\i -> (pubSubKey k i, i)) . cycleIndex
 
 -- | Cyclic list of all hard child key derivations of a parent key starting
 -- from an offset index.
-hardSubKeys :: Ctx -> XPrvKey -> KeyIndex -> [(XPrvKey, KeyIndex)]
-hardSubKeys ctx k = map (\i -> (hardSubKey ctx k i, i)) . cycleIndex
+hardSubKeys :: XPrvKey -> KeyIndex -> [(XPrvKey, KeyIndex)]
+hardSubKeys k = map (\i -> (hardSubKey k i, i)) . cycleIndex
 
 -- | Derive a standard address from an extended public key and an index.
-deriveAddr :: Ctx -> XPubKey -> KeyIndex -> (Address, PubKey)
-deriveAddr ctx k i =
-  (xPubAddr ctx key, key.key)
+deriveAddr :: XPubKey -> KeyIndex -> (Address, PubKey)
+deriveAddr k i =
+  (xPubAddr key, key.key)
   where
-    key = pubSubKey ctx k i
+    key = pubSubKey k i
 
 -- | Derive a SegWit P2WPKH address from an extended public key and an index.
-deriveWitnessAddr :: Ctx -> XPubKey -> KeyIndex -> (Address, PubKey)
-deriveWitnessAddr ctx k i =
-  (xPubWitnessAddr ctx key, key.key)
+deriveWitnessAddr :: XPubKey -> KeyIndex -> (Address, PubKey)
+deriveWitnessAddr k i =
+  (xPubWitnessAddr key, key.key)
   where
-    key = pubSubKey ctx k i
+    key = pubSubKey k i
 
 -- | Derive a backwards-compatible SegWit P2SH-P2WPKH address from an extended
 -- public key and an index.
-deriveCompatWitnessAddr :: Ctx -> XPubKey -> KeyIndex -> (Address, PubKey)
-deriveCompatWitnessAddr ctx k i =
-  (xPubCompatWitnessAddr ctx key, key.key)
+deriveCompatWitnessAddr :: XPubKey -> KeyIndex -> (Address, PubKey)
+deriveCompatWitnessAddr k i =
+  (xPubCompatWitnessAddr key, key.key)
   where
-    key = pubSubKey ctx k i
+    key = pubSubKey k i
 
 -- | Cyclic list of all addresses derived from a public key starting from an
 -- offset index.
-deriveAddrs :: Ctx -> XPubKey -> KeyIndex -> [(Address, PubKey, KeyIndex)]
-deriveAddrs ctx k =
+deriveAddrs :: XPubKey -> KeyIndex -> [(Address, PubKey, KeyIndex)]
+deriveAddrs k =
   map f . cycleIndex
   where
-    f i = let (a, key) = deriveAddr ctx k i in (a, key, i)
+    f i = let (a, key) = deriveAddr k i in (a, key, i)
 
 -- | Cyclic list of all SegWit P2WPKH addresses derived from a public key
 -- starting from an offset index.
 deriveWitnessAddrs ::
-  Ctx -> XPubKey -> KeyIndex -> [(Address, PubKey, KeyIndex)]
-deriveWitnessAddrs ctx k =
+  XPubKey -> KeyIndex -> [(Address, PubKey, KeyIndex)]
+deriveWitnessAddrs k =
   map f . cycleIndex
   where
-    f i = let (a, key) = deriveWitnessAddr ctx k i in (a, key, i)
+    f i = let (a, key) = deriveWitnessAddr k i in (a, key, i)
 
 -- | Cyclic list of all backwards-compatible SegWit P2SH-P2WPKH addresses
 -- derived from a public key starting from an offset index.
 deriveCompatWitnessAddrs ::
-  Ctx -> XPubKey -> KeyIndex -> [(Address, PubKey, KeyIndex)]
-deriveCompatWitnessAddrs ctx k =
+  XPubKey -> KeyIndex -> [(Address, PubKey, KeyIndex)]
+deriveCompatWitnessAddrs k =
   map f . cycleIndex
   where
-    f i = let (a, key) = deriveCompatWitnessAddr ctx k i in (a, key, i)
+    f i = let (a, key) = deriveCompatWitnessAddr k i in (a, key, i)
 
 -- | Derive a pay-to-script-hash multisig address from a list of public keys,
 -- the number of required signatures /m/ and a derivation index. The
@@ -661,32 +659,31 @@ deriveCompatWitnessAddrs ctx k =
 -- spent. For 16 to 20 keys, build a pay-to-witness-script-hash address from
 -- the redeem script with 'payToWitnessScriptAddress'.
 deriveMSAddr ::
-  Ctx -> [XPubKey] -> Int -> KeyIndex -> Either String (Address, RedeemScript)
-deriveMSAddr ctx keys m i = do
-  addr <- payToScriptAddress ctx rdm
+  [XPubKey] -> Int -> KeyIndex -> Either String (Address, RedeemScript)
+deriveMSAddr keys m i = do
+  addr <- payToScriptAddress rdm
   return (addr, rdm)
   where
-    rdm = sortMulSig ctx $ PayMulSig k m
-    k = map (wrapPubKey True . (.key) . flip (pubSubKey ctx) i) keys
+    rdm = sortMulSig $ PayMulSig k m
+    k = map (wrapPubKey True . (.key) . flip pubSubKey i) keys
 
 -- | Cyclic list of all multisig addresses derived from a list of public keys,
 -- a number of required signatures /m/ and starting from an offset index. The
 -- derivation type is a public, soft derivation. Fails as 'deriveMSAddr' does.
 deriveMSAddrs ::
-  Ctx ->
   [XPubKey] ->
   Int ->
   KeyIndex ->
   Either String [(Address, RedeemScript, KeyIndex)]
-deriveMSAddrs ctx keys m start = do
+deriveMSAddrs keys m start = do
   -- Whether an address can be made depends on the number of keys and on m,
   -- not on the index. One check therefore covers the whole list, which stays
   -- lazy and endless.
-  _ <- deriveMSAddr ctx keys m start
+  _ <- deriveMSAddr keys m start
   return
     [ (a, rdm, i)
-      | i <- cycleIndex start,
-        Right (a, rdm) <- [deriveMSAddr ctx keys m i]
+    | i <- cycleIndex start,
+      Right (a, rdm) <- [deriveMSAddr keys m i]
     ]
 
 -- | Helper function to go through derivation indices. Throws
@@ -917,35 +914,35 @@ toGeneric p = case p of
 -- 'DerivationException' when the path cannot be followed, for example when it
 -- leads below depth 255. Use 'tryDerivePath' for a path that comes from
 -- outside, such as the path of a PSBT record.
-derivePath :: Ctx -> DerivPathI t -> XPrvKey -> XPrvKey
-derivePath ctx path = orThrow . tryDerivePath ctx path
+derivePath :: DerivPathI t -> XPrvKey -> XPrvKey
+derivePath path = orThrow . tryDerivePath path
 
 -- | Derive a public key from a soft derivation path. Throws
 -- 'DerivationException' when the path cannot be followed. Use
 -- 'tryDerivePubPath' for a path that comes from outside.
-derivePubPath :: Ctx -> SoftPath -> XPubKey -> XPubKey
-derivePubPath ctx path = orThrow . tryDerivePubPath ctx path
+derivePubPath :: SoftPath -> XPubKey -> XPubKey
+derivePubPath path = orThrow . tryDerivePubPath path
 
 -- | Derive a private key from a derivation path, with an error value when the
 -- path cannot be followed. BIP32 stores the depth of a key in one byte, so a
 -- path that leads below depth 255 has no key. That is checked before any key
 -- is derived, so a path that is far too long costs nothing.
-tryDerivePath :: Ctx -> DerivPathI t -> XPrvKey -> Either String XPrvKey
-tryDerivePath ctx path key = do
+tryDerivePath :: DerivPathI t -> XPrvKey -> Either String XPrvKey
+tryDerivePath path key = do
   checkPathDepth key.depth steps
   foldM step key steps
   where
     steps = pathSteps path
     step k (hard, i)
-      | hard = tryHardSubKey ctx k i
-      | otherwise = tryPrvSubKey ctx k i
+      | hard = tryHardSubKey k i
+      | otherwise = tryPrvSubKey k i
 
 -- | Derive a public key from a soft derivation path, with an error value when
 -- the path cannot be followed. See 'tryDerivePath'.
-tryDerivePubPath :: Ctx -> SoftPath -> XPubKey -> Either String XPubKey
-tryDerivePubPath ctx path key = do
+tryDerivePubPath :: SoftPath -> XPubKey -> Either String XPubKey
+tryDerivePubPath path key = do
   checkPathDepth key.depth steps
-  foldM (tryPubSubKey ctx) key (map snd steps)
+  foldM tryPubSubKey key (map snd steps)
   where
     steps = pathSteps path
 
@@ -1187,59 +1184,57 @@ data XKey
 -- path starts with /M/, a public key will be returned. Private derivations on a
 -- public key, public derivations with a hard segment, and a path that leads
 -- below depth 255 return an error value. The function does not throw.
-applyPath :: Ctx -> ParsedPath -> XKey -> Either String XKey
-applyPath ctx path key =
+applyPath :: ParsedPath -> XKey -> Either String XKey
+applyPath path key =
   first ("applyPath: " <>) $
     case (path, key) of
       (ParsedPrv _, XPrv k n) -> (`XPrv` n) <$> derivePrv k
       (ParsedPrv _, XPub {}) -> Left "Invalid public key"
-      (ParsedPub _, XPrv k n) -> (`XPub` n) . deriveXPubKey ctx <$> derivePrv k
+      (ParsedPub _, XPrv k n) -> (`XPub` n) . deriveXPubKey <$> derivePrv k
       (ParsedPub _, XPub k n) -> (`XPub` n) <$> derivePub k
       -- For empty parsed paths, we take a hint from the provided key
       (ParsedEmpty _, XPrv k n) -> (`XPrv` n) <$> derivePrv k
       (ParsedEmpty _, XPub k n) -> (`XPub` n) <$> derivePub k
   where
-    derivePrv = tryDerivePath ctx path.get
+    derivePrv = tryDerivePath path.get
     derivePub k = do
       soft <- maybeToEither "Invalid hard derivation" (toSoft path.get)
-      tryDerivePubPath ctx soft k
+      tryDerivePubPath soft k
 
 {- Helpers for derivation paths and addresses -}
 
 -- | Derive an address from a given parent path.
-derivePathAddr :: Ctx -> XPubKey -> SoftPath -> KeyIndex -> (Address, PubKey)
-derivePathAddr ctx key path = deriveAddr ctx (derivePubPath ctx path key)
+derivePathAddr :: XPubKey -> SoftPath -> KeyIndex -> (Address, PubKey)
+derivePathAddr key path = deriveAddr (derivePubPath path key)
 
 -- | Cyclic list of all addresses derived from a given parent path and starting
 -- from the given offset index.
 derivePathAddrs ::
-  Ctx -> XPubKey -> SoftPath -> KeyIndex -> [(Address, PubKey, KeyIndex)]
-derivePathAddrs ctx key path = deriveAddrs ctx (derivePubPath ctx path key)
+  XPubKey -> SoftPath -> KeyIndex -> [(Address, PubKey, KeyIndex)]
+derivePathAddrs key path = deriveAddrs (derivePubPath path key)
 
 -- | Derive a multisig address from a given parent path. The number of required
 -- signatures (m in m of n) is also needed. Fails as 'deriveMSAddr' does.
 derivePathMSAddr ::
-  Ctx ->
   [XPubKey] ->
   SoftPath ->
   Int ->
   KeyIndex ->
   Either String (Address, RedeemScript)
-derivePathMSAddr ctx keys path =
-  deriveMSAddr ctx $ map (derivePubPath ctx path) keys
+derivePathMSAddr keys path =
+  deriveMSAddr $ map (derivePubPath path) keys
 
 -- | Cyclic list of all multisig addresses derived from a given parent path and
 -- starting from the given offset index. The number of required signatures
 -- (m in m of n) is also needed. Fails as 'deriveMSAddr' does.
 derivePathMSAddrs ::
-  Ctx ->
   [XPubKey] ->
   SoftPath ->
   Int ->
   KeyIndex ->
   Either String [(Address, RedeemScript, KeyIndex)]
-derivePathMSAddrs ctx keys path =
-  deriveMSAddrs ctx $ map (derivePubPath ctx path) keys
+derivePathMSAddrs keys path =
+  deriveMSAddrs $ map (derivePubPath path) keys
 
 {- Utilities for extended keys -}
 

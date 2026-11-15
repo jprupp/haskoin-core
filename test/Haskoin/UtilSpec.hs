@@ -9,7 +9,6 @@
 module Haskoin.UtilSpec (spec) where
 
 import Control.Exception (ErrorCall, evaluate)
-import System.Timeout (timeout)
 import Control.Monad.Except (ExceptT, runExceptT)
 import Data.Aeson
 import Data.Aeson.Encoding (encodingToLazyByteString)
@@ -18,10 +17,9 @@ import Data.ByteString qualified as B
 import Data.ByteString.Builder (byteStringHex, lazyByteStringHex, toLazyByteString)
 import Data.ByteString.Lazy qualified as BL
 import Data.ByteString.Short qualified as SBS
-import Data.Text.Encoding qualified as TE
-import Data.Text.Lazy.Encoding qualified as TLE
 import Data.Bytes.Get
 import Data.Bytes.Put
+import Data.Bytes.Serial (deserialize, serialize)
 import Data.Default (def)
 import Data.Either (isLeft)
 import Data.Foldable (toList)
@@ -31,11 +29,15 @@ import Data.List (isInfixOf, permutations)
 import Data.Maybe
 import Data.Sequence qualified as Seq
 import Data.Serialize qualified as S
+import Data.Text.Encoding qualified as TE
+import Data.Text.Lazy.Encoding qualified as TLE
 import Data.Word (Word8)
 import GHC.Generics (Generic)
 import Haskoin.Crypto
+import Haskoin.Network.Constants (btc)
 import Haskoin.Util
 import Haskoin.Util.Arbitrary
+import System.Timeout (timeout)
 import Test.Hspec
 import Test.Hspec.QuickCheck
 import Test.QuickCheck
@@ -68,7 +70,7 @@ instance FromJSON Shape where
   parseJSON = genericParseJSON (dropSumLabels 1 2 "type")
 
 spec :: Spec
-spec = prepareContext $ \ctx ->
+spec =
   describe "utility functions" $ do
     testIdentity identityTests
 
@@ -313,22 +315,36 @@ spec = prepareContext $ \ctx ->
 
     describe "Marshalling" $ do
       let key = fromJust (secKey (B.replicate 32 1))
-          public = PublicKey (derivePubKey ctx key) True
+          public = PublicKey (derivePubKey key) True
+          xprv = makeXPrvKey (B.replicate 32 1)
       it "marshal and unmarshal round trip, strict and lazy" $ do
-        unmarshal ctx (marshal ctx public) `shouldBe` Right public
-        unmarshalLazy ctx (marshalLazy ctx public) `shouldBe` Right public
-        (unmarshalLazy ctx "junk" :: Either String PublicKey) `shouldSatisfy` isLeft
+        unmarshal btc (marshal btc xprv) `shouldBe` Right xprv
+        unmarshalLazy btc (marshalLazy btc xprv) `shouldBe` Right xprv
+        (unmarshalLazy btc "junk" :: Either String XPrvKey) `shouldSatisfy` isLeft
       it "unmarshal refuses bytes after the value, strict and lazy" $ do
+        let bytes = marshal btc xprv <> "\xff"
+        (unmarshal btc bytes :: Either String XPrvKey)
+          `shouldSatisfy` either ("bytes left over" `isInfixOf`) (const False)
+        (unmarshalLazy btc (BL.fromStrict bytes) :: Either String XPrvKey)
+          `shouldSatisfy` either ("bytes left over" `isInfixOf`) (const False)
+      it "encodeSerial and decodeSerial round trip" $ do
+        decodeSerial (encodeSerial public) `shouldBe` Right public
+        encodeSerial public `shouldBe` runPutS (serialize public)
+        (decodeSerial "junk" :: Either String PublicKey) `shouldSatisfy` isLeft
+      it "decodeSerial refuses bytes after the value, which deserialize leaves" $ do
         -- the compressed public key of secret key 1, then one more byte
         let bytes = fromJust (decodeHex "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ff")
-        (unmarshal ctx bytes :: Either String PublicKey)
+        (decodeSerial bytes :: Either String PublicKey)
           `shouldSatisfy` either ("bytes left over" `isInfixOf`) (const False)
-        (unmarshalLazy ctx (BL.fromStrict bytes) :: Either String PublicKey)
-          `shouldSatisfy` either ("bytes left over" `isInfixOf`) (const False)
+        fmap encodeSerial (runGetS deserialize bytes :: Either String PublicKey) `shouldBe` Right (B.init bytes)
       it "marshalJSON and unmarshalJSON round trip, and refuse what is not the value" $ do
-        unmarshalJSON ctx (marshalJSON ctx public) `shouldBe` Just public
-        (unmarshalJSON ctx "\"junk\"" :: Maybe PublicKey) `shouldBe` Nothing
-        (unmarshalJSON ctx "{" :: Maybe PublicKey) `shouldBe` Nothing
+        unmarshalJSON btc (marshalJSON btc xprv) `shouldBe` Just xprv
+        (unmarshalJSON btc "\"junk\"" :: Maybe XPrvKey) `shouldBe` Nothing
+        (unmarshalJSON btc "{" :: Maybe XPrvKey) `shouldBe` Nothing
+      it "the JSON of a public key round trips, and refuses what is not the value" $ do
+        decode (encode public) `shouldBe` Just public
+        (decode "\"junk\"" :: Maybe PublicKey) `shouldBe` Nothing
+        (decode "{" :: Maybe PublicKey) `shouldBe` Nothing
 
     describe "Test helpers" $ do
       it "customCerealID tells whether a getter reads what a putter writes" $ do

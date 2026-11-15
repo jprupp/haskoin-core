@@ -641,7 +641,10 @@ generateSharesWith scheme identifier ext iterExponent passphrase secret randoms 
     (g : ms) | length ms == groupCount -> Right (g, ms)
     _ ->
       Left $
-        "A scheme of " <> show groupCount <> " groups takes " <> show (groupCount + 1)
+        "A scheme of "
+          <> show groupCount
+          <> " groups takes "
+          <> show (groupCount + 1)
           <> " sets of random values: one for the split among the groups, then one per group"
   groupShares <- splitSecret scheme.groupThreshold groupCount ems.ciphertext groupRandom
   forM (zip3 scheme.groups groupShares memberRandoms) $ \((threshold, members), (gi, groupSecret), random) -> do
@@ -658,7 +661,7 @@ generateSharesWith scheme identifier ext iterExponent passphrase secret randoms 
             memberThreshold = threshold,
             value = v
           }
-        | (mi, v) <- memberShares
+      | (mi, v) <- memberShares
       ]
   where
     groupCount = length scheme.groups

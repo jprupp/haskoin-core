@@ -524,11 +524,12 @@ varIntSize n
 -- transaction with either, and so does 'verifyStdTx' for the second.
 --
 -- Nothing is added for change: what the outputs do not spend is the fee.
-buildAddrTx :: Network -> Ctx -> [OutPoint] -> [(Text, Word64)] -> Either String Tx
-buildAddrTx net ctx ops rcps = do
+buildAddrTx :: Network -> [OutPoint] -> [(Text, Word64)] -> Either String Tx
+buildAddrTx net ops rcps = do
   when (any ((> net.maxSatoshi) . snd) rcps) $
-    Left $ "buildAddrTx: An amount is above the maximum of " <> show net.maxSatoshi <> " satoshi"
-  buildTx ctx ops <$> mapM f rcps
+    Left $
+      "buildAddrTx: An amount is above the maximum of " <> show net.maxSatoshi <> " satoshi"
+  buildTx ops <$> mapM f rcps
   where
     f (aTxt, v) =
       maybeToEither ("buildAddrTx: Invalid address " <> cs aTxt) $ do
@@ -540,12 +541,12 @@ buildAddrTx net ctx ops rcps = do
 -- and a list of 'ScriptOutput' and amounts as outputs. It has no network
 -- to check against, so it builds what it is given, whatever the amounts.
 -- 'buildAddrTx' refuses an amount above the maximum of its network.
-buildTx :: Ctx -> [OutPoint] -> [(ScriptOutput, Word64)] -> Tx
-buildTx ctx ops rcpts =
+buildTx :: [OutPoint] -> [(ScriptOutput, Word64)] -> Tx
+buildTx ops rcpts =
   Tx 1 (toIn <$> ops) (toOut <$> rcpts) [] 0
   where
     toIn op = TxIn op B.empty maxBound
-    toOut (o, v) = TxOut v $ marshal ctx o
+    toOut (o, v) = TxOut v $ encodeSerial o
 
 -- | Sign a transaction by providing the 'SigInput' signing parameters and a
 -- list of private keys. The signature is computed deterministically as defined
@@ -579,15 +580,14 @@ buildTx ctx ops rcpts =
 -- Example: P2WPKH
 --
 -- > sigIn = SigInput (PayWitnessPKHash h) 100000 op sigHashAll Nothing
--- > signedTx = signTx btc ctx unsignedTx [sigIn] [key]
+-- > signedTx = signTx btc unsignedTx [sigIn] [key]
 --
 -- Example: P2SH-P2WSH multisig
 --
 -- > sigIn = SigInput (PayWitnessScriptHash h) 100000 op sigHashAll (Just $ PayMulSig [p1,p2,p3] 2)
--- > signedTx = signNestedWitnessTx btc ctx unsignedTx [sigIn] [k1,k3]
+-- > signedTx = signNestedWitnessTx btc unsignedTx [sigIn] [k1,k3]
 signTx ::
   Network ->
-  Ctx ->
   -- | transaction to sign
   Tx ->
   -- | signing parameters
@@ -596,7 +596,7 @@ signTx ::
   [SecKey] ->
   -- | signed transaction
   Either String Tx
-signTx net ctx tx si = Sign.signTx net ctx tx $ notNested <$> si
+signTx net tx si = Sign.signTx net tx $ notNested <$> si
   where
     notNested s = (s, False)
 
@@ -604,7 +604,6 @@ signTx net ctx tx si = Sign.signTx net ctx tx $ notNested <$> si
 -- P2SH-nested.  Use the same signing parameters for segwit inputs as in 'signTx'.
 signNestedWitnessTx ::
   Network ->
-  Ctx ->
   -- | transaction to sign
   Tx ->
   -- | signing parameters
@@ -613,7 +612,7 @@ signNestedWitnessTx ::
   [SecKey] ->
   -- | signed transaction
   Either String Tx
-signNestedWitnessTx net ctx tx si = Sign.signTx net ctx tx $ nested <$> si
+signNestedWitnessTx net tx si = Sign.signTx net tx $ nested <$> si
   where
     -- NOTE: the nesting flag is ignored for non-segwit inputs
     nested s = (s, True)
@@ -622,15 +621,15 @@ signNestedWitnessTx net ctx tx si = Sign.signTx net ctx tx $ nested <$> si
 -- Taproot input is signed with 'signTaprootInput' instead, since its
 -- digest needs the output every input spends.
 signInput ::
-  Network -> Ctx -> Tx -> Int -> SigInput -> PrivateKey -> Either String Tx
-signInput net ctx tx i si =
-  Sign.signInput net ctx tx i (si, False)
+  Network -> Tx -> Int -> SigInput -> PrivateKey -> Either String Tx
+signInput net tx i si =
+  Sign.signInput net tx i (si, False)
 
 -- | Like 'signInput' but treat segwit inputs as nested
 signNestedInput ::
-  Network -> Ctx -> Tx -> Int -> SigInput -> PrivateKey -> Either String Tx
-signNestedInput net ctx tx i si =
-  Sign.signInput net ctx tx i (si, True)
+  Network -> Tx -> Int -> SigInput -> PrivateKey -> Either String Tx
+signNestedInput net tx i si =
+  Sign.signInput net tx i (si, True)
 
 -- | Order the 'SigInput' with respect to the transaction inputs. This allows
 -- the user to provide the 'SigInput' in any order. Users can also provide only
@@ -648,16 +647,15 @@ findSigInput = Sign.findInputIndex (.outpoint)
 -- signers took their copies stays signed.
 mergeTxs ::
   Network ->
-  Ctx ->
   [Tx] ->
   [(ScriptOutput, Word64, OutPoint)] ->
   Either String Tx
-mergeTxs net ctx txs os = case txs of
+mergeTxs net txs os = case txs of
   [] -> Left "Transaction list is empty"
   [tx] -> return tx
   tx : _
     | length (nub emptyTxs) /= 1 -> Left "Transactions do not match"
-    | otherwise -> foldM (mergeTxInput net ctx txs) (clearAll tx) (outs tx)
+    | otherwise -> foldM (mergeTxInput net txs) (clearAll tx) (outs tx)
   where
     zipOp tx = zip (matchTemplate os tx.inputs f) [0 ..]
     outs tx =
@@ -678,12 +676,11 @@ mergeTxs net ctx txs os = case txs of
 -- is kept.
 mergeTxInput ::
   Network ->
-  Ctx ->
   [Tx] ->
   Tx ->
   ((ScriptOutput, Word64), Int) ->
   Either String Tx
-mergeTxInput net ctx txs tx ((so, val), i) = do
+mergeTxInput net txs tx ((so, val), i) = do
   when (i < 0 || any ((<= i) . length . (.inputs)) (tx : txs)) $
     Left "mergeTxInput: input index out of range"
   -- Ignore transactions with empty inputs
@@ -693,7 +690,7 @@ mergeTxInput net ctx txs tx ((so, val), i) = do
     [] -> return tx
     (_, rdm) : _ -> do
       unless (all ((== rdm) . snd) sigRes) $ Left "Redeem scripts do not match"
-      si <- marshal (net, ctx) <$> go (nub $ concatMap fst sigRes) so rdm
+      si <- marshal net <$> go (nub $ concatMap fst sigRes) so rdm
       let ins' = updateIndex i tx.inputs (\TxIn {..} -> TxIn {script = si, ..})
       return $ Tx tx.version ins' tx.outputs tx.witness tx.locktime
   where
@@ -714,15 +711,15 @@ mergeTxInput net ctx txs tx ((so, val), i) = do
             _ -> Left "Invalid output script type"
         _ -> Left "Invalid output script type"
     extractSigs si =
-      case unmarshal (net, ctx) si of
+      case unmarshal net si of
         Right (RegularInput (SpendMulSig sigs)) ->
           Right (sigs, Nothing)
         Right (ScriptHashInput (SpendMulSig sigs) rdm) ->
           Right (sigs, Just rdm)
         _ -> Left "Invalid script input type"
     f out (TxSignature x sh) p =
-      either (const False) (\h -> verifyHashSig ctx h x p.point) $
-        encodeOutput ctx out >>= \s -> txSigHash net tx s val i sh
+      either (const False) (\h -> verifyHashSig h x p.point) $
+        encodeOutput out >>= \s -> txSigHash net tx s val i sh
     f _ TxSignatureEmpty _ = False
 
 {- Tx verification -}
@@ -739,15 +736,15 @@ mergeTxInput net ctx txs tx ((so, val), i) = do
 -- other script, valid or not. For those kinds it follows consensus: it
 -- does not answer 'True' for an input that no block can contain.
 verifyStdTx ::
-  Network -> Ctx -> Tx -> [(ScriptOutput, Word64, OutPoint)] -> Bool
-verifyStdTx net ctx tx coins =
+  Network -> Tx -> [(ScriptOutput, Word64, OutPoint)] -> Bool
+verifyStdTx net tx coins =
   not (null tx.inputs)
     && Map.size (Map.fromList [(i.outpoint, ()) | i <- tx.inputs]) == length tx.inputs
-    && all (verifyInput net ctx tx spent) [0 .. length tx.inputs - 1]
+    && all (verifyInput net tx spent) [0 .. length tx.inputs - 1]
     && maybe False (\outs -> toSpend <= sum (map (toInteger . snd) outs)) (sequence spent.coins)
   where
     -- The coins are looked up once for the whole transaction
-    spent = spentCoins ctx tx coins
+    spent = spentCoins tx coins
     toSpend = sum (map (toInteger . (.value)) tx.outputs)
 
 -- | The coin of each input of a transaction, and the outputs that the
@@ -760,11 +757,11 @@ data SpentCoins = SpentCoins
     outputs :: Maybe [TxOut]
   }
 
-spentCoins :: Ctx -> Tx -> [(ScriptOutput, Word64, OutPoint)] -> SpentCoins
-spentCoins ctx tx given =
+spentCoins :: Tx -> [(ScriptOutput, Word64, OutPoint)] -> SpentCoins
+spentCoins tx given =
   SpentCoins
     { coins = found,
-      outputs = map (\(so, val) -> TxOut val (marshal ctx so)) <$> sequence found
+      outputs = map (\(so, val) -> TxOut val (encodeSerial so)) <$> sequence found
     }
   where
     -- The first coin given for an outpoint is its coin
@@ -810,12 +807,12 @@ spentCoins ctx tx given =
 --
 -- An uncompressed key in a SegWit input is accepted, since a block may
 -- hold it, although nodes do not relay it.
-verifyStdInput :: Network -> Ctx -> Tx -> [(ScriptOutput, Word64, OutPoint)] -> Int -> Bool
-verifyStdInput net ctx tx coins = verifyInput net ctx tx (spentCoins ctx tx coins)
+verifyStdInput :: Network -> Tx -> [(ScriptOutput, Word64, OutPoint)] -> Int -> Bool
+verifyStdInput net tx coins = verifyInput net tx (spentCoins tx coins)
 
 -- | 'verifyStdInput' on coins that are looked up already
-verifyInput :: Network -> Ctx -> Tx -> SpentCoins -> Int -> Bool
-verifyInput net ctx tx spent i
+verifyInput :: Network -> Tx -> SpentCoins -> Int -> Bool
+verifyInput net tx spent i
   | i < 0 || i >= length tx.inputs = False
   | otherwise = case spent.coins !! i of
       Nothing -> False
@@ -827,16 +824,16 @@ verifyInput net ctx tx spent i
         | otherwise ->
             or $
               rights
-                [ (\si -> null ws && verifyLegacyInput so0 val si) <$> unmarshal (net, ctx) inp,
+                [ (\si -> null ws && verifyLegacyInput so0 val si) <$> unmarshal net inp,
                   nestedScriptOutput >>= \so -> verifyNestedInput so0 so val <$> wp so
                 ]
   where
     inp = (tx.inputs !! i).script
-    theTxSigHash so val = Sign.makeSigHash net ctx tx i so val
+    theTxSigHash so val = Sign.makeSigHash net tx i so val
 
     -- A signature verifies only when its digest could be computed.
     checkSig :: Either String Hash256 -> Sig -> PubKey -> Bool
-    checkSig h sig pub = either (const False) (\m -> verifyHashSig ctx m sig pub) h
+    checkSig h sig pub = either (const False) (\m -> verifyHashSig m sig pub) h
 
     ws :: WitnessStack
     ws
@@ -844,14 +841,14 @@ verifyInput net ctx tx spent i
       | otherwise = []
 
     wp :: ScriptOutput -> Either String (Maybe ScriptOutput, SimpleInput)
-    wp so = decodeWitnessInput net ctx =<< viewWitnessProgram net ctx so ws
+    wp so = decodeWitnessInput net =<< viewWitnessProgram net so ws
 
     -- The witness program of an input script that is its push and nothing
     -- else, on a network that has SegWit
     nestedScriptOutput :: Either String ScriptOutput
-    nestedScriptOutput = case unmarshal (net, ctx) inp of
+    nestedScriptOutput = case unmarshal net inp of
       Right (NestedWitnessInput so)
-        | net.segWit && inp == marshal (net, ctx) (NestedWitnessInput so) -> Right so
+        | net.segWit && inp == marshal net (NestedWitnessInput so) -> Right so
       _ -> Left "nestedScriptOutput: not a nested output"
 
     -- OP_CHECKMULTISIG takes the signatures the script requires from the
@@ -863,20 +860,20 @@ verifyInput net ctx tx spent i
     multisigVerifies :: (SigHash -> Either String Hash256) -> [PubKey] -> Int -> [TxSignature] -> Bool
     multisigVerifies hashfun pubs r sigs =
       -- With exactly r items, r of them verify only when none is empty
-      length sigs == r && countMulSig' ctx hashfun pubs sigs == r
+      length sigs == r && countMulSig' hashfun pubs sigs == r
 
     verifyLegacyInput :: ScriptOutput -> Word64 -> ScriptInput -> Bool
     verifyLegacyInput so val si = case (so, si) of
       (PayPK pub, RegularInput (SpendPK (TxSignature sig sh))) ->
         checkSig (theTxSigHash so val sh Nothing) sig pub.point
       (PayPKHash h, RegularInput (SpendPKHash (TxSignature sig sh) pub)) ->
-        pubKeyAddr ctx pub == p2pkhAddr h
+        pubKeyAddr pub == p2pkhAddr h
           && checkSig (theTxSigHash so val sh Nothing) sig pub.point
       (PayMulSig pubs r, RegularInput (SpendMulSig sigs)) ->
         either (const False) (\out -> multisigVerifies (txSigHash net tx out val i) ((.point) <$> pubs) r sigs) $
-          encodeOutput ctx so
+          encodeOutput so
       (PayScriptHash h, ScriptHashInput si' rdm) ->
-        payToScriptAddress ctx rdm == Right (p2shAddr h) && verifyLegacyInput rdm val (RegularInput si')
+        payToScriptAddress rdm == Right (p2shAddr h) && verifyLegacyInput rdm val (RegularInput si')
       _ -> False
 
     verifySegwitInput ::
@@ -888,7 +885,7 @@ verifyInput net ctx tx spent i
         ) ->
           -- Compare the key hash only. An uncompressed key is non-standard
           -- here but still valid by consensus, so verification accepts it.
-          let keytest = pubKeyAddr ctx pub == p2pkhAddr h
+          let keytest = pubKeyAddr pub == p2pkhAddr h
               sighash = theTxSigHash so val sh Nothing
               pkpoint = pub.point
               verify = checkSig sighash sig pkpoint
@@ -897,7 +894,7 @@ verifyInput net ctx tx spent i
         Just rdm'@(PayPK pub),
         SpendPK (TxSignature sig sh)
         ) ->
-          let keytest = payToWitnessScriptAddress ctx rdm' == Right (p2wshAddr h)
+          let keytest = payToWitnessScriptAddress rdm' == Right (p2wshAddr h)
               sighash = theTxSigHash so val sh $ Just rdm'
               pkpoint = pub.point
               verify = checkSig sighash sig pkpoint
@@ -906,8 +903,8 @@ verifyInput net ctx tx spent i
         Just rdm'@(PayPKHash kh),
         SpendPKHash (TxSignature sig sh) pub
         ) ->
-          let keytest = payToWitnessScriptAddress ctx rdm' == Right (p2wshAddr h)
-              addrtest = addressHash (marshal ctx pub) == kh
+          let keytest = payToWitnessScriptAddress rdm' == Right (p2wshAddr h)
+              addrtest = addressHash (encodeSerial pub) == kh
               pkpoint = pub.point
               sighash = theTxSigHash so val sh $ Just rdm'
               verify = checkSig sighash sig pkpoint
@@ -916,7 +913,7 @@ verifyInput net ctx tx spent i
         Just rdm'@(PayMulSig pubs r),
         SpendMulSig sigs
         ) ->
-          let keytest = payToWitnessScriptAddress ctx rdm' == Right (p2wshAddr h)
+          let keytest = payToWitnessScriptAddress rdm' == Right (p2wshAddr h)
               pkpoints = (.point) <$> pubs
               hashfun sh = theTxSigHash so val sh $ Just rdm'
               verify = multisigVerifies hashfun pkpoints r sigs
@@ -926,13 +923,13 @@ verifyInput net ctx tx spent i
     verifyNestedInput ::
       ScriptOutput -> ScriptOutput -> Word64 -> (Maybe RedeemScript, SimpleInput) -> Bool
     verifyNestedInput so so' val x = case so of
-      PayScriptHash h -> payToScriptAddress ctx so' == Right (p2shAddr h) && verifySegwitInput so' val x
+      PayScriptHash h -> payToScriptAddress so' == Right (p2shAddr h) && verifySegwitInput so' val x
       _ -> False
 
     verifyTaprootInput :: ScriptOutput -> Bool
     verifyTaprootInput so = fromRight False $ do
       outKey <- case so of
-        PayWitness 1 program -> maybe (Left "not an output key") Right (importXOnlyPubKey ctx program)
+        PayWitness 1 program -> maybe (Left "not an output key") Right (importXOnlyPubKey program)
         _ -> Left "not a Taproot output"
       -- The outputs every input spends, in order, which the Taproot digest
       -- commits to
@@ -941,16 +938,16 @@ verifyInput net ctx tx spent i
             TaprootSignature sig sh <- decodeTaprootSig sigBytes
             h <- taprootSigHash tx spentOutputs i sh annex leaf
             return (sig, h)
-      case viewTaprootWitness ctx ws of
+      case viewTaprootWitness ws of
         Just (KeyPathSpend sigBytes annex) -> do
           (sig, h) <- schnorr sigBytes annex Nothing
-          return (verifySchnorr ctx outKey sig (hashToMsg h))
+          return (verifySchnorr outKey sig (hashToMsg h))
         Just (ScriptPathSpend spd) -> case (spd.script.ops, spd.stack) of
           ([OP_PUSHDATA keyBytes OPCODE, OP_CHECKSIG], [sigBytes])
             | spd.leafVersion == tapscriptLeafVersion -> do
-                leafKey <- maybe (Left "not an x-only key") Right (importXOnlyPubKey ctx keyBytes)
+                leafKey <- maybe (Left "not an x-only key") Right (importXOnlyPubKey keyBytes)
                 (sig, h) <- schnorr sigBytes spd.annex (Just (leafHash spd.leafVersion spd.script, 0xffffffff))
-                return (verifyScriptPathData ctx outKey spd && verifySchnorr ctx leafKey sig (hashToMsg h))
+                return (verifyScriptPathData outKey spd && verifySchnorr leafKey sig (hashToMsg h))
           -- The multisig of Taproot, @multi_a@ of the output descriptors:
           -- a key and OP_CHECKSIG, then a key and OP_CHECKSIGADD for each
           -- other key, the number of signatures asked for, and
@@ -966,13 +963,13 @@ verifyInput net ctx tx spent i
                     signs keyBytes sigBytes
                       | B.null sigBytes = Right False
                       | otherwise = do
-                          key <- maybe (Left "not an x-only key") Right (importXOnlyPubKey ctx keyBytes)
+                          key <- maybe (Left "not an x-only key") Right (importXOnlyPubKey keyBytes)
                           (sig, h) <- schnorr sigBytes spd.annex leaf
-                          if verifySchnorr ctx key sig (hashToMsg h)
+                          if verifySchnorr key sig (hashToMsg h)
                             then Right True
                             else Left "a signature that does not verify"
                 signed <- sequence (zipWith signs keys (reverse items))
-                return (verifyScriptPathData ctx outKey spd && length (filter id signed) == asked)
+                return (verifyScriptPathData outKey spd && length (filter id signed) == asked)
           _ -> Left "script path spends other than key checks are not verified"
         Nothing -> Left "not a Taproot witness"
 
@@ -1015,8 +1012,8 @@ data InputVerdict
 -- ('txSigHashCashToken'). Inputs of those kinds are 'InputVerified' here
 -- and not by 'verifyStdInput'. A multisig is never 'InputForged': one
 -- that does not verify is 'InputUndecided'.
-judgeInputs :: Network -> Ctx -> Tx -> [Maybe TxOut] -> [InputVerdict]
-judgeInputs net ctx tx given = zipWith judge [0 ..] decoded
+judgeInputs :: Network -> Tx -> [Maybe TxOut] -> [InputVerdict]
+judgeInputs net tx given = zipWith judge [0 ..] decoded
   where
     prevs = take (length tx.inputs) (given <> repeat Nothing)
     forked = net.sigHashForkId /= Nothing
@@ -1026,7 +1023,7 @@ judgeInputs net ctx tx given = zipWith judge [0 ..] decoded
     decoded = map (>>= decode) prevs
     decode o = do
       (prefix, script) <- split o.script
-      so <- eitherToMaybe (unmarshal ctx script)
+      so <- eitherToMaybe (decodeSerial script)
       return (prefix, so, o.value)
     spent =
       SpentCoins
@@ -1036,7 +1033,7 @@ judgeInputs net ctx tx given = zipWith judge [0 ..] decoded
     judge :: Int -> Maybe (B.ByteString, ScriptOutput, Word64) -> InputVerdict
     judge _ Nothing = InputUndecided
     judge i (Just (prefix, so, val))
-      | B.null prefix && verifyInput net ctx tx spent i = InputVerified
+      | B.null prefix && verifyInput net tx spent i = InputVerified
       | otherwise = case so of
           PayPKHash h
             | null ws, Just [sig, pub] <- pushes -> keyed (addressHash pub == h) sig pub legacy
@@ -1048,7 +1045,7 @@ judgeInputs net ctx tx given = zipWith judge [0 ..] decoded
             | net.segWit,
               Just [program] <- pushes,
               addressHash program == h,
-              Right nested@(PayWitnessPKHash kh) <- unmarshal ctx program,
+              Right nested@(PayWitnessPKHash kh) <- decodeSerial program,
               [sig, pub] <- ws ->
                 keyed (addressHash pub == kh) sig pub (segwit nested)
           PayWitness 1 program
@@ -1060,7 +1057,7 @@ judgeInputs net ctx tx given = zipWith judge [0 ..] decoded
               null ws,
               Just items@(_ : _ : _) <- pushes,
               addressHash (last items) == h,
-              Right redeem@(PayMulSig keys asked) <- unmarshal ctx (last items),
+              Right redeem@(PayMulSig keys asked) <- decodeSerial (last items),
               bits : sigs <- init items ->
                 cashMultisig redeem keys asked bits sigs
           _ -> InputUndecided
@@ -1076,14 +1073,14 @@ judgeInputs net ctx tx given = zipWith judge [0 ..] decoded
           OP_PUSHDATA d _ -> Just d
           op -> B.singleton . fromIntegral <$> eitherToMaybe (scriptOpToInt op)
         legacy sh = do
-          script <- encodeOutput ctx so
+          script <- encodeOutput so
           if forked then txSigHashCashToken net tx prefix script val i sh else txSigHash net tx script val i sh
-        segwit out sh = Sign.makeSigHash net ctx tx i out val sh Nothing
+        segwit out sh = Sign.makeSigHash net tx i out val sh Nothing
         -- a coin that names the hash of its key: another key does not
         -- open it, whatever it signed
         keyed named sig pub digest
           | not named = InputForged
-          | otherwise = maybe InputUndecided (\k -> signed sig k digest) (importPubKey ctx pub)
+          | otherwise = maybe InputUndecided (\k -> signed sig k digest) (importPubKey pub)
         -- Forged is said of the hash type "all" only. With another hash
         -- type a signature that verifies is verified, and one that does
         -- not is left alone.
@@ -1093,8 +1090,8 @@ judgeInputs net ctx tx given = zipWith judge [0 ..] decoded
               Left _ -> InputUndecided
               Right m
                 -- on Bitcoin Cash a signature of 64 bytes is a Schnorr one
-                | forked && B.length body == 64 -> sure (verifyCashSchnorr ctx key body m)
-                | otherwise -> maybe InputUndecided (\s -> sure (verifyHashSig ctx m s key)) (decodeStrictSig ctx body)
+                | forked && B.length body == 64 -> sure (verifyCashSchnorr key body m)
+                | otherwise -> maybe InputUndecided (\s -> sure (verifyHashSig m s key)) (decodeStrictSig body)
           where
             body = B.init sig
             sure ok
@@ -1130,16 +1127,16 @@ judgeInputs net ctx tx given = zipWith judge [0 ..] decoded
                 && readable (B.last sig)
                 && either
                   (const False)
-                  (verifyCashSchnorr ctx key.point (B.init sig))
-                  (encodeOutput ctx script >>= \code -> cashDigest code (fromIntegral (B.last sig)))
+                  (verifyCashSchnorr key.point (B.init sig))
+                  (encodeOutput script >>= \code -> cashDigest code (fromIntegral (B.last sig)))
             cashDigest code = txSigHashCashToken net tx prefix code val i
         taproot program sig = fromRight InputUndecided $ do
-          key <- maybe (Left "not a key") Right (importXOnlyPubKey ctx program)
+          key <- maybe (Left "not a key") Right (importXOnlyPubKey program)
           outs <- maybe (Left "a spent output is missing") Right spent.outputs
           TaprootSignature s sh <- decodeTaprootSig sig
           unless (sh == sigHashDefault || sh == sigHashAll) $ Left "another hash type"
           m <- taprootSigHash tx outs i sh Nothing Nothing
-          return (verdict (verifySchnorr ctx key s (hashToMsg m)))
+          return (verdict (verifySchnorr key s (hashToMsg m)))
         verdict ok = if ok then InputVerified else InputForged
 
 -- | The keys of a Taproot multisig script and the number of signatures it
@@ -1173,7 +1170,6 @@ isTaproot = \case
 -- item, can count enough signatures and still fail @OP_CHECKMULTISIG@.
 countMulSig ::
   Network ->
-  Ctx ->
   Tx ->
   Script ->
   Word64 ->
@@ -1181,17 +1177,17 @@ countMulSig ::
   [PubKey] ->
   [TxSignature] ->
   Int
-countMulSig net ctx tx out val i =
-  countMulSig' ctx h
+countMulSig net tx out val i =
+  countMulSig' h
   where
     h = txSigHash net tx out val i
 
-countMulSig' :: Ctx -> (SigHash -> Either String Hash256) -> [PubKey] -> [TxSignature] -> Int
-countMulSig' _ _ [] _ = 0
-countMulSig' _ _ _ [] = 0
-countMulSig' ctx h (_ : pubs) (TxSignatureEmpty : sigs) =
-  countMulSig' ctx h pubs sigs
-countMulSig' ctx h (pub : pubs) sigs@(TxSignature sig sh : sigs')
-  | either (const False) (\m -> verifyHashSig ctx m sig pub) (h sh) =
-      1 + countMulSig' ctx h pubs sigs'
-  | otherwise = countMulSig' ctx h pubs sigs
+countMulSig' :: (SigHash -> Either String Hash256) -> [PubKey] -> [TxSignature] -> Int
+countMulSig' _ [] _ = 0
+countMulSig' _ _ [] = 0
+countMulSig' h (_ : pubs) (TxSignatureEmpty : sigs) =
+  countMulSig' h pubs sigs
+countMulSig' h (pub : pubs) sigs@(TxSignature sig sh : sigs')
+  | either (const False) (\m -> verifyHashSig m sig pub) (h sh) =
+      1 + countMulSig' h pubs sigs'
+  | otherwise = countMulSig' h pubs sigs

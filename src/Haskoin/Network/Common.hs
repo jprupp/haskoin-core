@@ -82,12 +82,12 @@ import Control.DeepSeq
 import Control.Monad (forM_, liftM2, unless, when)
 import Data.Binary (Binary (..))
 import Data.Bits (shiftL, shiftR, (.&.), (.|.))
-import Data.Int (Int32, Int64)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as B
 import Data.Bytes.Get
 import Data.Bytes.Put
 import Data.Bytes.Serial
+import Data.Int (Int32, Int64)
 import Data.Serialize (Serialize (..))
 import Data.String
 import Data.String.Conversions (cs)

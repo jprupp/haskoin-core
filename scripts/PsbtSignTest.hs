@@ -24,7 +24,7 @@ import System.Environment (getArgs)
 import System.Exit (die)
 
 main :: IO ()
-main = withContext $ \ctx -> do
+main = do
   args <- getArgs
   case args of
     ["key", secretHex] -> do
@@ -32,8 +32,8 @@ main = withContext $ \ctx -> do
         maybe (die "The secret is not a valid secret key in hexadecimal") return $
           secKey =<< decodeHex (pack secretHex)
       let private = wrapSecKey True secret
-          public = derivePublicKey ctx private
-      T.putStrLn (toWif btcRegTest private <> " " <> encodeHex (marshal ctx public))
+          public = derivePublicKey private
+      T.putStrLn (toWif btcRegTest private <> " " <> encodeHex (encodeSerial public))
     ["sign", wif] -> do
       private <-
         maybe (die "The key is not a regtest private key") return $
@@ -41,6 +41,6 @@ main = withContext $ \ctx -> do
       text <- C.getContents
       -- The signer is the default one. It wants the previous transaction of
       -- a SegWit version 0 coin, which Bitcoin Core puts into its PSBTs.
-      let signed = signPsbt btcRegTest ctx (keySigner ctx private.key) =<< decodePsbtBase64 text
+      let signed = signPsbt btcRegTest (keySigner private.key) =<< decodePsbtBase64 text
       either die (C.putStrLn . encodePsbtBase64) signed
     _ -> die "Usage: PsbtSignTest key SECRET | PsbtSignTest sign WIF"

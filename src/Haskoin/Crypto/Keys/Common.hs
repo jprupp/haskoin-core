@@ -80,18 +80,19 @@ data PublicKey = PublicKey
   }
   deriving (Generic, Show, Read, Hashable, Eq, NFData)
 
-instance MarshalJSON Ctx PublicKey where
-  marshalValue ctx = String . encodeHex . runPutS . marshalPut ctx
+instance ToJSON PublicKey where
+  toJSON = String . encodeHex . runPutS . serialize
 
-  marshalEncoding ctx = hexEncoding . runPutL . marshalPut ctx
+  toEncoding = hexEncoding . runPutL . serialize
 
-  unmarshalValue ctx =
+instance FromJSON PublicKey where
+  parseJSON =
     withText "PublicKey" $ \t -> do
       bs <- maybe (fail "Expected hex public key") return $ decodeHex t
-      either fail return $ decodePubKey ctx bs
+      either fail return $ decodePubKey bs
 
-instance Marshal Ctx PublicKey where
-  marshalGet ctx = do
+instance Serial PublicKey where
+  deserialize = do
     c <-
       lookAhead $
         getWord8 >>= \case
@@ -100,12 +101,20 @@ instance Marshal Ctx PublicKey where
           0x04 -> return False
           _ -> fail "Not a public key"
     bs <- getByteString $ if c then 33 else 65
-    case importPubKey ctx bs of
+    case importPubKey bs of
       Nothing -> fail "Could not decode public key"
       Just k -> return $ PublicKey k c
 
-  marshalPut ctx pk =
-    putByteString $ exportPubKey ctx pk.compress pk.point
+  serialize pk =
+    putByteString $ exportPubKey pk.compress pk.point
+
+instance Binary PublicKey where
+  put = serialize
+  get = deserialize
+
+instance Serialize PublicKey where
+  put = serialize
+  get = deserialize
 
 -- | Wrap a public key from secp256k1 library adding information about compression.
 wrapPubKey :: Bool -> PubKey -> PublicKey
@@ -114,28 +123,28 @@ wrapPubKey c p = PublicKey p c
 -- | Decode a public key from bytes that must hold the key and nothing else:
 -- 33 bytes starting with 0x02 or 0x03, or 65 bytes starting with 0x04. A key
 -- pushed in a script, a witness or a PSBT record is the whole item, so use
--- this function, or 'unmarshal', for those. 'marshalGet' reads a key from the
+-- this function, or 'decodeSerial', for those. 'deserialize' reads a key from the
 -- start of a longer stream and leaves the rest.
 --
 -- A hybrid key, 65 bytes starting with 0x06 or 0x07, is refused. Consensus
 -- takes that form, but the relay rules of Bitcoin Core do not, and no wallet
 -- makes one.
-decodePubKey :: Ctx -> ByteString -> Either String PublicKey
-decodePubKey ctx = runGetS $ do
-  k <- marshalGet ctx
+decodePubKey :: ByteString -> Either String PublicKey
+decodePubKey = runGetS $ do
+  k <- deserialize
   done <- isEmpty
   unless done $ fail "Trailing bytes after public key"
   return k
 
 -- | Derives a public key from a private key. This function will preserve
 -- compression flag.
-derivePublicKey :: Ctx -> PrivateKey -> PublicKey
-derivePublicKey ctx (PrivateKey d c) = PublicKey (derivePubKey ctx d) c
+derivePublicKey :: PrivateKey -> PublicKey
+derivePublicKey (PrivateKey d c) = PublicKey (derivePubKey d) c
 
 -- | Tweak a public key.
-tweakPubKey :: Ctx -> PubKey -> Hash256 -> Maybe PubKey
-tweakPubKey ctx p =
-  tweakAddPubKey ctx p <=< tweak . runPutS . serialize
+tweakPubKey :: PubKey -> Hash256 -> Maybe PubKey
+tweakPubKey p =
+  tweakAddPubKey p <=< tweak . runPutS . serialize
 
 -- | Elliptic curve private key type with expected public key compression
 -- information. Compression information is stored in private key WIF formats and
@@ -152,11 +161,12 @@ data PrivateKey = PrivateKey
 -- instance for the same reason: use 'toWif' and 'fromWif' to write a key
 -- out and read it back.
 --
--- This protects a 'PrivateKey', not the 'SecKey' inside it. The 'Show'
--- instance of 'SecKey' comes from the secp256k1 binding and prints the 32
--- bytes in hex, so @show privateKey.key@ gives the secret away. A record of
--- your own that holds a 'SecKey' and derives 'Show' prints it too. Keep keys
--- in 'PrivateKey' or 'XPrvKey' where they may be shown.
+-- The 'SecKey' inside is protected in the same way. Its 'Show' instance
+-- comes from the secp256k1 binding and, since version 3.0.0 of it, prints
+-- @SecKey \<redacted\>@, so @show privateKey.key@ and a record of your own
+-- that holds a 'SecKey' and derives 'Show' do not give the secret away
+-- either. 'Read' still parses the hex of a 'SecKey', so it is not the inverse
+-- of 'Show' for that type.
 instance Show PrivateKey where
   showsPrec d p =
     showParen (d > 10) $
@@ -199,9 +209,9 @@ decodeSecKey :: ByteString -> Maybe SecKey
 decodeSecKey = secKey
 
 -- | Tweak a private key.
-tweakSecKey :: Ctx -> SecKey -> Hash256 -> Maybe SecKey
-tweakSecKey ctx k =
-  tweakAddSecKey ctx k <=< tweak . runPutS . serialize
+tweakSecKey :: SecKey -> Hash256 -> Maybe SecKey
+tweakSecKey k =
+  tweakAddSecKey k <=< tweak . runPutS . serialize
 
 -- | Decode a Casascius mini private key, as the Bitcoin wiki describes the
 -- format (<https://en.bitcoin.it/wiki/Mini_private_key_format>):

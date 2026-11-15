@@ -413,17 +413,17 @@ txSigHashCashToken net tx prefix out v i sh
   | i < 0 || i >= length tx.inputs =
       Left "txSigHashForkId: input index out of range"
   | otherwise = Right . doubleSHA256 . runPutS $ do
-    putWord32le tx.version
-    serialize hashPrevouts
-    serialize hashSequence
-    serialize (tx.inputs !! i).outpoint
-    putByteString prefix
-    putScript out
-    putWord64le v
-    putWord32le (tx.inputs !! i).sequence
-    serialize hashOutputs
-    putWord32le tx.locktime
-    putWord32le $ fromIntegral hashType
+      putWord32le tx.version
+      serialize hashPrevouts
+      serialize hashSequence
+      serialize (tx.inputs !! i).outpoint
+      putByteString prefix
+      putScript out
+      putWord64le v
+      putWord32le (tx.inputs !! i).sequence
+      serialize hashOutputs
+      putWord32le tx.locktime
+      putWord32le $ fromIntegral hashType
   where
     hashType = case net.sigHashForkId of
       Just forkId -> sigHashAddForkId sh forkId
@@ -546,19 +546,19 @@ data TxSignature
   | TxSignatureEmpty
   deriving (Eq, Show, Read, Generic, NFData)
 
-instance Marshal (Network, Ctx) TxSignature where
-  marshalPut (net, ctx) TxSignatureEmpty = return ()
-  marshalPut (net, ctx) (TxSignature sig (SigHash n)) = do
-    marshalPut ctx sig
+instance Marshal Network TxSignature where
+  marshalPut net TxSignatureEmpty = return ()
+  marshalPut net (TxSignature sig (SigHash n)) = do
+    serialize sig
     putWord8 (fromIntegral n)
 
-  marshalGet (net, ctx) =
+  marshalGet net =
     bool decode empty =<< isEmpty
     where
       empty = return TxSignatureEmpty
       decode = do
-        sig <- marshalGet ctx
-        unless (isCanonicalHalfOrder ctx sig) $
+        sig <- deserialize
+        unless (isCanonicalHalfOrder sig) $
           fail "Non-canonical signature: S value is unnecessarily high"
         sh <- fromIntegral <$> getWord8
         when (isSigHashUnknown sh) $
@@ -569,30 +569,30 @@ instance Marshal (Network, Ctx) TxSignature where
           fail "Non-canonical signature: SIGHASH_FORKID is required on this network"
         return $ TxSignature sig sh
 
-instance MarshalJSON (Network, Ctx) TxSignature where
-  marshalValue (net, ctx) = String . encodeHex . encodeTxSig net ctx
+instance MarshalJSON Network TxSignature where
+  marshalValue net = String . encodeHex . encodeTxSig net
   marshalEncoding s = hexEncoding . runPutL . marshalPut s
-  unmarshalValue (net, ctx) =
+  unmarshalValue net =
     withText "TxSignature" $ \t ->
       case decodeHex t of
         Nothing -> fail "Cannot decode hex signature"
-        Just b -> case decodeTxSig net ctx b of
+        Just b -> case decodeTxSig net b of
           Left e -> fail e
           Right s -> return s
 
 -- | Serialize a signature with its hash type byte. 'TxSignatureEmpty' is the
 -- empty string.
-encodeTxSig :: Network -> Ctx -> TxSignature -> ByteString
-encodeTxSig net ctx = runPutS . marshalPut (net, ctx)
+encodeTxSig :: Network -> TxSignature -> ByteString
+encodeTxSig net = runPutS . marshalPut net
 
 -- | Parse a signature with its hash type byte, under the rules listed at
 -- 'TxSignature': strict DER, a low S, a defined hash type, and the fork id
 -- flag that the network asks for. The empty string is 'TxSignatureEmpty'. A
 -- signature that is valid by consensus alone does not decode.
-decodeTxSig :: Network -> Ctx -> ByteString -> Either String TxSignature
-decodeTxSig net ctx =
+decodeTxSig :: Network -> ByteString -> Either String TxSignature
+decodeTxSig net =
   runGetS $ do
-    sig <- marshalGet (net, ctx)
+    sig <- marshalGet net
     e <- isEmpty
     unless e $
       fail "Non-canonical signature: multiple hashtype bytes"

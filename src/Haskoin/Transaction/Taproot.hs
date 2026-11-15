@@ -82,11 +82,12 @@ import Crypto.Hash
 import Crypto.Secp256k1
 import Data.Aeson
   ( FromJSON (parseJSON),
-    ToJSON (toJSON),
+    ToJSON (toEncoding, toJSON),
     Value (String),
     withText,
   )
 import Data.Aeson.Types (Parser, Value)
+import Data.Binary (Binary (..))
 import Data.Bits ((.&.), (.|.))
 import Data.Bool (bool)
 import Data.ByteArray qualified as BA
@@ -97,6 +98,7 @@ import Data.Bytes.Put (MonadPut, putByteString, putWord32le, putWord64le, putWor
 import Data.Bytes.Serial (Serial (..), deserialize, serialize)
 import Data.Foldable (foldl')
 import Data.Maybe (fromMaybe, maybeToList)
+import Data.Serialize (Serialize (..))
 import Data.Word (Word32, Word8)
 import GHC.Records (HasField (..))
 import Haskoin.Crypto.Hash
@@ -124,34 +126,43 @@ instance Eq XOnlyPubKey where
     where
       f = BS.take 32 . (.get)
 
-instance Marshal Ctx XOnlyPubKey where
-  marshalPut ctx (XOnlyPubKey pk) =
-    putByteString (exportXOnlyPubKey ctx pk)
+instance Serial XOnlyPubKey where
+  serialize (XOnlyPubKey pk) =
+    putByteString (exportXOnlyPubKey pk)
 
-  marshalGet ctx =
+  deserialize =
     maybe (fail "Not an x-only public key") (pure . XOnlyPubKey)
-      . importXOnlyPubKey ctx
+      . importXOnlyPubKey
       =<< getBytes 32
 
-instance MarshalJSON Ctx XOnlyPubKey where
+instance Binary XOnlyPubKey where
+  put = serialize
+  get = deserialize
+
+instance Serialize XOnlyPubKey where
+  put = serialize
+  get = deserialize
+
+instance FromJSON XOnlyPubKey where
   -- The hex must hold the 32 bytes of the key and nothing else. A longer
   -- value, such as a 33-byte compressed key, is another kind of key.
-  unmarshalValue ctx =
-    withText "XOnlyPubKey" $ either fail pure . (unmarshal ctx <=< hex)
+  parseJSON =
+    withText "XOnlyPubKey" $ either fail pure . (decodeSerial <=< hex)
     where
       hex = maybe (Left "Unable to decode hex") Right . decodeHex
 
-  marshalValue ctx =
-    String . encodeHex . marshal ctx
+instance ToJSON XOnlyPubKey where
+  toJSON =
+    String . encodeHex . encodeSerial
 
-  marshalEncoding ctx =
-    hexEncoding . runPutL . marshalPut ctx
+  toEncoding =
+    hexEncoding . runPutL . serialize
 
 -- | The parity of the y coordinate of a key: 0 when it is even, 1 when it
 -- is odd. It is the parity bit of a control block.
-keyParity :: Ctx -> PubKey -> Word8
-keyParity ctx key =
-  case BS.unpack . marshal ctx $ PublicKey key True of
+keyParity :: PubKey -> Word8
+keyParity key =
+  case BS.unpack . encodeSerial $ PublicKey key True of
     0x02 : _ -> 0x00
     _ -> 0x01
 
@@ -352,13 +363,13 @@ data TaprootOutput = TaprootOutput
 --   'Nothing' in the same case.
 --
 -- @since 0.21.0
-taprootOutputKey :: Ctx -> TaprootOutput -> PubKey
-taprootOutputKey ctx TaprootOutput {..} =
+taprootOutputKey :: TaprootOutput -> PubKey
+taprootOutputKey TaprootOutput {..} =
   fromMaybe keyFail $
-    tweak commitment >>= tweakAddXOnlyPubKey ctx internalKey
+    tweak commitment >>= tweakAddXOnlyPubKey internalKey
   where
     commitment =
-      taprootCommitment ctx internalKey $
+      taprootCommitment internalKey $
         mastCommitment <$> mast
     keyFail = error "haskoin-core taprootOutputKey: key derivation failed"
 
@@ -366,20 +377,20 @@ taprootOutputKey ctx TaprootOutput {..} =
 -- key given: the secret key, negated when its public key has an odd y
 -- coordinate, plus the tweak of 'taprootOutputKey'. 'Nothing' in the
 -- negligible case where the tweak gives no key.
-taprootOutputSecKey :: Ctx -> SecKey -> Maybe MAST -> Maybe SecKey
-taprootOutputSecKey ctx secret mast =
-  tweak commitment >>= tweakAddXOnlySecKey ctx secret
+taprootOutputSecKey :: SecKey -> Maybe MAST -> Maybe SecKey
+taprootOutputSecKey secret mast =
+  tweak commitment >>= tweakAddXOnlySecKey secret
   where
     commitment =
-      taprootCommitment ctx (derivePubKey ctx secret) $
+      taprootCommitment (derivePubKey secret) $
         mastCommitment <$> mast
 
-taprootCommitment :: Ctx -> PubKey -> Maybe (Digest SHA256) -> ByteString
-taprootCommitment ctx internalKey merkleRoot =
+taprootCommitment :: PubKey -> Maybe (Digest SHA256) -> ByteString
+taprootCommitment internalKey merkleRoot =
   BA.convert
     . hashFinalize
     . maybe id (flip hashUpdate) merkleRoot
-    . (`hashUpdate` exportXOnlyPubKey ctx internalKey)
+    . (`hashUpdate` exportXOnlyPubKey internalKey)
     $ initTaggedHash "TapTweak"
 
 -- | The output script of a Taproot output: witness version 1 and the
@@ -387,13 +398,13 @@ taprootCommitment ctx internalKey merkleRoot =
 -- too. Check a script tree with 'checkTapTree' before you pay to it.
 --
 -- @since 0.21.0
-taprootScriptOutput :: Ctx -> TaprootOutput -> ScriptOutput
-taprootScriptOutput ctx =
+taprootScriptOutput :: TaprootOutput -> ScriptOutput
+taprootScriptOutput =
   PayWitness 0x01
     . runPutS
-    . marshalPut ctx
+    . serialize
     . XOnlyPubKey
-    . taprootOutputKey ctx
+    . taprootOutputKey
 
 {- Witnesses -}
 
@@ -447,21 +458,21 @@ maxControlBlockNodes = 128
 -- | The control block of a script path spend: the leaf version with the
 -- parity bit of the output key, the x-only internal key, and the proof
 -- of the leaf
-encodeControlBlock :: Ctx -> Word8 -> PubKey -> [Digest SHA256] -> ByteString
-encodeControlBlock ctx versionAndParity internalKey proof =
-  BS.concat (BS.singleton versionAndParity : exportXOnlyPubKey ctx internalKey : map BA.convert proof)
+encodeControlBlock :: Word8 -> PubKey -> [Digest SHA256] -> ByteString
+encodeControlBlock versionAndParity internalKey proof =
+  BS.concat (BS.singleton versionAndParity : exportXOnlyPubKey internalKey : map BA.convert proof)
 
 -- | The parts of a control block, which must be 33 bytes plus 32 per node
 -- of the proof, with at most 'maxControlBlockNodes' nodes, as BIP 341
 -- requires
-decodeControlBlock :: Ctx -> ByteString -> Either String (Word8, PubKey, [Digest SHA256])
-decodeControlBlock ctx bytes
+decodeControlBlock :: ByteString -> Either String (Word8, PubKey, [Digest SHA256])
+decodeControlBlock bytes
   | len < 33 || (len - 33) `mod` 32 /= 0 =
       Left ("decodeControlBlock: a control block is 33 bytes plus 32 per node, not " <> show len)
   | nodeCount > maxControlBlockNodes =
       Left ("decodeControlBlock: more than " <> show maxControlBlockNodes <> " nodes")
   | otherwise = do
-      internalKey <- maybe (Left "decodeControlBlock: the internal key is not an x-only public key") Right $ importXOnlyPubKey ctx (BS.take 32 (BS.drop 1 bytes))
+      internalKey <- maybe (Left "decodeControlBlock: the internal key is not an x-only public key") Right $ importXOnlyPubKey (BS.take 32 (BS.drop 1 bytes))
       proof <- traverse node (chunks (BS.drop 33 bytes))
       return (BS.head bytes, internalKey, proof)
   where
@@ -480,12 +491,12 @@ decodeControlBlock ctx bytes
 -- witness and for a control block that 'decodeControlBlock' refuses.
 --
 -- @since 0.21.0
-viewTaprootWitness :: Ctx -> WitnessStack -> Maybe TaprootWitness
-viewTaprootWitness ctx witnessStack =
+viewTaprootWitness :: WitnessStack -> Maybe TaprootWitness
+viewTaprootWitness witnessStack =
   case reverse items of
     [sig] -> Just (KeyPathSpend sig annex)
     controlBytes : scriptBytes : reversedStack -> do
-      (v, internalKey, control) <- eitherToMaybe $ decodeControlBlock ctx controlBytes
+      (v, internalKey, control) <- eitherToMaybe $ decodeControlBlock controlBytes
       -- The script is kept as opcodes when the bytes are exactly the
       -- serialization of a list of opcodes, and as bytes otherwise, so
       -- that the leaf hash is always the hash of the witness bytes.
@@ -524,8 +535,8 @@ viewTaprootWitness ctx witnessStack =
 --   carry.
 --
 -- @since 0.21.0
-encodeTaprootWitness :: Ctx -> TaprootWitness -> Either String WitnessStack
-encodeTaprootWitness ctx = \case
+encodeTaprootWitness :: TaprootWitness -> Either String WitnessStack
+encodeTaprootWitness = \case
   KeyPathSpend signature annex -> do
     mapM_ checkAnnex annex
     return (signature : maybeToList annex)
@@ -538,7 +549,7 @@ encodeTaprootWitness ctx = \case
     return $
       d.stack
         <> [ scriptPathScriptBytes d,
-             encodeControlBlock ctx (d.leafVersion .|. bool 0 1 d.extIsOdd) d.internalKey d.control
+             encodeControlBlock (d.leafVersion .|. bool 0 1 d.extIsOdd) d.internalKey d.control
            ]
         <> maybeToList d.annex
   where
@@ -563,24 +574,23 @@ isAnnex bytes = case BS.uncons bytes of
 --
 -- @since 0.21.0
 verifyScriptPathData ::
-  Ctx ->
   -- | Output key
   PubKey ->
   ScriptPathData ->
   Bool
-verifyScriptPathData ctx outkey spd = fromMaybe False $ do
+verifyScriptPathData outkey spd = fromMaybe False $ do
   if length spd.control > maxControlBlockNodes
     then Nothing
     else
       tweak commitment
         >>= fmap onComputedKey
-          . tweakAddXOnlyPubKey ctx spd.internalKey
+          . tweakAddXOnlyPubKey spd.internalKey
   where
     onComputedKey computedKey =
       XOnlyPubKey outkey == XOnlyPubKey computedKey
-        && expectedParity == keyParity ctx computedKey
+        && expectedParity == keyParity computedKey
     commitment =
-      taprootCommitment ctx spd.internalKey (Just merkleRoot)
+      taprootCommitment spd.internalKey (Just merkleRoot)
     merkleRoot = foldl' hashBranch theLeafHash spd.control
     theLeafHash = leafHashBytes (spd.leafVersion .&. 0xfe) (scriptPathScriptBytes spd)
     expectedParity = bool 0 1 spd.extIsOdd
@@ -705,7 +715,8 @@ taprootSigHash tx spent i sh annexM leafM = do
       serialize $ sha256 (runPutS (mapM_ (putVarIntBytes . (.script)) spent))
       serialize $ sha256 (runPutS (mapM_ (putWord32le . (.sequence)) tx.inputs))
     unless (isSigHashNone sh || isSigHashSingle sh) $
-      serialize $ sha256 (runPutS (mapM_ serialize tx.outputs))
+      serialize $
+        sha256 (runPutS (mapM_ serialize tx.outputs))
     putWord8 (bool 0 2 (isJust' leafM) .|. bool 0 1 (isJust' annexM))
     if anyoneCanPay sh
       then do
@@ -717,7 +728,8 @@ taprootSigHash tx spent i sh annexM leafM = do
     forM_ annexM $ \annex ->
       serialize $ sha256 (runPutS (putVarIntBytes annex))
     when (isSigHashSingle sh) $
-      serialize $ sha256 (runPutS (serialize (tx.outputs !! i)))
+      serialize $
+        sha256 (runPutS (serialize (tx.outputs !! i)))
     forM_ leafM $ \(leaf, codeSeparatorPosition) -> do
       putByteString (BA.convert leaf)
       putWord8 0x00 -- the key version

@@ -49,7 +49,6 @@ import Data.Time.Clock (UTCTime (..))
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
 import qualified Data.Typeable as T
 import Data.Word (Word32)
-import Haskoin.Crypto (Ctx)
 import Haskoin.Network.Constants
 import Haskoin.Network.Data
 import Haskoin.Util
@@ -100,9 +99,6 @@ arbitraryNetwork :: Gen Network
 arbitraryNetwork = elements allNets
 
 -- Helpers for creating Serial and JSON Identity tests
-
-instance Show Ctx where
-  show _ = "Ctx"
 
 data ReadBox
   = forall a.

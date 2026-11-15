@@ -20,9 +20,9 @@ import Data.Aeson
   )
 import Data.Aeson.Encoding (text)
 import Data.Binary (Binary (..))
+import Data.ByteString qualified as B
 import Data.Bytes.Get (getWord32be)
 import Data.Bytes.Put (putWord32be)
-import Data.ByteString qualified as B
 import Data.Bytes.Serial (Serial (..))
 import Data.Hashable (Hashable)
 import Data.Serialize (Serialize (..))

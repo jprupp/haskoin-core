@@ -38,21 +38,21 @@ import Test.Hspec.QuickCheck (prop)
 import Test.QuickCheck
 
 spec :: Spec
-spec = prepareContext $ \ctx -> do
+spec = do
   TestVector {testScriptPubKey, testKeyPath} <-
     runIO $
-      readTestFileParser (testVectorParseJSON ctx) "bip341.json"
+      readTestFileParser testVectorParseJSON "bip341.json"
   describe "Script trees and output keys, from the scriptPubKey vectors of BIP 341" $ do
     it "calculate the leaf hashes and the Merkle root" $
       mapM_ testHashes testScriptPubKey
     it "build the output key" $
-      mapM_ (testOutputKey ctx) testScriptPubKey
+      mapM_ testOutputKey testScriptPubKey
     it "build the script output" $
-      mapM_ (testScriptOutput ctx) testScriptPubKey
+      mapM_ testScriptOutput testScriptPubKey
     it "build the control blocks, which verify the script path" $
-      mapM_ (testControlBlocks ctx) testScriptPubKey
+      mapM_ testControlBlocks testScriptPubKey
     it "give the address" $
-      mapM_ (testAddress ctx) testScriptPubKey
+      mapM_ testAddress testScriptPubKey
     it "list the leaves of a tree depth first and build the tree back from them" $
       mapM_ testTreeLeaves testScriptPubKey
 
@@ -60,62 +60,62 @@ spec = prepareContext $ \ctx -> do
     -- BIP 341 tweaks the x-only internal key, so the output does not
     -- depend on the parity of the y coordinate of the key given
     prop "is the same for a key and its negation" $
-      forAll (arbitraryKeyPair ctx) $ \(_, p) ->
-        let x = exportXOnlyPubKey ctx p.point
-            negated = (.point) (either error id (unmarshal ctx (BS.cons (if keyParity ctx p.point == 0 then 0x03 else 0x02) x)) :: PublicKey)
-         in taprootScriptOutput ctx (TaprootOutput negated Nothing) === taprootScriptOutput ctx (TaprootOutput p.point Nothing)
+      forAll arbitraryKeyPair $ \(_, p) ->
+        let x = exportXOnlyPubKey p.point
+            negated = (.point) (either error id (decodeSerial (BS.cons (if keyParity p.point == 0 then 0x03 else 0x02) x)) :: PublicKey)
+         in taprootScriptOutput (TaprootOutput negated Nothing) === taprootScriptOutput (TaprootOutput p.point Nothing)
 
     prop "has the x coordinate of the public key of the output secret key" $
-      forAll (arbitraryKeyPair ctx) $ \(k, p) ->
-        let tweaked = fromJust (taprootOutputSecKey ctx k.key Nothing)
-         in exportXOnlyPubKey ctx (derivePubKey ctx tweaked) === exportXOnlyPubKey ctx (taprootOutputKey ctx (TaprootOutput p.point Nothing))
+      forAll arbitraryKeyPair $ \(k, p) ->
+        let tweaked = fromJust (taprootOutputSecKey k.key Nothing)
+         in exportXOnlyPubKey (derivePubKey tweaked) === exportXOnlyPubKey (taprootOutputKey (TaprootOutput p.point Nothing))
 
     -- The test vectors of BIP 86: the keys at m/86'/0'/0'/0/0, 0/1 and
     -- 1/0 of the mnemonic "abandon ... about"
     forM_ bip86Vectors $ \(path, internalKey, outputKey, address) ->
       it ("of the BIP 86 key at " <> show path <> " is " <> show outputKey) $ do
         let root = fromJust (xPrvImport btc "xprv9s21ZrQH143K3GJpoapnV8SFfukcVBSfeCficPSGfubmSFDxo1kuHnLisriDvSnRRuL2Qrg5ggqHKNVpxR86QEC8w35uxmGoggxtQTPvfUu")
-            secret = (derivePath ctx (path :: DerivPath) root).key
-            output = TaprootOutput (derivePubKey ctx secret) Nothing
-        encodeHex (exportXOnlyPubKey ctx (derivePubKey ctx secret)) `shouldBe` internalKey
-        encodeHex (exportXOnlyPubKey ctx (taprootOutputKey ctx output)) `shouldBe` outputKey
-        encodeHex (marshal ctx (taprootScriptOutput ctx output)) `shouldBe` "5120" <> outputKey
-        (addrToText btc =<< outputAddress btc ctx (taprootScriptOutput ctx output)) `shouldBe` Just address
+            secret = (derivePath (path :: DerivPath) root).key
+            output = TaprootOutput (derivePubKey secret) Nothing
+        encodeHex (exportXOnlyPubKey (derivePubKey secret)) `shouldBe` internalKey
+        encodeHex (exportXOnlyPubKey (taprootOutputKey output)) `shouldBe` outputKey
+        encodeHex (encodeSerial (taprootScriptOutput output)) `shouldBe` "5120" <> outputKey
+        (addrToText btc =<< outputAddress btc (taprootScriptOutput output)) `shouldBe` Just address
         -- The output secret key signs for the output key
-        fmap (encodeHex . exportXOnlyPubKey ctx . derivePubKey ctx) (taprootOutputSecKey ctx secret Nothing) `shouldBe` Just outputKey
+        fmap (encodeHex . exportXOnlyPubKey . derivePubKey) (taprootOutputSecKey secret Nothing) `shouldBe` Just outputKey
 
   describe "Key path spending, from the keyPathSpending vector of BIP 341" $ do
     forM_ testKeyPath.cases $ \c ->
       it ("input " <> show c.index <> ": the tweak, the digest and the signature, with hash type " <> show (fromIntegral c.hashType :: Word32)) $ do
-        let output = TaprootOutput (derivePubKey ctx c.internalSecret) (MASTCommitment <$> c.merkleRoot)
+        let output = TaprootOutput (derivePubKey c.internalSecret) (MASTCommitment <$> c.merkleRoot)
             program = BS.drop 2 (testKeyPath.spent !! c.index).script
-        encodeHex (exportXOnlyPubKey ctx (derivePubKey ctx c.internalSecret)) `shouldBe` c.internalPubKey
-        exportXOnlyPubKey ctx (taprootOutputKey ctx output) `shouldBe` program
-        let tweaked = fromJust (taprootOutputSecKey ctx c.internalSecret (MASTCommitment <$> c.merkleRoot))
+        encodeHex (exportXOnlyPubKey (derivePubKey c.internalSecret)) `shouldBe` c.internalPubKey
+        exportXOnlyPubKey (taprootOutputKey output) `shouldBe` program
+        let tweaked = fromJust (taprootOutputSecKey c.internalSecret (MASTCommitment <$> c.merkleRoot))
         tweaked `shouldBe` fromJust (secKey (hexBytes c.tweakedSecret))
         digest <- expectRight (taprootSigHash testKeyPath.unsignedTx testKeyPath.spent c.index c.hashType Nothing Nothing)
         encodeHex (runPutS (serialize digest)) `shouldBe` c.sigHash
         -- The signature of the vector was made with 32 zero bytes of
         -- auxiliary randomness, as signSchnorr signs
-        fmap (encodeHex . encodeTaprootSig) (taprootSignature (signSchnorr ctx tweaked (hashToMsg digest)) c.hashType) `shouldBe` Right (head c.witness)
+        fmap (encodeHex . encodeTaprootSig) (taprootSignature (signSchnorr tweaked (hashToMsg digest)) c.hashType) `shouldBe` Right (head c.witness)
 
     it "the fully signed transaction of the vector verifies against the coins it spends" $
-      verifyStdTx btc ctx testKeyPath.signedTx (coinsOf ctx testKeyPath) `shouldBe` True
+      verifyStdTx btc testKeyPath.signedTx (coinsOf testKeyPath) `shouldBe` True
 
     it "the fully signed transaction of the vector does not verify when a Taproot coin is given a wrong amount" $ do
-      let coins = [(so, if i == (0 :: Int) then v + 1 else v, op) | (i, (so, v, op)) <- zip [0 ..] (coinsOf ctx testKeyPath)]
-      verifyStdTx btc ctx testKeyPath.signedTx coins `shouldBe` False
+      let coins = [(so, if i == (0 :: Int) then v + 1 else v, op) | (i, (so, v, op)) <- zip [0 ..] (coinsOf testKeyPath)]
+      verifyStdTx btc testKeyPath.signedTx coins `shouldBe` False
 
     it "signTx signs the Taproot inputs of the vector by their key path with the internal keys, and the result verifies" $ do
       let tx = testKeyPath.unsignedTx
-          coins = coinsOf ctx testKeyPath
+          coins = coinsOf testKeyPath
           -- The internal keys of the Taproot inputs, with the key of the
           -- output as signTx finds it: the tweak of a key without a tree
           -- is the output only when the vector has no Merkle root
           noTree = [c | c <- testKeyPath.cases, isNothing c.merkleRoot]
           sigInputs = [SigInput so v op c.hashType Nothing | c <- noTree, let (so, v, op) = coins !! c.index]
           others = [SigInput so v op sigHashAll Nothing | (i, (so, v, op)) <- zip [0 ..] coins, i `notElem` map (.index) noTree]
-      signed <- expectRight (signTx btc ctx tx (sigInputs <> others) (map (.internalSecret) noTree))
+      signed <- expectRight (signTx btc tx (sigInputs <> others) (map (.internalSecret) noTree))
       forM_ noTree $ \c ->
         (signed.witness !! c.index) `shouldBe` [hexBytes (head c.witness)]
 
@@ -123,8 +123,8 @@ spec = prepareContext $ \ctx -> do
     -- signer against the BIP for all seven inputs and hash types
     it "signTaprootInput signs each Taproot input of the vector with its output secret key, and gives the witness of the vector" $
       forM_ testKeyPath.cases $ \c -> do
-        let tweaked = fromJust (taprootOutputSecKey ctx c.internalSecret (MASTCommitment <$> c.merkleRoot))
-        signed <- expectRight (signTaprootInput ctx testKeyPath.unsignedTx testKeyPath.spent c.index c.hashType tweaked)
+        let tweaked = fromJust (taprootOutputSecKey c.internalSecret (MASTCommitment <$> c.merkleRoot))
+        signed <- expectRight (signTaprootInput testKeyPath.unsignedTx testKeyPath.spent c.index c.hashType tweaked)
         (signed.witness !! c.index) `shouldBe` [hexBytes (head c.witness)]
 
     it "taprootSigHash refuses an index out of range, a hash type a Taproot signature may not use, missing coins and SIGHASH_SINGLE without an output" $ do
@@ -185,79 +185,79 @@ spec = prepareContext $ \ctx -> do
       sigHashDefault `shouldBe` 0
 
   describe "Witnesses" $ do
-    let (_, p) = bip86Key ctx
+    let (_, p) = bip86Key
         -- The internal key as a control block gives it back: the point of even y
-        internalKey = fromJust (importXOnlyPubKey ctx (exportXOnlyPubKey ctx p.point))
+        internalKey = fromJust (importXOnlyPubKey (exportXOnlyPubKey p.point))
         leaf = Script [OP_2DROP, OP_1]
         tree = MASTBranch (MASTLeaf tapscriptLeafVersion leaf) (MASTLeaf tapscriptLeafVersion (Script [OP_1]))
         output = TaprootOutput internalKey (Just tree)
-        outputKey = taprootOutputKey ctx output
+        outputKey = taprootOutputKey output
         [(_, _, proof), _] = getMerkleProofs tree
-        spend = ScriptPathData {annex = Nothing, stack = ["aa", "bbbb"], script = leaf, extIsOdd = odd (keyParity ctx outputKey), leafVersion = tapscriptLeafVersion, internalKey, control = proof, opaqueScript = Nothing}
-        control = encodeControlBlock ctx (tapscriptLeafVersion + keyParity ctx outputKey) internalKey proof
+        spend = ScriptPathData {annex = Nothing, stack = ["aa", "bbbb"], script = leaf, extIsOdd = odd (keyParity outputKey), leafVersion = tapscriptLeafVersion, internalKey, control = proof, opaqueScript = Nothing}
+        control = encodeControlBlock (tapscriptLeafVersion + keyParity outputKey) internalKey proof
         scriptBytes = runPutS (serialize leaf)
 
     it "a key path spend is one signature, with the annex after it when there is one" $ do
-      encodeTaprootWitness ctx (KeyPathSpend "sig" Nothing) `shouldBe` Right ["sig"]
-      encodeTaprootWitness ctx (KeyPathSpend "sig" (Just "\x50\&annex")) `shouldBe` Right ["sig", "\x50\&annex"]
-      viewTaprootWitness ctx ["sig"] `shouldBe` Just (KeyPathSpend "sig" Nothing)
-      viewTaprootWitness ctx ["sig", "\x50\&annex"] `shouldBe` Just (KeyPathSpend "sig" (Just "\x50\&annex"))
+      encodeTaprootWitness (KeyPathSpend "sig" Nothing) `shouldBe` Right ["sig"]
+      encodeTaprootWitness (KeyPathSpend "sig" (Just "\x50\&annex")) `shouldBe` Right ["sig", "\x50\&annex"]
+      viewTaprootWitness ["sig"] `shouldBe` Just (KeyPathSpend "sig" Nothing)
+      viewTaprootWitness ["sig", "\x50\&annex"] `shouldBe` Just (KeyPathSpend "sig" (Just "\x50\&annex"))
       -- One item is the signature even when it starts with the annex byte
-      viewTaprootWitness ctx ["\x50sig"] `shouldBe` Just (KeyPathSpend "\x50sig" Nothing)
-      viewTaprootWitness ctx [] `shouldBe` Nothing
+      viewTaprootWitness ["\x50sig"] `shouldBe` Just (KeyPathSpend "\x50sig" Nothing)
+      viewTaprootWitness [] `shouldBe` Nothing
 
     it "a script path spend is the stack, the script and the control block, in the order of BIP 341, then the annex" $ do
-      encodeTaprootWitness ctx (ScriptPathSpend spend) `shouldBe` Right ["aa", "bbbb", scriptBytes, control]
-      encodeTaprootWitness ctx (ScriptPathSpend spend {annex = Just "\x50"}) `shouldBe` Right ["aa", "bbbb", scriptBytes, control, "\x50"]
-      viewTaprootWitness ctx ["aa", "bbbb", scriptBytes, control] `shouldBe` Just (ScriptPathSpend spend)
-      viewTaprootWitness ctx ["aa", "bbbb", scriptBytes, control, "\x50"] `shouldBe` Just (ScriptPathSpend spend {annex = Just "\x50"})
-      viewTaprootWitness ctx [scriptBytes, control] `shouldBe` Just (ScriptPathSpend spend {stack = []})
+      encodeTaprootWitness (ScriptPathSpend spend) `shouldBe` Right ["aa", "bbbb", scriptBytes, control]
+      encodeTaprootWitness (ScriptPathSpend spend {annex = Just "\x50"}) `shouldBe` Right ["aa", "bbbb", scriptBytes, control, "\x50"]
+      viewTaprootWitness ["aa", "bbbb", scriptBytes, control] `shouldBe` Just (ScriptPathSpend spend)
+      viewTaprootWitness ["aa", "bbbb", scriptBytes, control, "\x50"] `shouldBe` Just (ScriptPathSpend spend {annex = Just "\x50"})
+      viewTaprootWitness [scriptBytes, control] `shouldBe` Just (ScriptPathSpend spend {stack = []})
       -- The control block and the script in the other order are not a
       -- spend: the script is not a control block
-      viewTaprootWitness ctx [control, scriptBytes] `shouldBe` Nothing
+      viewTaprootWitness [control, scriptBytes] `shouldBe` Nothing
 
     -- BIP 342: a Tapscript that holds an OP_SUCCESSx opcode succeeds, "even
     -- if later bytes in the tapscript would fail to decode otherwise". 50 is
     -- OP_SUCCESS80, and 4c is an OP_PUSHDATA1 with no length after it.
     it "a script path spend is read whatever the bytes of its script are" $ do
       let opaque = "\x50\x4c"
-          opaqueControl = encodeControlBlock ctx 0xc0 internalKey []
+          opaqueControl = encodeControlBlock 0xc0 internalKey []
           expected = ScriptPathData {annex = Nothing, stack = [], script = Script [], extIsOdd = False, leafVersion = 0xc0, internalKey, control = [], opaqueScript = Just opaque}
-      viewTaprootWitness ctx [opaque, opaqueControl] `shouldBe` Just (ScriptPathSpend expected)
+      viewTaprootWitness [opaque, opaqueControl] `shouldBe` Just (ScriptPathSpend expected)
       scriptPathScriptBytes expected `shouldBe` opaque
-      encodeTaprootWitness ctx (ScriptPathSpend expected) `shouldBe` Right [opaque, opaqueControl]
+      encodeTaprootWitness (ScriptPathSpend expected) `shouldBe` Right [opaque, opaqueControl]
       -- A leaf of another version, whose bytes are a push cut short
-      fmap (\case ScriptPathSpend d -> (d.leafVersion, d.opaqueScript); _ -> (0, Nothing)) (viewTaprootWitness ctx ["\x02\xaa", encodeControlBlock ctx 0xc2 internalKey []])
+      fmap (\case ScriptPathSpend d -> (d.leafVersion, d.opaqueScript); _ -> (0, Nothing)) (viewTaprootWitness ["\x02\xaa", encodeControlBlock 0xc2 internalKey []])
         `shouldBe` Just (0xc2, Just "\x02\xaa")
 
     it "a script path spend of bytes that are not opcodes verifies against the output key that commits to those bytes" $ do
       let opaque = "\x50\x4c"
-          key = taprootOutputKey ctx (TaprootOutput internalKey (Just (MASTCommitment (leafHashBytes 0xc0 opaque))))
-          opaqueSpend = ScriptPathData {annex = Nothing, stack = [], script = Script [], extIsOdd = odd (keyParity ctx key), leafVersion = 0xc0, internalKey, control = [], opaqueScript = Just opaque}
-      verifyScriptPathData ctx key opaqueSpend `shouldBe` True
-      verifyScriptPathData ctx key opaqueSpend {opaqueScript = Just "\x50\x4d"} `shouldBe` False
+          key = taprootOutputKey (TaprootOutput internalKey (Just (MASTCommitment (leafHashBytes 0xc0 opaque))))
+          opaqueSpend = ScriptPathData {annex = Nothing, stack = [], script = Script [], extIsOdd = odd (keyParity key), leafVersion = 0xc0, internalKey, control = [], opaqueScript = Just opaque}
+      verifyScriptPathData key opaqueSpend `shouldBe` True
+      verifyScriptPathData key opaqueSpend {opaqueScript = Just "\x50\x4d"} `shouldBe` False
 
     it "a witness is not written with an annex that is empty or does not start with 0x50" $ do
-      encodeTaprootWitness ctx (KeyPathSpend "sig" (Just "hello")) `shouldBe` Left "encodeTaprootWitness: an annex starts with 0x50"
-      encodeTaprootWitness ctx (KeyPathSpend "sig" (Just "")) `shouldBe` Left "encodeTaprootWitness: an annex starts with 0x50"
-      encodeTaprootWitness ctx (ScriptPathSpend spend {annex = Just "hello"}) `shouldBe` Left "encodeTaprootWitness: an annex starts with 0x50"
+      encodeTaprootWitness (KeyPathSpend "sig" (Just "hello")) `shouldBe` Left "encodeTaprootWitness: an annex starts with 0x50"
+      encodeTaprootWitness (KeyPathSpend "sig" (Just "")) `shouldBe` Left "encodeTaprootWitness: an annex starts with 0x50"
+      encodeTaprootWitness (ScriptPathSpend spend {annex = Just "hello"}) `shouldBe` Left "encodeTaprootWitness: an annex starts with 0x50"
 
     it "a witness is written with a proof of 128 hashes, and not with one of 129" $ do
       let node = fromJust (digestFromByteString @SHA256 (BS.replicate 32 1))
       -- two stack items, the script and the control block
-      fmap length (encodeTaprootWitness ctx (ScriptPathSpend spend {control = replicate 128 node})) `shouldBe` Right 4
-      encodeTaprootWitness ctx (ScriptPathSpend spend {control = replicate 129 node}) `shouldBe` Left "encodeTaprootWitness: a control block holds at most 128 nodes"
+      fmap length (encodeTaprootWitness (ScriptPathSpend spend {control = replicate 128 node})) `shouldBe` Right 4
+      encodeTaprootWitness (ScriptPathSpend spend {control = replicate 129 node}) `shouldBe` Left "encodeTaprootWitness: a control block holds at most 128 nodes"
 
     it "a witness is not written with a leaf version that a control block cannot carry" $ do
-      encodeTaprootWitness ctx (ScriptPathSpend spend {leafVersion = 0xc1}) `shouldBe` Left "encodeTaprootWitness: a control block cannot carry the leaf version 193"
-      encodeTaprootWitness ctx (ScriptPathSpend spend {leafVersion = 0x50}) `shouldBe` Left "encodeTaprootWitness: a control block cannot carry the leaf version 80"
+      encodeTaprootWitness (ScriptPathSpend spend {leafVersion = 0xc1}) `shouldBe` Left "encodeTaprootWitness: a control block cannot carry the leaf version 193"
+      encodeTaprootWitness (ScriptPathSpend spend {leafVersion = 0x50}) `shouldBe` Left "encodeTaprootWitness: a control block cannot carry the leaf version 80"
 
     it "a script path spend verifies against its output key, and not with the other parity or another proof" $ do
-      verifyScriptPathData ctx outputKey spend `shouldBe` True
-      verifyScriptPathData ctx outputKey spend {extIsOdd = not spend.extIsOdd} `shouldBe` False
-      verifyScriptPathData ctx outputKey spend {control = []} `shouldBe` False
-      verifyScriptPathData ctx outputKey spend {script = Script [OP_1]} `shouldBe` False
-      verifyScriptPathData ctx (taprootOutputKey ctx (TaprootOutput internalKey Nothing)) spend `shouldBe` False
+      verifyScriptPathData outputKey spend `shouldBe` True
+      verifyScriptPathData outputKey spend {extIsOdd = not spend.extIsOdd} `shouldBe` False
+      verifyScriptPathData outputKey spend {control = []} `shouldBe` False
+      verifyScriptPathData outputKey spend {script = Script [OP_1]} `shouldBe` False
+      verifyScriptPathData (taprootOutputKey (TaprootOutput internalKey Nothing)) spend `shouldBe` False
 
     it "a control block is 33 bytes plus 32 per node, with at most 128 nodes" $ do
       let node = BS.replicate 32 1
@@ -267,24 +267,24 @@ spec = prepareContext $ \ctx -> do
           deepest = base <> BS.concat (replicate 128 node)
           tooDeep = base <> BS.concat (replicate 129 node)
       maxControlBlockNodes `shouldBe` 128
-      fmap (\(v, k, nodes) -> (v, exportXOnlyPubKey ctx k == exportXOnlyPubKey ctx internalKey, length nodes)) (decodeControlBlock ctx deepest) `shouldBe` Right (tapscriptLeafVersion + keyParity ctx outputKey, True, 128)
-      decodeControlBlock ctx short `shouldBe` Left "decodeControlBlock: a control block is 33 bytes plus 32 per node, not 20"
-      decodeControlBlock ctx tooLong `shouldBe` Left "decodeControlBlock: a control block is 33 bytes plus 32 per node, not 69"
-      decodeControlBlock ctx tooDeep `shouldBe` Left "decodeControlBlock: more than 128 nodes"
-      viewTaprootWitness ctx [scriptBytes, short] `shouldBe` Nothing
-      viewTaprootWitness ctx [scriptBytes, tooLong] `shouldBe` Nothing
-      viewTaprootWitness ctx [scriptBytes, tooDeep] `shouldBe` Nothing
-      fmap (\case ScriptPathSpend d -> length d.control; _ -> 0) (viewTaprootWitness ctx [scriptBytes, deepest]) `shouldBe` Just 128
+      fmap (\(v, k, nodes) -> (v, exportXOnlyPubKey k == exportXOnlyPubKey internalKey, length nodes)) (decodeControlBlock deepest) `shouldBe` Right (tapscriptLeafVersion + keyParity outputKey, True, 128)
+      decodeControlBlock short `shouldBe` Left "decodeControlBlock: a control block is 33 bytes plus 32 per node, not 20"
+      decodeControlBlock tooLong `shouldBe` Left "decodeControlBlock: a control block is 33 bytes plus 32 per node, not 69"
+      decodeControlBlock tooDeep `shouldBe` Left "decodeControlBlock: more than 128 nodes"
+      viewTaprootWitness [scriptBytes, short] `shouldBe` Nothing
+      viewTaprootWitness [scriptBytes, tooLong] `shouldBe` Nothing
+      viewTaprootWitness [scriptBytes, tooDeep] `shouldBe` Nothing
+      fmap (\case ScriptPathSpend d -> length d.control; _ -> 0) (viewTaprootWitness [scriptBytes, deepest]) `shouldBe` Just 128
 
     it "a control block starts with the leaf version and the parity bit, then the x-only internal key" $
-      encodeHex (encodeControlBlock ctx 0xc1 p.point [])
+      encodeHex (encodeControlBlock 0xc1 p.point [])
         `shouldBe` "c1cc8a4bc64d897bddc5fbc2f670f7a8ba0b386779106cf1223c6fc5d7cd6fc115"
 
     prop "encoding a witness and viewing it gives the witness back" $
       forAll ((,) <$> arbitraryBS1 <*> arbitraryMaybe arbitraryBS) $ \(sig, annexData) ->
         let annex = ("\x50" <>) <$> annexData
             spendWith a = ScriptPathSpend spend {annex = a}
-            viewed witness = viewTaprootWitness ctx =<< eitherToMaybe (encodeTaprootWitness ctx witness)
+            viewed witness = viewTaprootWitness =<< eitherToMaybe (encodeTaprootWitness witness)
          in (viewed (KeyPathSpend sig annex), viewed (spendWith annex))
               === (Just (KeyPathSpend sig annex), Just (spendWith annex))
 
@@ -310,16 +310,16 @@ spec = prepareContext $ \ctx -> do
 
   describe "X-only keys" $ do
     it "serialize to the x coordinate, and read back as the point of even y" $ do
-      let (_, p) = bip86Key ctx
-          x = exportXOnlyPubKey ctx p.point
-      marshal ctx (XOnlyPubKey p.point) `shouldBe` x
-      fmap (keyParity ctx . (.point)) (unmarshal ctx x :: Either String XOnlyPubKey) `shouldBe` Right 0
-      fmap (XOnlyPubKey p.point ==) (unmarshal ctx x) `shouldBe` Right True
-      unmarshalJSON ctx (marshalJSON ctx (XOnlyPubKey p.point)) `shouldBe` Just (XOnlyPubKey p.point)
-      (unmarshal ctx (BS.replicate 32 0xff) :: Either String XOnlyPubKey) `shouldSatisfy` isLeft
+      let (_, p) = bip86Key
+          x = exportXOnlyPubKey p.point
+      encodeSerial (XOnlyPubKey p.point) `shouldBe` x
+      fmap (keyParity . (.point)) (decodeSerial x :: Either String XOnlyPubKey) `shouldBe` Right 0
+      fmap (XOnlyPubKey p.point ==) (decodeSerial x) `shouldBe` Right True
+      decode (encode (XOnlyPubKey p.point)) `shouldBe` Just (XOnlyPubKey p.point)
+      (decodeSerial (BS.replicate 32 0xff) :: Either String XOnlyPubKey) `shouldSatisfy` isLeft
     it "the parity of a key is that of its y coordinate" $ do
-      keyParity ctx (fromJust (importPubKey ctx (hexBytes "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"))) `shouldBe` 0
-      keyParity ctx (fromJust (importPubKey ctx (hexBytes "0379be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"))) `shouldBe` 1
+      keyParity (fromJust (importPubKey (hexBytes "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"))) `shouldBe` 0
+      keyParity (fromJust (importPubKey (hexBytes "0379be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"))) `shouldBe` 1
     it "the Tapscript leaf version is 0xc0" $
       tapscriptLeafVersion `shouldBe` 0xc0
 
@@ -343,10 +343,10 @@ spec = prepareContext $ \ctx -> do
     -- 4 keys × 34 bytes + OP_2 + OP_NUMEQUAL.
     it "of the 138-byte multi_a leaf is the one Bitcoin Core derives, and so is the output script" $ do
       let leaf = scriptOf multiALeaf
-          internal = fromJust (importXOnlyPubKey ctx (hexBytes "cba52b4389f798ec8ba66d9520ce532af2fe642b970010e2fbd0ec36bce36970"))
+          internal = fromJust (importXOnlyPubKey (hexBytes "cba52b4389f798ec8ba66d9520ce532af2fe642b970010e2fbd0ec36bce36970"))
       BS.length (hexBytes multiALeaf) `shouldBe` 138
       digestHex (leafHash 0xc0 leaf) `shouldBe` "c6831caa9b274f379336d6bcc789aa6e82760d573e3750b97df37e624d8e6c90"
-      encodeHex (marshal ctx (taprootScriptOutput ctx (TaprootOutput internal (Just (MASTLeaf 0xc0 leaf)))))
+      encodeHex (encodeSerial (taprootScriptOutput (TaprootOutput internal (Just (MASTLeaf 0xc0 leaf)))))
         `shouldBe` "51207fd815afed80f6bc581ac94aa52d85c50d2bddff7347e1094936eb71e2f18936"
 
     it "of script bytes that are not a list of opcodes is taken on the bytes" $
@@ -362,34 +362,34 @@ spec = prepareContext $ \ctx -> do
   -- Python with the base-128 length.
   describe "An output made by versions up to 1.5.1 with a leaf of 128 bytes or more" $ do
     let internalSecret = fromJust (secKey (hexBytes "01c58048b9108d028cdde54d8ea8fa545cd4145157fad6e5a908809c7e35388d"))
-        internal = derivePubKey ctx internalSecret
+        internal = derivePubKey internalSecret
         oldLeafHash = leafHashBefore152 0xc0 (scriptOf multiALeaf)
-        xOnly = encodeHex . exportXOnlyPubKey ctx
+        xOnly = encodeHex . exportXOnlyPubKey
     it "has a leaf hash that is rebuilt with the base-128 length" $ do
       xOnly internal `shouldBe` "cba52b4389f798ec8ba66d9520ce532af2fe642b970010e2fbd0ec36bce36970"
       digestHex oldLeafHash `shouldBe` "4a0b2a93f8430729d9467c0bc91d26d54b63802e627783bf808694c8e8dbc372"
     it "has the output key of the tree that holds the old leaf hash as a commitment" $
-      xOnly (taprootOutputKey ctx (TaprootOutput internal (Just (MASTCommitment oldLeafHash))))
+      xOnly (taprootOutputKey (TaprootOutput internal (Just (MASTCommitment oldLeafHash))))
         `shouldBe` "15e87fb4cb019af07cf16fa2b9a8451536bd86321dcc11053c70d9038ec97c80"
     it "is spent by its key path with the secret key tweaked with that commitment" $
-      fmap (xOnly . derivePubKey ctx) (taprootOutputSecKey ctx internalSecret (Just (MASTCommitment oldLeafHash)))
+      fmap (xOnly . derivePubKey) (taprootOutputSecKey internalSecret (Just (MASTCommitment oldLeafHash)))
         `shouldBe` Just "15e87fb4cb019af07cf16fa2b9a8451536bd86321dcc11053c70d9038ec97c80"
     it "keeps the script path of a short leaf next to the long one" $ do
       -- The tree {pk(1cf7198d…2500), multi_a leaf}
       let short = Script [opPushData (hexBytes "1cf7198d10d0552c8df4d0380372a5fa224a1226fc3a49546a416086442d2500"), OP_CHECKSIG]
           oldTree = MASTBranch (MASTLeaf 0xc0 short) (MASTCommitment oldLeafHash)
-          oldKey = taprootOutputKey ctx (TaprootOutput internal (Just oldTree))
+          oldKey = taprootOutputKey (TaprootOutput internal (Just oldTree))
           proofs = [proof | (_, _, proof) <- getMerkleProofs oldTree]
-          spendOf proof = ScriptPathData {annex = Nothing, stack = [], script = short, extIsOdd = odd (keyParity ctx oldKey), leafVersion = 0xc0, internalKey = internal, control = proof, opaqueScript = Nothing}
+          spendOf proof = ScriptPathData {annex = Nothing, stack = [], script = short, extIsOdd = odd (keyParity oldKey), leafVersion = 0xc0, internalKey = internal, control = proof, opaqueScript = Nothing}
       xOnly oldKey `shouldBe` "120ed04aacce013f8ed3b63a53143aec81a4c05fa0a263a693d14aa8bebd7efd"
       map (map digestHex) proofs `shouldBe` [["4a0b2a93f8430729d9467c0bc91d26d54b63802e627783bf808694c8e8dbc372"]]
-      map (verifyScriptPathData ctx oldKey . spendOf) proofs `shouldBe` [True]
+      map (verifyScriptPathData oldKey . spendOf) proofs `shouldBe` [True]
     it "is not the output of the same tree today" $ do
       let short = Script [opPushData (hexBytes "1cf7198d10d0552c8df4d0380372a5fa224a1226fc3a49546a416086442d2500"), OP_CHECKSIG]
           tree = MASTBranch (MASTLeaf 0xc0 short) (MASTLeaf 0xc0 (scriptOf multiALeaf))
       -- Root and key computed in Python from the text of BIP 341
       digestHex (mastCommitment tree) `shouldBe` "4bff8cf0bd46ff4d4470c11a7f407dfee7078c7675b877691310c0ee0058c620"
-      xOnly (taprootOutputKey ctx (TaprootOutput internal (Just tree))) `shouldBe` "b672ffdc20bf79cf4bda88ec7a0ad9c53c91e032f2bc169af425eae9dac8afe0"
+      xOnly (taprootOutputKey (TaprootOutput internal (Just tree))) `shouldBe` "b672ffdc20bf79cf4bda88ec7a0ad9c53c91e032f2bc169af425eae9dac8afe0"
 
   describe "Merkle proofs" $ do
     -- tr(ecd5eddb…7670,{pk(A),{pk(B),{pk(C),pk(D)}}}). The Merkle root and
@@ -403,9 +403,9 @@ spec = prepareContext $ \ctx -> do
           c = pkLeaf "5807c60bab1f93b36747e3d120c29fa898ab37e616b3b7635b21e5a71888e6da"
           d = pkLeaf "33045c7755fc6aef51859ad00d7393f1d23ff8b0bd6acf0d6c6d7a72502d905a"
           tree = MASTBranch a (MASTBranch b (MASTBranch c d))
-          internal = fromJust (importXOnlyPubKey ctx (hexBytes "ecd5eddb647ff233131e292cef048228bce3a3b045319d563b57d59e294c7670"))
-          outputKey = taprootOutputKey ctx (TaprootOutput internal (Just tree))
-          controlBlocks = [encodeHex (encodeControlBlock ctx (0xc0 + keyParity ctx outputKey) internal proof) | (_, _, proof) <- getMerkleProofs tree]
+          internal = fromJust (importXOnlyPubKey (hexBytes "ecd5eddb647ff233131e292cef048228bce3a3b045319d563b57d59e294c7670"))
+          outputKey = taprootOutputKey (TaprootOutput internal (Just tree))
+          controlBlocks = [encodeHex (encodeControlBlock (0xc0 + keyParity outputKey) internal proof) | (_, _, proof) <- getMerkleProofs tree]
       digestHex (mastCommitment tree) `shouldBe` "e0f4dd44e6affb70c64661b32d78666ce2296fcdf9abdcbbe9482e91398f4ac5"
       controlBlocks
         `shouldBe` [ "c1ecd5eddb647ff233131e292cef048228bce3a3b045319d563b57d59e294c7670cd8b2619baff8006c3b4f8d86a79d76d2a636b226a43602aa7b17908152a2db6",
@@ -424,12 +424,12 @@ spec = prepareContext $ \ctx -> do
               === (root, paths)
     prop "gives each leaf a proof of as many hashes as the leaf is deep, which verifies against the output key" $
       forAll (arbitraryMAST True) $ \tree ->
-        let (_, p) = bip86Key ctx
-            internal = fromJust (importXOnlyPubKey ctx (exportXOnlyPubKey ctx p.point))
-            outputKey = taprootOutputKey ctx (TaprootOutput internal (Just tree))
-            spendOf (version, script, proof) = ScriptPathData {annex = Nothing, stack = [], script, extIsOdd = odd (keyParity ctx outputKey), leafVersion = version, internalKey = internal, control = proof, opaqueScript = Nothing}
+        let (_, p) = bip86Key
+            internal = fromJust (importXOnlyPubKey (exportXOnlyPubKey p.point))
+            outputKey = taprootOutputKey (TaprootOutput internal (Just tree))
+            spendOf (version, script, proof) = ScriptPathData {annex = Nothing, stack = [], script, extIsOdd = odd (keyParity outputKey), leafVersion = version, internalKey = internal, control = proof, opaqueScript = Nothing}
             proofs = getMerkleProofs tree
-         in (map (\(_, _, proof) -> length proof) proofs, map (verifyScriptPathData ctx outputKey . spendOf) proofs)
+         in (map (\(_, _, proof) -> length proof) proofs, map (verifyScriptPathData outputKey . spendOf) proofs)
               === (leafDepths tree, map (const True) proofs)
     prop "without a commitment is built back from the list of its leaves" $
       forAll (arbitraryMAST False) $ \tree ->
@@ -446,8 +446,8 @@ spec = prepareContext $ \ctx -> do
       length spends `shouldBe` 24
       let verdict (txid, spentScript, witness) =
             ( txid,
-              case (viewTaprootWitness ctx witness, importXOnlyPubKey ctx (BS.drop 2 spentScript)) of
-                (Just (ScriptPathSpend spd), Just outputKey) -> verifyScriptPathData ctx outputKey spd
+              case (viewTaprootWitness witness, importXOnlyPubKey (BS.drop 2 spentScript)) of
+                (Just (ScriptPathSpend spd), Just outputKey) -> verifyScriptPathData outputKey spd
                 _ -> False
             )
       filter (not . snd) (map verdict spends) `shouldBe` []
@@ -482,61 +482,61 @@ spec = prepareContext $ \ctx -> do
         `shouldBe` Left "taprootSigHash: SIGHASH_SINGLE without an output at the input index"
 
   describe "verifyStdTx on Taproot inputs" $ do
-    let coinOfTx = oneCoin ctx
+    let coinOfTx = oneCoin
     it "accepts the key path spend with an annex that Bitcoin Core 32.1 mined on regtest" $ do
       let tx = txOf keyPathAnnexTx
-      verifyStdTx btc ctx tx (coinOfTx tx "512028066f61c28af1ecb48c7948f8b5770838eec15223c8697a8e40510c2c29ea04") `shouldBe` True
+      verifyStdTx btc tx (coinOfTx tx "512028066f61c28af1ecb48c7948f8b5770838eec15223c8697a8e40510c2c29ea04") `shouldBe` True
     it "accepts the script path spend of a single key leaf with an annex that Bitcoin Core 32.1 mined on regtest" $ do
       let tx = txOf scriptPathAnnexTx
-      verifyStdTx btc ctx tx (coinOfTx tx "5120a354b6c111a5f8339fd8ea5bc6147f8ca829029188e4d3f7622751417328be18") `shouldBe` True
+      verifyStdTx btc tx (coinOfTx tx "5120a354b6c111a5f8339fd8ea5bc6147f8ca829029188e4d3f7622751417328be18") `shouldBe` True
     -- The witness holds a valid signature of the leaf key over the leaf
     -- "<key> OP_CHECKSIG", and a control block that names the same key as
     -- internal key. The coin's output key does not commit to that leaf.
     it "refuses a script path spend whose leaf the output key of the coin does not commit to" $ do
       let tx = txOf uncommittedLeafTx
-      verifyStdTx btc ctx tx (coinOfTx tx "5120da4710964f7852695de2da025290e24af6d8c281de5a0b902b7135fd9fd74d21") `shouldBe` False
+      verifyStdTx btc tx (coinOfTx tx "5120da4710964f7852695de2da025290e24af6d8c281de5a0b902b7135fd9fd74d21") `shouldBe` False
     it "refuses a Taproot input that has an input script" $ do
       let tx = txOf keyPathAnnexTx
           withScript = tx {inputs = [i {script = "\x51"} | i <- tx.inputs]} :: Tx
-      verifyStdTx btc ctx withScript (coinOfTx tx "512028066f61c28af1ecb48c7948f8b5770838eec15223c8697a8e40510c2c29ea04") `shouldBe` False
+      verifyStdTx btc withScript (coinOfTx tx "512028066f61c28af1ecb48c7948f8b5770838eec15223c8697a8e40510c2c29ea04") `shouldBe` False
 
     -- BIP 342 defines the rules of leaf version 0xc0 only. A leaf of another
     -- version is not a Tapscript, so its key check is not something this
     -- function can vouch for.
     it "verifies the script path spend of a single key leaf of version 0xc0, and not of version 0xc2" $ do
-      let (leafSecret, leafPublic) = bip86Key ctx
-          internal = fromJust (importXOnlyPubKey ctx (hexBytes "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"))
-          leafScript = Script [opPushData (exportXOnlyPubKey ctx leafPublic.point), OP_CHECKSIG]
+      let (leafSecret, leafPublic) = bip86Key
+          internal = fromJust (importXOnlyPubKey (hexBytes "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"))
+          leafScript = Script [opPushData (exportXOnlyPubKey leafPublic.point), OP_CHECKSIG]
           outpoint = OutPoint "1111111111111111111111111111111111111111111111111111111111111111" 0
           spendWith version = do
             let output = TaprootOutput internal (Just (MASTLeaf version leafScript))
-                coinScript = taprootScriptOutput ctx output
-                unsigned = buildTx ctx [outpoint] [(coinScript, 99000)]
-            digest <- taprootSigHash unsigned [TxOut 100000 (marshal ctx coinScript)] 0 sigHashDefault Nothing (Just (leafHash version leafScript, 0xffffffff))
-            signature <- taprootSignature (signSchnorr ctx leafSecret.key (hashToMsg digest)) sigHashDefault
+                coinScript = taprootScriptOutput output
+                unsigned = buildTx [outpoint] [(coinScript, 99000)]
+            digest <- taprootSigHash unsigned [TxOut 100000 (encodeSerial coinScript)] 0 sigHashDefault Nothing (Just (leafHash version leafScript, 0xffffffff))
+            signature <- taprootSignature (signSchnorr leafSecret.key (hashToMsg digest)) sigHashDefault
             witness <-
-              encodeTaprootWitness ctx . ScriptPathSpend $
-                ScriptPathData {annex = Nothing, stack = [encodeTaprootSig signature], script = leafScript, extIsOdd = odd (keyParity ctx (taprootOutputKey ctx output)), leafVersion = version, internalKey = internal, control = [], opaqueScript = Nothing}
-            return (verifyStdTx btc ctx (Tx unsigned.version unsigned.inputs unsigned.outputs [witness] unsigned.locktime) [(coinScript, 100000, outpoint)])
+              encodeTaprootWitness . ScriptPathSpend $
+                ScriptPathData {annex = Nothing, stack = [encodeTaprootSig signature], script = leafScript, extIsOdd = odd (keyParity (taprootOutputKey output)), leafVersion = version, internalKey = internal, control = [], opaqueScript = Nothing}
+            return (verifyStdTx btc (Tx unsigned.version unsigned.inputs unsigned.outputs [witness] unsigned.locktime) [(coinScript, 100000, outpoint)])
       spendWith 0xc0 `shouldBe` Right True
       spendWith 0xc2 `shouldBe` Right False
 
   describe "Control blocks" $
     it "are refused when the internal key is not the x coordinate of a point" $
       -- ff…ff is above the field size, so it is no x coordinate
-      decodeControlBlock ctx ("\xc0" <> BS.replicate 32 0xff) `shouldBe` Left "decodeControlBlock: the internal key is not an x-only public key"
+      decodeControlBlock ("\xc0" <> BS.replicate 32 0xff) `shouldBe` Left "decodeControlBlock: the internal key is not an x-only public key"
 
   describe "X-only keys as text and bytes" $ do
     let x = "7a338b2a113a14b5a008560cbf5d3c46a6c282967c05f739f30668d32fc538b5"
-        json t = unmarshalJSON ctx (encode (String t)) :: Maybe XOnlyPubKey
+        json t = decode (encode (String t)) :: Maybe XOnlyPubKey
     it "are read from the hex of 32 bytes" $
-      fmap (encodeHex . marshal ctx) (json x) `shouldBe` Just x
+      fmap (encodeHex . encodeSerial) (json x) `shouldBe` Just x
     it "are refused from the hex of 33 bytes, of 64 bytes and of 31 bytes" $ do
       json (x <> "ff") `shouldBe` Nothing
       json (x <> x) `shouldBe` Nothing
       json (Data.Text.dropEnd 2 x) `shouldBe` Nothing
     it "are refused from 33 bytes" $
-      (unmarshal ctx (hexBytes x <> "\xff") :: Either String XOnlyPubKey) `shouldSatisfy` isLeft
+      (decodeSerial (hexBytes x <> "\xff") :: Either String XOnlyPubKey) `shouldSatisfy` isLeft
 
   describe "The depth limit of a script tree" $ do
     -- BIP 341: a control block holds at most 128 nodes, so a leaf deeper
@@ -569,22 +569,22 @@ spec = prepareContext $ \ctx -> do
       checkTapTree (MASTLeaf 0xc1 (Script [OP_1])) `shouldBe` Left "checkTapTree: the leaf version 193 is odd"
       checkTapTree (MASTLeaf 0x50 (Script [OP_1])) `shouldBe` Left "checkTapTree: the leaf version 0x50 would read as an annex"
     it "the proof of a leaf at depth 128 verifies, and the proof of a leaf at depth 129 does not" $ do
-      let (_, p) = bip86Key ctx
-          internal = fromJust (importXOnlyPubKey ctx (exportXOnlyPubKey ctx p.point))
+      let (_, p) = bip86Key
+          internal = fromJust (importXOnlyPubKey (exportXOnlyPubKey p.point))
           deepest tree =
-            let outputKey = taprootOutputKey ctx (TaprootOutput internal (Just tree))
+            let outputKey = taprootOutputKey (TaprootOutput internal (Just tree))
                 (version, script, proof) = last (getMerkleProofs tree)
-                spend = ScriptPathData {annex = Nothing, stack = [], script, extIsOdd = odd (keyParity ctx outputKey), leafVersion = version, internalKey = internal, control = proof, opaqueScript = Nothing}
-             in (length proof, verifyScriptPathData ctx outputKey spend)
+                spend = ScriptPathData {annex = Nothing, stack = [], script, extIsOdd = odd (keyParity outputKey), leafVersion = version, internalKey = internal, control = proof, opaqueScript = Nothing}
+             in (length proof, verifyScriptPathData outputKey spend)
       deepest (chain 128) `shouldBe` (128, True)
       deepest (chain 129) `shouldBe` (129, False)
 
 -- | The first key of the BIP 86 vectors, m/86'/0'/0'/0/0
-bip86Key :: Ctx -> (PrivateKey, PublicKey)
-bip86Key ctx = (PrivateKey secret True, PublicKey (derivePubKey ctx secret) True)
+bip86Key :: (PrivateKey, PublicKey)
+bip86Key = (PrivateKey secret True, PublicKey (derivePubKey secret) True)
   where
     root = fromJust (xPrvImport btc "xprv9s21ZrQH143K3GJpoapnV8SFfukcVBSfeCficPSGfubmSFDxo1kuHnLisriDvSnRRuL2Qrg5ggqHKNVpxR86QEC8w35uxmGoggxtQTPvfUu")
-    secret = (derivePath ctx ("m/86'/0'/0'/0/0" :: DerivPath) root).key
+    secret = (derivePath ("m/86'/0'/0'/0/0" :: DerivPath) root).key
 
 -- | The test vectors of BIP 86: path, internal key, output key, address
 bip86Vectors :: [(DerivPath, Text, Text, Text)]
@@ -665,8 +665,8 @@ scriptOf = either error id . runGetS deserialize . hexBytes
 
 -- | The coin of 100,000 satoshi that the first input of a transaction
 -- spends, with the output script given in hex
-oneCoin :: Ctx -> Tx -> Text -> [(ScriptOutput, Word64, OutPoint)]
-oneCoin ctx tx script = [(either error id (unmarshal ctx (hexBytes script)), 100000, (head tx.inputs).outpoint)]
+oneCoin :: Tx -> Text -> [(ScriptOutput, Word64, OutPoint)]
+oneCoin tx script = [(either error id (decodeSerial (hexBytes script)), 100000, (head tx.inputs).outpoint)]
 
 txOf :: Text -> Tx
 txOf = either error id . S.decode . hexBytes
@@ -706,9 +706,9 @@ hexBytes = fromJust . decodeHex
 expectRight :: Either String a -> IO a
 expectRight = either fail return
 
-coinsOf :: Ctx -> KeyPathVector -> [(ScriptOutput, Word64, OutPoint)]
-coinsOf ctx v =
-  [ (either error id (unmarshal ctx coin.script), coin.value, input.outpoint)
+coinsOf :: KeyPathVector -> [(ScriptOutput, Word64, OutPoint)]
+coinsOf v =
+  [ (either error id (decodeSerial coin.script), coin.value, input.outpoint)
   | (input, coin) <- zip v.unsignedTx.inputs v.spent
   ]
 
@@ -727,29 +727,29 @@ testHashes testData =
       leaf@MASTLeaf {} -> [BA.convert $ mastCommitment leaf]
       MASTCommitment {} -> mempty -- The test vectors have complete trees
 
-testOutputKey :: Ctx -> TestScriptPubKey -> IO ()
-testOutputKey ctx testData = do
-  XOnlyPubKey (taprootOutputKey ctx theOutput) @?= theOutputKey
+testOutputKey :: TestScriptPubKey -> IO ()
+testOutputKey testData = do
+  XOnlyPubKey (taprootOutputKey theOutput) @?= theOutputKey
   where
     theOutput = tspkGiven testData
     theOutputKey = XOnlyPubKey . spkiTweakedPubKey $ tspkIntermediary testData
 
-testScriptOutput :: Ctx -> TestScriptPubKey -> IO ()
-testScriptOutput ctx testData =
-  taprootScriptOutput ctx (tspkGiven testData) @?= (spkeScriptPubKey . tspkExpected) testData
+testScriptOutput :: TestScriptPubKey -> IO ()
+testScriptOutput testData =
+  taprootScriptOutput (tspkGiven testData) @?= (spkeScriptPubKey . tspkExpected) testData
 
-testControlBlocks :: Ctx -> TestScriptPubKey -> IO ()
-testControlBlocks ctx testData = do
+testControlBlocks :: TestScriptPubKey -> IO ()
+testControlBlocks testData = do
   mapM_ onExamples exampleControlBlocks
   mapM_ checkVerification scriptPathSpends
   where
     theOutput = tspkGiven testData
-    theOutputKey = taprootOutputKey ctx theOutput
+    theOutputKey = taprootOutputKey theOutput
     exampleControlBlocks = spkeControlBlocks $ tspkExpected testData
     -- The control block is the last item of the witness: the stack is
     -- empty, so it comes after the script
     calculatedControlBlocks =
-      either error last . encodeTaprootWitness ctx . ScriptPathSpend <$> scriptPathSpends
+      either error last . encodeTaprootWitness . ScriptPathSpend <$> scriptPathSpends
     scriptPathSpends =
       mkScriptPathSpend <$> maybe mempty getMerkleProofs theOutput.mast
     mkScriptPathSpend (leafVersion, script, proof) =
@@ -757,22 +757,22 @@ testControlBlocks ctx testData = do
         { annex = Nothing,
           stack = mempty,
           script,
-          extIsOdd = odd $ keyParity ctx theOutputKey,
+          extIsOdd = odd $ keyParity theOutputKey,
           leafVersion,
           internalKey = theOutput.internalKey,
           control = proof,
           opaqueScript = Nothing
         }
     onExamples expected = map encodeHex calculatedControlBlocks @?= map encodeHex expected
-    checkVerification = assertBool "Script verifies" . verifyScriptPathData ctx theOutputKey
+    checkVerification = assertBool "Script verifies" . verifyScriptPathData theOutputKey
 
-testAddress :: Ctx -> TestScriptPubKey -> IO ()
-testAddress ctx testData =
+testAddress :: TestScriptPubKey -> IO ()
+testAddress testData =
   computedAddress @?= (Just . spkeAddress . tspkExpected) testData
   where
     computedAddress =
-      (addrToText btc <=< outputAddress btc ctx)
-        . taprootScriptOutput ctx
+      (addrToText btc <=< outputAddress btc)
+        . taprootScriptOutput
         $ tspkGiven testData
 
 testTreeLeaves :: TestScriptPubKey -> IO ()
@@ -784,9 +784,9 @@ testTreeLeaves testData =
 
 newtype SpkGiven = SpkGiven {unSpkGiven :: TaprootOutput}
 
-spkGivenParseJSON :: Ctx -> Value -> Parser SpkGiven
-spkGivenParseJSON ctx = withObject "SpkGiven" $ \obj -> do
-  pxopk@XOnlyPubKey {} <- unmarshalValue ctx =<< obj .: "internalPubkey"
+spkGivenParseJSON :: Value -> Parser SpkGiven
+spkGivenParseJSON = withObject "SpkGiven" $ \obj -> do
+  pxopk@XOnlyPubKey {} <- parseJSON =<< obj .: "internalPubkey"
   tree <- traverse parseScriptTree =<< obj .:? "scriptTree"
   return $ SpkGiven $ TaprootOutput pxopk.point tree
   where
@@ -810,14 +810,14 @@ data SpkIntermediary = SpkIntermediary
     spkiTweakedPubKey :: PubKey
   }
 
-spkIntermediaryParseJSON :: Ctx -> Value -> Parser SpkIntermediary
-spkIntermediaryParseJSON ctx = withObject "SpkIntermediary" $ \obj ->
+spkIntermediaryParseJSON :: Value -> Parser SpkIntermediary
+spkIntermediaryParseJSON = withObject "SpkIntermediary" $ \obj ->
   SpkIntermediary
     <$> (obj .:? "leafHashes" >>= (traverse . traverse) jsonHex)
     <*> (obj .: "merkleRoot" >>= traverse jsonHex)
     <*> fmap
       (\(XOnlyPubKey k) -> k)
-      (unmarshalValue ctx =<< obj .: "tweakedPubkey")
+      (parseJSON =<< obj .: "tweakedPubkey")
 
 data SpkExpected = SpkExpected
   { spkeScriptPubKey :: ScriptOutput,
@@ -825,10 +825,10 @@ data SpkExpected = SpkExpected
     spkeAddress :: Text
   }
 
-spkExpectedParseJSON :: Ctx -> Value -> Parser SpkExpected
-spkExpectedParseJSON ctx = withObject "SpkExpected" $ \obj ->
+spkExpectedParseJSON :: Value -> Parser SpkExpected
+spkExpectedParseJSON = withObject "SpkExpected" $ \obj ->
   SpkExpected
-    <$> (unmarshalValue ctx =<< obj .: "scriptPubKey")
+    <$> (parseJSON =<< obj .: "scriptPubKey")
     <*> ((traverse . traverse) jsonHex =<< obj .:? "scriptPathControlBlocks")
     <*> obj .: "bip350Address"
 
@@ -838,11 +838,11 @@ data TestScriptPubKey = TestScriptPubKey
     tspkExpected :: SpkExpected
   }
 
-testScriptPubKeyParseJSON :: Ctx -> Value -> Parser TestScriptPubKey
-testScriptPubKeyParseJSON ctx = withObject "TestScriptPubKey" $ \obj -> do
-  given <- unSpkGiven <$> (spkGivenParseJSON ctx =<< obj .: "given")
-  inter <- spkIntermediaryParseJSON ctx =<< obj .: "intermediary"
-  expect <- spkExpectedParseJSON ctx =<< obj .: "expected"
+testScriptPubKeyParseJSON :: Value -> Parser TestScriptPubKey
+testScriptPubKeyParseJSON = withObject "TestScriptPubKey" $ \obj -> do
+  given <- unSpkGiven <$> (spkGivenParseJSON =<< obj .: "given")
+  inter <- spkIntermediaryParseJSON =<< obj .: "intermediary"
+  expect <- spkExpectedParseJSON =<< obj .: "expected"
   return $ TestScriptPubKey given inter expect
 
 -- | The keyPathSpending vector: the unsigned transaction, the outputs it
@@ -898,10 +898,10 @@ data TestVector = TestVector
     testKeyPath :: KeyPathVector
   }
 
-testVectorParseJSON :: Ctx -> Value -> Parser TestVector
-testVectorParseJSON ctx = withObject "TestVector" $ \obj ->
+testVectorParseJSON :: Value -> Parser TestVector
+testVectorParseJSON = withObject "TestVector" $ \obj ->
   TestVector
-    <$> (mapM (testScriptPubKeyParseJSON ctx) =<< obj .: "scriptPubKey")
+    <$> (mapM testScriptPubKeyParseJSON =<< obj .: "scriptPubKey")
     <*> (obj .: "keyPathSpending" >>= \case [v] -> keyPathParseJSON v; _ -> fail "one keyPathSpending vector")
 
 jsonHex :: Text -> Parser ByteString

@@ -90,7 +90,8 @@ spec = do
     it "is sorted" $
       V.toList slip39WordList `shouldBe` sort (V.toList slip39WordList)
     it "has words of 4 to 8 letters" $
-      forM_ slip39WordList $ \w -> T.length w `shouldSatisfy` (\n -> n >= 4 && n <= 8)
+      forM_ slip39WordList $
+        \w -> T.length w `shouldSatisfy` (\n -> n >= 4 && n <= 8)
     it "has distinct first four letters" $
       length (nub (map (T.take 4) (V.toList slip39WordList))) `shouldBe` 1024
     it "gives each word its index" $ do
@@ -132,7 +133,8 @@ spec = do
       gfInv 0 `shouldBe` Nothing
       gfDiv 1 0 `shouldBe` Nothing
     it "multiplies every non-zero byte by its inverse to one" $
-      forM_ [1 .. 255] $ \a -> (gfMul a <$> gfInv a) `shouldBe` Just 1
+      forM_ [1 .. 255] $
+        \a -> (gfMul a <$> gfInv a) `shouldBe` Just 1
     it "divides 0xc1 by 0x83 to 0x57" $
       gfDiv 0xc1 0x83 `shouldBe` Just 0x57
 
@@ -371,10 +373,11 @@ spec = do
       splitRandomSizes 2 16 `shouldBe` (0, 16, 12)
       splitRandomSizes 5 32 `shouldBe` (3, 32, 28)
     it "recovers any random secret from any threshold of its shares" $
-      property $ forAll ((,) <$> bytesOf 16 <*> bytesOf 12) $ \(s, r) ->
-        case splitSecret 2 3 s (SplitRandom [] r) of
-          Right shares -> all ((== Right s) . recoverSecret 2) [two | two <- subsequences shares, length two == 2]
-          Left _ -> False
+      property $
+        forAll ((,) <$> bytesOf 16 <*> bytesOf 12) $ \(s, r) ->
+          case splitSecret 2 3 s (SplitRandom [] r) of
+            Right shares -> all ((== Right s) . recoverSecret 2) [two | two <- subsequences shares, length two == 2]
+            Left _ -> False
 
   describe "the passphrase" $ do
     let secret = "ABCDEFGHIJKLMNOP"
@@ -447,8 +450,9 @@ spec = do
     it "shows an encrypted master secret without its ciphertext" $
       show ems `shouldBe` "EncryptedMasterSecret {identifier = 7945, extendable = False, iterationExponent = 0, ciphertext = <redacted>}"
     it "decrypts what it encrypts, for any secret and passphrase" $
-      property $ forAll ((,) <$> bytesOf 16 <*> listOf (elements [' ' .. '~'])) $ \(s, p) ->
-        (encryptMasterSecret 5 True 0 (T.pack p) s >>= decryptMasterSecret (T.pack p)) === Right s
+      property $
+        forAll ((,) <$> bytesOf 16 <*> listOf (elements [' ' .. '~'])) $ \(s, p) ->
+          (encryptMasterSecret 5 True 0 (T.pack p) s >>= decryptMasterSecret (T.pack p)) === Right s
 
   describe "generating shares" $ do
     forM_ splitCases $ \c -> do
@@ -530,22 +534,24 @@ spec = do
       draw (1, 2, 3, 4, 5) `shouldBe` draw (1, 2, 3, 4, 5)
       draw (1, 2, 3, 4, 5) `shouldNotBe` draw (6, 7, 8, 9, 10)
     it "rebuilds a secret of 16 to 64 bytes from a threshold of the shares of any small scheme" $
-      property $ forAll splitOfAnyScheme $ \(scheme, ext, passphrase, secret, drawn) ->
-        case drawn of
-          Left err -> counterexample err False
-          Right groups ->
-            -- the first groups and the first members that meet the
-            -- thresholds, then the last ones
-            let firstOnes = concat [take t members | ((t, _), members) <- take scheme.groupThreshold (zip scheme.groups groups)]
-                lastOnes = concat [lastN t members | ((t, _), members) <- lastN scheme.groupThreshold (zip scheme.groups groups)]
-                rebuilt shares = combineShares shares >>= decryptMasterSecret passphrase
-             in (rebuilt firstOnes, rebuilt lastOnes) === (Right secret, Right secret)
+      property $
+        forAll splitOfAnyScheme $ \(scheme, ext, passphrase, secret, drawn) ->
+          case drawn of
+            Left err -> counterexample err False
+            Right groups ->
+              -- the first groups and the first members that meet the
+              -- thresholds, then the last ones
+              let firstOnes = concat [take t members | ((t, _), members) <- take scheme.groupThreshold (zip scheme.groups groups)]
+                  lastOnes = concat [lastN t members | ((t, _), members) <- lastN scheme.groupThreshold (zip scheme.groups groups)]
+                  rebuilt shares = combineShares shares >>= decryptMasterSecret passphrase
+               in (rebuilt firstOnes, rebuilt lastOnes) === (Right secret, Right secret)
     it "refuses a share with one word of its value or checksum changed" $
       -- the checksum catches any change of up to three words
-      property $ forAll changedWord $ \(position, word) ->
-        let ws = T.words (mnemonicOf vectors 1)
-            changed = T.unwords (take position ws ++ [word] ++ drop (position + 1) ws)
-         in ws !! position /= word ==> decodeShare changed === Left "The checksum of the mnemonic is invalid"
+      property $
+        forAll changedWord $ \(position, word) ->
+          let ws = T.words (mnemonicOf vectors 1)
+              changed = T.unwords (take position ws ++ [word] ++ drop (position + 1) ws)
+           in ws !! position /= word ==> decodeShare changed === Left "The checksum of the mnemonic is invalid"
     it "draws shares with the system's randomness that rebuild a two-level scheme" $ do
       let secret = "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"
       drawn <- generateMnemonics (Scheme 2 [(1, 1), (2, 3), (3, 5)]) True 0 "pass" secret
@@ -603,8 +609,9 @@ spec = do
         then it (T.unpack d <> ": gives the master secret and its BIP-32 key") $ do
           combineMnemonics "TREZOR" ms `shouldBe` Right (hex secret)
           xPrvExport btc (makeXPrvKey (hex secret)) `shouldBe` xprv
-        else it (T.unpack d <> ": is refused") $
-          combineMnemonics "TREZOR" ms `shouldBe` Left (refusalOf n)
+        else
+          it (T.unpack d <> ": is refused") $
+            combineMnemonics "TREZOR" ms `shouldBe` Left (refusalOf n)
 
 -- | A share made by version 0.3.0 of the reference implementation with the
 -- passphrase "café", from its tests. Its master secret is ABCDEFGHIJKLMNOP.
@@ -711,9 +718,9 @@ refusalOf n = case n of
 thresholdSubsets :: SplitCase -> [[Text]]
 thresholdSubsets c =
   [ concat members
-    | chosen <- subsequences (zip (map fst c.caseScheme.groups) c.caseMnemonics),
-      length chosen == c.caseScheme.groupThreshold,
-      members <- mapM (\(threshold, ms) -> [ms' | ms' <- subsequences ms, length ms' == threshold]) chosen
+  | chosen <- subsequences (zip (map fst c.caseScheme.groups) c.caseMnemonics),
+    length chosen == c.caseScheme.groupThreshold,
+    members <- mapM (\(threshold, ms) -> [ms' | ms' <- subsequences ms, length ms' == threshold]) chosen
   ]
 
 -- | A share of the given fields, decoded from its mnemonic for its value.

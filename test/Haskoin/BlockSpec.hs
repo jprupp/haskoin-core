@@ -39,11 +39,11 @@ import Test.Hspec.QuickCheck
 import Test.QuickCheck
 import Text.Printf (printf)
 
-identityTests :: Ctx -> IdentityTests
-identityTests ctx =
+identityTests :: IdentityTests
+identityTests =
   def
     { readTests =
-        [ ReadBox (flip arbitraryBlock ctx =<< arbitraryNetwork),
+        [ ReadBox (arbitraryBlock =<< arbitraryNetwork),
           ReadBox arbitraryBlockHash,
           ReadBox arbitraryBlockHeader,
           ReadBox arbitraryGetBlocks,
@@ -54,12 +54,12 @@ identityTests ctx =
           ReadBox arbitraryHeaderMemory
         ],
       jsonTests =
-        [ JsonBox (flip arbitraryBlock ctx =<< arbitraryNetwork),
+        [ JsonBox (arbitraryBlock =<< arbitraryNetwork),
           JsonBox arbitraryBlockHash,
           JsonBox arbitraryBlockHeader
         ],
       serialTests =
-        [ SerialBox (flip arbitraryBlock ctx =<< arbitraryNetwork),
+        [ SerialBox (arbitraryBlock =<< arbitraryNetwork),
           SerialBox arbitraryBlockHash,
           SerialBox arbitraryBlockHeader,
           SerialBox arbitraryGetBlocks,
@@ -224,8 +224,8 @@ displayTxHash :: Text -> TxHash
 displayTxHash = fromJust . hexToTxHash
 
 spec :: Spec
-spec = prepareContext $ \ctx -> do
-  testIdentity $ identityTests ctx
+spec = do
+  testIdentity $ identityTests
   blockHashSpec
   blockHeaderSpec
   compactSpec

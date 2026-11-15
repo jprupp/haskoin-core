@@ -12,10 +12,10 @@ import Data.Aeson as A
 import Data.Aeson.Lens
 import Data.ByteString qualified as B
 import Data.ByteString.Char8 qualified as C
-import Data.Char (isAsciiLower, isAsciiUpper, toLower, toUpper)
 import Data.Bytes.Get
 import Data.Bytes.Put
 import Data.Bytes.Serial
+import Data.Char (isAsciiLower, isAsciiUpper, toLower, toUpper)
 import Data.Default (def)
 import Data.Either (isLeft)
 import Data.List (isInfixOf)
@@ -38,55 +38,58 @@ import Test.Hspec
 import Test.Hspec.QuickCheck
 import Test.QuickCheck
 
-identityTests :: Ctx -> IdentityTests
-identityTests ctx =
+identityTests :: IdentityTests
+identityTests =
   def
     { readTests =
-        [ ReadBox (arbitrary :: Gen SecKey),
-          ReadBox (arbitraryPublicKey ctx)
+        [ ReadBox arbitraryPublicKey
+        ],
+      jsonTests =
+        [ JsonBox arbitraryPublicKey
         ],
       marshalJsonTests =
-        [ MarshalJsonBox $ (,) <$> arbitraryNetwork <*> arbitraryPrivateKey,
-          MarshalJsonBox ((,) ctx <$> arbitraryPublicKey ctx)
+        [ MarshalJsonBox $ (,) <$> arbitraryNetwork <*> arbitraryPrivateKey
         ],
       serialTests =
-        [ SerialBox arbitraryPrivateKey
-        ],
-      marshalTests =
-        [ MarshalBox ((,) ctx <$> arbitraryPublicKey ctx)
+        [ SerialBox arbitraryPrivateKey,
+          SerialBox arbitraryPublicKey
         ]
     }
 
 spec :: Spec
-spec = prepareContext $ \ctx -> do
+spec = do
   describe "Key pair property checks" $ do
-    testIdentity $ identityTests ctx
+    testIdentity $ identityTests
     prop "a compressed key is written in 33 bytes starting with 02 or 03, an uncompressed key in 65 bytes starting with 04" $
-      forAll (arbitraryKeyPair ctx) $ \(_, pub) ->
-        let bytes = marshal ctx pub
+      forAll arbitraryKeyPair $ \(_, pub) ->
+        let bytes = encodeSerial pub
          in if pub.compress
               then B.length bytes == 33 && B.head bytes `elem` [0x02, 0x03]
               else B.length bytes == 65 && B.head bytes == 0x04
+    prop "a secret key is not shown, and is still read from its hex" $
+      forAll (arbitrary :: Gen SecKey) $ \sec -> do
+        show sec `shouldBe` "SecKey <redacted>"
+        read (show (encodeHex sec.get)) `shouldBe` sec
     prop "Public key show . read identity" $
-      forAll (arbitraryKeyPair ctx) $ \(_, pub) ->
+      forAll arbitraryKeyPair $ \(_, pub) ->
         (read . show) pub == pub
     prop "Public key binary serialization" $ do
-      forAll (arbitraryKeyPair ctx) $ \(sec, pub) ->
-        (unmarshal ctx . marshal ctx) pub == Right pub
+      forAll arbitraryKeyPair $ \(sec, pub) ->
+        (decodeSerial . encodeSerial) pub == Right pub
     prop "fromWif . toWif identity" $
       forAll arbitraryNetwork $ \net ->
-        forAll (arbitraryKeyPair ctx) $ \(key, _) ->
+        forAll arbitraryKeyPair $ \(key, _) ->
           (fromWif net . toWif net) key == Just key
     prop "WIF binary identity" $
       forAll arbitraryNetwork $ \net ->
-        forAll (arbitraryKeyPair ctx) $ \(key, _) ->
+        forAll arbitraryKeyPair $ \(key, _) ->
           (runGetS deserialize . runPutS . serialize) key == Right key
   describe "Bitcoin core vectors /src/test/key_tests.cpp" $ do
     it "Passes WIF decoding tests" testPrivkey
     it "Passes SecKey compression tests" testPrvKeyCompressed
-    it "Passes PubKey compression tests" $ testKeyCompressed ctx
-    it "Passes address matching tests" $ testMatchingAddress ctx
-    it "Passes signature verification" $ testSigs ctx
+    it "Passes PubKey compression tests" $ testKeyCompressed
+    it "Passes address matching tests" $ testMatchingAddress
+    it "Passes signature verification" $ testSigs
   describe "MiniKey vectors" $
     it "Passes MiniKey decoding tests" testMiniKey
   describe "Secret key range" $ do
@@ -163,46 +166,44 @@ spec = prepareContext $ \ctx -> do
       fromMiniKey "0OIl_______________607" `shouldBe` Nothing
   describe "Key tweaks" $ do
     it "adding a zero tweak leaves the secret key unchanged" $
-      tweakSecKey ctx secKey1 zeroHash `shouldBe` Just secKey1
+      tweakSecKey secKey1 zeroHash `shouldBe` Just secKey1
     it "adding one to secret key 1 gives secret key 2" $
-      tweakSecKey ctx secKey1 oneHash
+      tweakSecKey secKey1 oneHash
         `shouldBe` Just "0000000000000000000000000000000000000000000000000000000000000002"
     it "refuses a tweak that brings the secret key to zero" $
       -- 1 + (n - 1) = n, which is 0 modulo n
-      tweakSecKey ctx secKey1 orderMinusOneHash `shouldBe` Nothing
+      tweakSecKey secKey1 orderMinusOneHash `shouldBe` Nothing
     it "refuses a tweak at or above the curve order" $
-      tweakSecKey ctx secKey1 orderHash `shouldBe` Nothing
+      tweakSecKey secKey1 orderHash `shouldBe` Nothing
     it "adding one to the public key of 1 gives the public key of 2" $
-      tweakPubKey ctx (pubKey1 ctx) oneHash `shouldBe` Just (pubKey2 ctx)
+      tweakPubKey pubKey1 oneHash `shouldBe` Just pubKey2
     it "refuses a tweak that brings the public key to infinity" $
-      tweakPubKey ctx (pubKey1 ctx) orderMinusOneHash `shouldBe` Nothing
+      tweakPubKey pubKey1 orderMinusOneHash `shouldBe` Nothing
     prop "tweaking the public key matches tweaking the secret key" $
       forAll arbitraryPrivateKey $ \k ->
         forAll arbitraryHash256 $ \t ->
-          (derivePubKey ctx <$> tweakSecKey ctx k.key t)
-            == tweakPubKey ctx (derivePubKey ctx k.key) t
+          (derivePubKey <$> tweakSecKey k.key t)
+            == tweakPubKey (derivePubKey k.key) t
   describe "Public key text forms" $ do
     it "parses a compressed public key from JSON" $
-      unmarshalJSON ctx "\"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\""
-        `shouldBe` Just (wrapPubKey True (pubKey1 ctx))
+      A.decode "\"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\""
+        `shouldBe` Just (wrapPubKey True pubKey1)
     it "parses an uncompressed public key from JSON" $
-      unmarshalJSON
-        ctx
+      A.decode
         "\"0479be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\
         \483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8\""
-        `shouldBe` Just (wrapPubKey False (pubKey1 ctx))
+        `shouldBe` Just (wrapPubKey False pubKey1)
     it "refuses a public key with trailing bytes" $
-      (unmarshalJSON ctx "\"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798deadbeef\"" :: Maybe PublicKey)
+      (A.decode "\"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798deadbeef\"" :: Maybe PublicKey)
         `shouldBe` Nothing
     it "refuses a public key with an unknown prefix byte" $
-      (unmarshalJSON ctx "\"0579be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\"" :: Maybe PublicKey)
+      (A.decode "\"0579be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\"" :: Maybe PublicKey)
         `shouldBe` Nothing
     it "refuses a hybrid public key" $
       -- 06, then x and the even y of the public key of 1. Consensus takes
       -- this form, the relay rules of Bitcoin Core do not, and this library
       -- reads keys in the two standard forms only.
-      ( unmarshalJSON
-          ctx
+      ( A.decode
           "\"0679be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\
           \483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8\"" ::
           Maybe PublicKey
@@ -210,7 +211,7 @@ spec = prepareContext $ \ctx -> do
         `shouldBe` Nothing
     it "refuses a point that is not on the curve" $
       -- the invalid public key of BIP32 test vector 5
-      (unmarshalJSON ctx "\"020000000000000000000000000000000000000000000000000000000000000007\"" :: Maybe PublicKey)
+      (A.decode "\"020000000000000000000000000000000000000000000000000000000000000007\"" :: Maybe PublicKey)
         `shouldBe` Nothing
   describe "Binary private key" $ do
     it "is the 32 bytes of the key, then 01 for a compressed public key or 00" $ do
@@ -240,7 +241,7 @@ spec = prepareContext $ \ctx -> do
       length valid `shouldBe` 70
       length invalid `shouldBe` 70
     it "reads and writes every valid private key and address" $
-      mapM_ (testKeyIOValidVector ctx) valid
+      mapM_ testKeyIOValidVector valid
     it "refuses every invalid string as an address and as a private key, on every network" $
       mapM_ testKeyIOInvalidVector invalid
 
@@ -252,9 +253,9 @@ secKey1 :: SecKey
 secKey1 = "0000000000000000000000000000000000000000000000000000000000000001"
 
 -- | Public keys of the secret keys 1 and 2, that is G and 2G.
-pubKey1, pubKey2 :: Ctx -> PubKey
-pubKey1 ctx = fromJust $ importPubKey ctx $ hex "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
-pubKey2 ctx = fromJust $ importPubKey ctx $ hex "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"
+pubKey1, pubKey2 :: PubKey
+pubKey1 = fromJust $ importPubKey $ hex "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+pubKey2 = fromJust $ importPubKey $ hex "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"
 
 -- | Tweaks of 0, 1, n - 1 and n, where n is the curve order.
 zeroHash, oneHash, orderMinusOneHash, orderHash :: Hash256
@@ -275,8 +276,8 @@ testMiniKey =
 
 -- | One valid vector: a string, the bytes it stands for and its chain. For a
 -- private key the bytes are the secret, for an address the output script.
-testKeyIOValidVector :: Ctx -> (Text, Text, A.Value) -> Assertion
-testKeyIOValidVector ctx (string, payload, metadata)
+testKeyIOValidVector :: (Text, Text, A.Value) -> Assertion
+testKeyIOValidVector (string, payload, metadata)
   | isPrivkey = do
       let compressed = metadata ^?! key "isCompressed" . _Bool
           secret = fromMaybe (error "bad secret in the vector file") (secKey (hex payload))
@@ -296,17 +297,17 @@ testKeyIOValidVector ctx (string, payload, metadata)
       assertEqual
         ("the address " <> cs string <> " pays to the script")
         (Just payload)
-        (encodeHex <$> (addressToScriptBS ctx =<< textToAddr net string))
+        (encodeHex <$> (addressToScriptBS =<< textToAddr net string))
       assertEqual
         ("the script is written as the address " <> cs string)
         (Just string)
-        (addrToText net =<< eitherToMaybe (scriptToAddressBS net ctx (hex payload)))
+        (addrToText net =<< eitherToMaybe (scriptToAddressBS net (hex payload)))
       -- With the case of every letter flipped, a Bech32 address reads the
       -- same and a Base58 address does not read
       assertEqual
         ("the address " <> cs string <> " with its case flipped")
         (if tryCaseFlip then Just payload else Nothing)
-        (encodeHex <$> (addressToScriptBS ctx =<< textToAddr net (flipCase string)))
+        (encodeHex <$> (addressToScriptBS =<< textToAddr net (flipCase string)))
       assertEqual
         ("the address " <> cs string <> " is not a private key")
         Nothing
@@ -366,22 +367,22 @@ testPrvKeyCompressed = do
   assertBool "Key 1C" sec1C.compress
   assertBool "Key 2C" sec2C.compress
 
-testKeyCompressed :: Ctx -> Assertion
-testKeyCompressed ctx = do
-  assertBool "Key 1" $ not (pub1 ctx).compress
-  assertBool "Key 2" $ not (pub2 ctx).compress
-  assertBool "Key 1C" (pub1C ctx).compress
-  assertBool "Key 2C" (pub2C ctx).compress
+testKeyCompressed :: Assertion
+testKeyCompressed = do
+  assertBool "Key 1" $ not pub1.compress
+  assertBool "Key 2" $ not pub2.compress
+  assertBool "Key 1C" pub1C.compress
+  assertBool "Key 2C" pub2C.compress
 
-testMatchingAddress :: Ctx -> Assertion
-testMatchingAddress ctx = do
-  assertEqual "Key 1" (Just addr1) $ addrToText btc (pubKeyAddr ctx (pub1 ctx))
-  assertEqual "Key 2" (Just addr2) $ addrToText btc (pubKeyAddr ctx (pub2 ctx))
-  assertEqual "Key 1C" (Just addr1C) $ addrToText btc (pubKeyAddr ctx (pub1C ctx))
-  assertEqual "Key 2C" (Just addr2C) $ addrToText btc (pubKeyAddr ctx (pub2C ctx))
+testMatchingAddress :: Assertion
+testMatchingAddress = do
+  assertEqual "Key 1" (Just addr1) $ addrToText btc (pubKeyAddr pub1)
+  assertEqual "Key 2" (Just addr2) $ addrToText btc (pubKeyAddr pub2)
+  assertEqual "Key 1C" (Just addr1C) $ addrToText btc (pubKeyAddr pub1C)
+  assertEqual "Key 2C" (Just addr2C) $ addrToText btc (pubKeyAddr pub2C)
 
-testSigs :: Ctx -> Assertion
-testSigs ctx = forM_ sigMsg $ testSignature ctx . doubleSHA256
+testSigs :: Assertion
+testSigs = forM_ sigMsg $ testSignature . doubleSHA256
 
 sigMsg :: [B.ByteString]
 sigMsg =
@@ -389,28 +390,28 @@ sigMsg =
   | i <- [0 .. 15]
   ]
 
-testSignature :: Ctx -> Hash256 -> Assertion
-testSignature ctx h = do
-  let sign1 = signHash ctx sec1.key h
-      sign2 = signHash ctx sec2.key h
-      sign1C = signHash ctx sec1C.key h
-      sign2C = signHash ctx sec2C.key h
-  assertBool "Key 1, Sign1" $ verifyHashSig ctx h sign1 (pub1 ctx).point
-  assertBool "Key 1, Sign2" $ not $ verifyHashSig ctx h sign2 (pub1 ctx).point
-  assertBool "Key 1, Sign1C" $ verifyHashSig ctx h sign1C (pub1 ctx).point
-  assertBool "Key 1, Sign2C" $ not $ verifyHashSig ctx h sign2C (pub1 ctx).point
-  assertBool "Key 2, Sign1" $ not $ verifyHashSig ctx h sign1 (pub2 ctx).point
-  assertBool "Key 2, Sign2" $ verifyHashSig ctx h sign2 (pub2 ctx).point
-  assertBool "Key 2, Sign1C" $ not $ verifyHashSig ctx h sign1C (pub2 ctx).point
-  assertBool "Key 2, Sign2C" $ verifyHashSig ctx h sign2C (pub2 ctx).point
-  assertBool "Key 1C, Sign1" $ verifyHashSig ctx h sign1 (pub1C ctx).point
-  assertBool "Key 1C, Sign2" $ not $ verifyHashSig ctx h sign2 (pub1C ctx).point
-  assertBool "Key 1C, Sign1C" $ verifyHashSig ctx h sign1C (pub1C ctx).point
-  assertBool "Key 1C, Sign2C" $ not $ verifyHashSig ctx h sign2C (pub1C ctx).point
-  assertBool "Key 2C, Sign1" $ not $ verifyHashSig ctx h sign1 (pub2C ctx).point
-  assertBool "Key 2C, Sign2" $ verifyHashSig ctx h sign2 (pub2C ctx).point
-  assertBool "Key 2C, Sign1C" $ not $ verifyHashSig ctx h sign1C (pub2C ctx).point
-  assertBool "Key 2C, Sign2C" $ verifyHashSig ctx h sign2C (pub2C ctx).point
+testSignature :: Hash256 -> Assertion
+testSignature h = do
+  let sign1 = signHash sec1.key h
+      sign2 = signHash sec2.key h
+      sign1C = signHash sec1C.key h
+      sign2C = signHash sec2C.key h
+  assertBool "Key 1, Sign1" $ verifyHashSig h sign1 pub1.point
+  assertBool "Key 1, Sign2" $ not $ verifyHashSig h sign2 pub1.point
+  assertBool "Key 1, Sign1C" $ verifyHashSig h sign1C pub1.point
+  assertBool "Key 1, Sign2C" $ not $ verifyHashSig h sign2C pub1.point
+  assertBool "Key 2, Sign1" $ not $ verifyHashSig h sign1 pub2.point
+  assertBool "Key 2, Sign2" $ verifyHashSig h sign2 pub2.point
+  assertBool "Key 2, Sign1C" $ not $ verifyHashSig h sign1C pub2.point
+  assertBool "Key 2, Sign2C" $ verifyHashSig h sign2C pub2.point
+  assertBool "Key 1C, Sign1" $ verifyHashSig h sign1 pub1C.point
+  assertBool "Key 1C, Sign2" $ not $ verifyHashSig h sign2 pub1C.point
+  assertBool "Key 1C, Sign1C" $ verifyHashSig h sign1C pub1C.point
+  assertBool "Key 1C, Sign2C" $ not $ verifyHashSig h sign2C pub1C.point
+  assertBool "Key 2C, Sign1" $ not $ verifyHashSig h sign1 pub2C.point
+  assertBool "Key 2C, Sign2" $ verifyHashSig h sign2 pub2C.point
+  assertBool "Key 2C, Sign1C" $ not $ verifyHashSig h sign1C pub2C.point
+  assertBool "Key 2C, Sign2C" $ verifyHashSig h sign2C pub2C.point
 
 strSecret1, strSecret2, strSecret1C, strSecret2C :: Text
 strSecret1 = "5HxWvvfubhXpYYpS3tJkw6fq9jE9j18THftkZjHHfmFiWtmAbrj"
@@ -433,8 +434,8 @@ addr2C = "1CRj2HyM1CXWzHAXLQtiGLyggNT9WQqsDs"
 strAddressBad :: Text
 strAddressBad = "1HV9Lc3sNHZxwj4Zk6fB38tEmBryq2cBiF"
 
-pub1, pub2, pub1C, pub2C :: Ctx -> PublicKey
-pub1 ctx = derivePublicKey ctx sec1
-pub2 ctx = derivePublicKey ctx sec2
-pub1C ctx = derivePublicKey ctx sec1C
-pub2C ctx = derivePublicKey ctx sec2C
+pub1, pub2, pub1C, pub2C :: PublicKey
+pub1 = derivePublicKey sec1
+pub2 = derivePublicKey sec2
+pub1C = derivePublicKey sec1C
+pub2C = derivePublicKey sec2C

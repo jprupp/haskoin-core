@@ -44,7 +44,6 @@ where
 import Control.Applicative ((<|>))
 import Control.DeepSeq
 import Control.Monad (guard, when)
-import Crypto.Secp256k1 (Ctx)
 import Data.Binary (Binary (..))
 import Data.Bits
 import Data.ByteString (ByteString)
@@ -336,17 +335,14 @@ scriptPushData = either (const []) id . runGetS pushes
 -- with 02 or 03, or of 65 bytes that starts with 04, 06 or 07. It does not
 -- have to be a point of the curve. Non-standard scripts are scanned like any
 -- other. An empty filter matches every transaction and gets no outpoints.
---
--- The context is not used. It is kept so that callers do not have to change.
 bloomRelevantUpdate ::
-  Ctx ->
   -- | Bloom filter
   BloomFilter ->
   -- | transaction to test
   Tx ->
   -- | the filter, updated, when the transaction is relevant
   Maybe BloomFilter
-bloomRelevantUpdate _ b tx
+bloomRelevantUpdate b tx
   | S.null b.array = Just b
   | hashFound || outputFound = Just updated
   | any inputMatches tx.inputs = Just b

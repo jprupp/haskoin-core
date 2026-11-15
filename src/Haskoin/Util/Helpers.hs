@@ -67,7 +67,6 @@ module Haskoin.Util.Helpers
     putTwo,
 
     -- * Test Helpers
-    prepareContext,
     customCerealID,
     readTestFile,
     readTestFileParser,
@@ -545,10 +544,6 @@ getList f = do
 --
 -- Test Helpers
 --
-
-prepareContext :: (Ctx -> SpecWith a) -> SpecWith a
-prepareContext go = go =<< runIO createContext
-  
 
 customCerealID :: (Eq a) => S.Get a -> S.Putter a -> a -> Bool
 customCerealID g p a = (S.runGet g . S.runPut . p) a == Right a

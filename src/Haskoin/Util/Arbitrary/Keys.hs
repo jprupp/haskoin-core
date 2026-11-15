@@ -25,21 +25,21 @@ arbitraryPrivateKey :: Gen PrivateKey
 arbitraryPrivateKey = wrapSecKey <$> arbitrary <*> arbitrary
 
 -- | Arbitrary public key, either compressed or not.
-arbitraryPublicKey :: Ctx -> Gen PublicKey
-arbitraryPublicKey ctx = snd <$> arbitraryKeyPair ctx
+arbitraryPublicKey :: Gen PublicKey
+arbitraryPublicKey = snd <$> arbitraryKeyPair
 
 -- | Arbitrary keypair, both either compressed or not.
-arbitraryKeyPair :: Ctx -> Gen (PrivateKey, PublicKey)
-arbitraryKeyPair ctx = do
+arbitraryKeyPair :: Gen (PrivateKey, PublicKey)
+arbitraryKeyPair = do
   k <- arbitraryPrivateKey
-  return (k, derivePublicKey ctx k)
+  return (k, derivePublicKey k)
 
 -- | Arbitrary private key with its public key, both in compressed form: the
 -- only form of key that a SegWit version 0 input is signed with
-arbitraryKeyPairC :: Ctx -> Gen (PrivateKey, PublicKey)
-arbitraryKeyPairC ctx = do
+arbitraryKeyPairC :: Gen (PrivateKey, PublicKey)
+arbitraryKeyPairC = do
   k <- wrapSecKey True <$> arbitrary
-  return (k, derivePublicKey ctx k)
+  return (k, derivePublicKey k)
 
 arbitraryFingerprint :: Gen Fingerprint
 arbitraryFingerprint = Fingerprint <$> arbitrary
@@ -54,12 +54,12 @@ arbitraryXPrvKey = do
   XPrvKey depth parent index <$> arbitraryHash256 <*> arbitrary
 
 -- | Arbitrary extended public key.
-arbitraryXPubKey :: Ctx -> Gen XPubKey
-arbitraryXPubKey ctx = snd <$> arbitraryXKeyPair ctx
+arbitraryXPubKey :: Gen XPubKey
+arbitraryXPubKey = snd <$> arbitraryXKeyPair
 
 -- | Arbitrary extended public key with its corresponding private key.
-arbitraryXKeyPair :: Ctx -> Gen (XPrvKey, XPubKey)
-arbitraryXKeyPair ctx = (\k -> (k, deriveXPubKey ctx k)) <$> arbitraryXPrvKey
+arbitraryXKeyPair :: Gen (XPrvKey, XPubKey)
+arbitraryXKeyPair = (\k -> (k, deriveXPubKey k)) <$> arbitraryXPrvKey
 
 {- Custom derivations -}
 
@@ -100,9 +100,9 @@ arbitraryParsedPath =
 -- | Arbitrary message hash, private key, nonce and corresponding signature. The
 -- signature is generated with a random message, random private key and a random
 -- nonce.
-arbitrarySignature :: Ctx -> Gen (Hash256, SecKey, Sig)
-arbitrarySignature ctx = do
+arbitrarySignature :: Gen (Hash256, SecKey, Sig)
+arbitrarySignature = do
   m <- arbitraryHash256
   key <- arbitrary
-  let sig = signHash ctx key m
+  let sig = signHash key m
   return (m, key, sig)

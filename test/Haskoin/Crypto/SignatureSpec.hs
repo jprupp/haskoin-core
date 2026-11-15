@@ -6,10 +6,10 @@ module Haskoin.Crypto.SignatureSpec (spec) where
 
 import Control.Monad
 import Data.Aeson qualified as A
+import Data.Aeson.Types qualified as A (parseEither)
 import Data.Bits (testBit)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
-import Data.Aeson.Types qualified as A (parseEither)
 import Data.Either (isLeft)
 import Data.List (isInfixOf)
 import Data.Map.Strict (Map)
@@ -31,144 +31,144 @@ import Test.Hspec.QuickCheck
 import Test.QuickCheck
 
 spec :: Spec
-spec = prepareContext $ \ctx -> do
-  cashSchnorrSpec ctx
+spec = do
+  cashSchnorrSpec
   describe "Signature property checks" $ do
     prop "verifies signature" $
-      forAll (arbitrarySignature ctx) $ \(m, key', sig) ->
-        verifyHashSig ctx m sig (derivePubKey ctx key')
+      forAll arbitrarySignature $ \(m, key', sig) ->
+        verifyHashSig m sig (derivePubKey key')
     prop "s component less than half order" $
-      forAll (arbitrarySignature ctx) $
-        isCanonicalHalfOrder ctx . lst3
+      forAll arbitrarySignature $
+        isCanonicalHalfOrder . lst3
     prop "encoded signature is canonical" $
-      forAll (arbitrarySignature ctx) $
-        testIsCanonical ctx . lst3
+      forAll arbitrarySignature $
+        testIsCanonical . lst3
     prop "decodeStrictSig . exportSig identity" $
-      forAll (arbitrarySignature ctx) $
-        (\s -> decodeStrictSig ctx (exportSig ctx s) == Just s) . lst3
+      forAll arbitrarySignature $
+        (\s -> decodeStrictSig (exportSig s) == Just s) . lst3
     prop "importSig . exportSig identity" $
-      forAll (arbitrarySignature ctx) $
-        (\s -> importSig ctx (exportSig ctx s) == Just s) . lst3
+      forAll arbitrarySignature $
+        (\s -> importSig (exportSig s) == Just s) . lst3
     prop "signature JSON identity" $
-      forAll (arbitrarySignature ctx) $
-        (\s -> (unmarshalJSON ctx . marshalJSON ctx) s == Just s) . lst3
+      forAll arbitrarySignature $
+        (\s -> (A.decode . A.encode) s == Just s) . lst3
     prop "getSig . putSig identity" $
-      forAll (arbitrarySignature ctx) $
-        (\s -> unmarshal ctx (marshal ctx s) == Right s) . lst3
+      forAll arbitrarySignature $
+        (\s -> decodeSerial (encodeSerial s) == Right s) . lst3
   describe "Signature vectors" $ do
     it "passes RFC6979 test vectors" $
-      checkDistSig ctx $ \file1 file2 -> do
+      checkDistSig $ \file1 file2 -> do
         vectors <- readTestFile file1 :: IO [(Text, Text, Text)]
         vectorsDER <- readTestFile file2 :: IO [(Text, Text, Text)]
-        mapM_ (testRFC6979Vector ctx . toVector) vectors
-        mapM_ (testRFC6979DERVector ctx . toVector) vectorsDER
+        mapM_ (testRFC6979Vector . toVector) vectors
+        mapM_ (testRFC6979DERVector . toVector) vectorsDER
   describe "BIP143 signature vectors" $ do
     it "agrees with BIP143 p2wpkh example" $
-      testBip143p2wpkh ctx
+      testBip143p2wpkh
     it "agrees with BIP143 p2sh-p2wpkh example" $
-      testBip143p2shp2wpkh ctx
+      testBip143p2shp2wpkh
     it "builds a p2wsh multisig transaction" $
-      testP2WSHMulsig ctx
+      testP2WSHMulsig
     it "agrees with BIP143 p2sh-p2wsh multisig example" $
-      testBip143p2shp2wpkhMulsig ctx
+      testBip143p2shp2wpkhMulsig
   describe "Strict signature decoding" $ do
     it "accepts the smallest signature, r = 1 and s = 1" $
       -- DER: 30 06 | 02 01 01 | 02 01 01
-      fmap (exportSig ctx) (decodeStrictSig ctx (hex "3006020101020101"))
+      fmap exportSig (decodeStrictSig (hex "3006020101020101"))
         `shouldBe` Just (hex "3006020101020101")
     it "refuses a signature whose r is zero" $
-      decodeStrictSig ctx (hex "3006020100020101") `shouldBe` Nothing
+      decodeStrictSig (hex "3006020100020101") `shouldBe` Nothing
     it "refuses a signature whose s is zero" $
-      decodeStrictSig ctx (hex "3006020101020100") `shouldBe` Nothing
+      decodeStrictSig (hex "3006020101020100") `shouldBe` Nothing
     -- BIP 66 is about the encoding only. Low S is a relay rule of Bitcoin
     -- Core (SCRIPT_VERIFY_LOW_S), not a consensus rule.
     it "accepts a signature whose s is n - 1, above half the curve order" $ do
       -- DER: 30 26 | 02 01 01 | 02 21 00 <n - 1>, 3 + 2 + 33 = 38 = 0x26 bytes
       let der = hex "3026020101022100fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364140"
-      fmap (exportSig ctx) (decodeStrictSig ctx der) `shouldBe` Just der
-      fmap (isCanonicalHalfOrder ctx) (decodeStrictSig ctx der) `shouldBe` Just False
+      fmap exportSig (decodeStrictSig der) `shouldBe` Just der
+      fmap isCanonicalHalfOrder (decodeStrictSig der) `shouldBe` Just False
     prop "accepts the high-S form of any signature" $
-      forAll (arbitrarySignature ctx) $ \(_, _, s) ->
-        decodeStrictSig ctx (exportSig ctx (highSVariant ctx s)) == Just (highSVariant ctx s)
+      forAll arbitrarySignature $ \(_, _, s) ->
+        decodeStrictSig (exportSig (highSVariant s)) == Just (highSVariant s)
     it "accepts an r that needs a leading zero byte" $
       -- r = 0x80 is written 00 80, since 80 alone would be negative
-      fmap (exportSig ctx) (decodeStrictSig ctx (hex "300702020080020101"))
+      fmap exportSig (decodeStrictSig (hex "300702020080020101"))
         `shouldBe` Just (hex "300702020080020101")
     it "refuses a negative r or s" $ do
-      decodeStrictSig ctx (hex "3006020181020101") `shouldBe` Nothing
-      decodeStrictSig ctx (hex "3006020101020181") `shouldBe` Nothing
+      decodeStrictSig (hex "3006020181020101") `shouldBe` Nothing
+      decodeStrictSig (hex "3006020101020181") `shouldBe` Nothing
     it "refuses an r or s with a leading zero byte that is not needed" $ do
-      decodeStrictSig ctx (hex "300702020001020101") `shouldBe` Nothing
-      decodeStrictSig ctx (hex "300702010102020001") `shouldBe` Nothing
+      decodeStrictSig (hex "300702020001020101") `shouldBe` Nothing
+      decodeStrictSig (hex "300702010102020001") `shouldBe` Nothing
     it "refuses an r or s of no bytes" $ do
-      decodeStrictSig ctx (hex "30050200020101") `shouldBe` Nothing
-      decodeStrictSig ctx (hex "30050201010200") `shouldBe` Nothing
+      decodeStrictSig (hex "30050200020101") `shouldBe` Nothing
+      decodeStrictSig (hex "30050201010200") `shouldBe` Nothing
     it "refuses an r or s that is not tagged as an integer" $ do
-      decodeStrictSig ctx (hex "3006030101020101") `shouldBe` Nothing
-      decodeStrictSig ctx (hex "3006020101030101") `shouldBe` Nothing
+      decodeStrictSig (hex "3006030101020101") `shouldBe` Nothing
+      decodeStrictSig (hex "3006020101030101") `shouldBe` Nothing
     it "refuses a sequence whose length is not that of its content" $ do
-      decodeStrictSig ctx (hex "3005020101020101") `shouldBe` Nothing
-      decodeStrictSig ctx (hex "3007020101020101") `shouldBe` Nothing
+      decodeStrictSig (hex "3005020101020101") `shouldBe` Nothing
+      decodeStrictSig (hex "3007020101020101") `shouldBe` Nothing
     it "refuses a byte after the sequence" $
-      decodeStrictSig ctx (hex "300602010102010100") `shouldBe` Nothing
+      decodeStrictSig (hex "300602010102010100") `shouldBe` Nothing
     it "refuses a length written in the long form" $
-      decodeStrictSig ctx (hex "308106020101020101") `shouldBe` Nothing
+      decodeStrictSig (hex "308106020101020101") `shouldBe` Nothing
     it "refuses no bytes at all" $
-      decodeStrictSig ctx "" `shouldBe` Nothing
+      decodeStrictSig "" `shouldBe` Nothing
     it "refuses an r at the curve order, which BIP 66 allows but which can never verify" $
       -- DER: 30 26 | 02 21 00 <n> | 02 01 01
-      decodeStrictSig ctx (hex "3026022100fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141020101")
+      decodeStrictSig (hex "3026022100fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141020101")
         `shouldBe` Nothing
   describe "Binary signature decoding" $ do
     it "decodes the smallest signature" $
-      fmap (exportSig ctx) (unmarshal ctx (hex "3006020101020101"))
+      fmap exportSig (decodeSerial (hex "3006020101020101"))
         `shouldBe` Right (hex "3006020101020101")
     it "refuses an identifier byte other than 0x30" $
-      (unmarshal ctx (hex "3106020101020101") :: Either String Sig) `shouldSatisfy` isLeft
+      (decodeSerial (hex "3106020101020101") :: Either String Sig) `shouldSatisfy` isLeft
     it "refuses the indefinite length form" $
-      (unmarshal ctx (hex "3000020101020101") :: Either String Sig) `shouldSatisfy` isLeft
+      (decodeSerial (hex "3000020101020101") :: Either String Sig) `shouldSatisfy` isLeft
     it "refuses a length of more than one byte" $
-      (unmarshal ctx (hex "308106020101020101") :: Either String Sig) `shouldSatisfy` isLeft
+      (decodeSerial (hex "308106020101020101") :: Either String Sig) `shouldSatisfy` isLeft
     it "refuses a signature cut short" $
-      (unmarshal ctx (hex "3006020101") :: Either String Sig) `shouldSatisfy` isLeft
+      (decodeSerial (hex "3006020101") :: Either String Sig) `shouldSatisfy` isLeft
     it "refuses bytes after the signature" $
-      (unmarshal ctx (hex "300602010102010100ffff") :: Either String Sig)
+      (decodeSerial (hex "300602010102010100ffff") :: Either String Sig)
         `shouldSatisfy` either ("bytes left over" `isInfixOf`) (const False)
     it "decodes a signature whose s is n - 1" $
-      fmap (exportSig ctx) (unmarshal ctx (hex "3026020101022100fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364140"))
+      fmap exportSig (decodeSerial (hex "3026020101022100fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364140"))
         `shouldBe` Right (hex "3026020101022100fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364140")
   describe "Signature JSON" $ do
     prop "reads a high-S signature, like the binary form" $
-      forAll (arbitrarySignature ctx) $ \(_, _, s) ->
-        (unmarshalJSON ctx (A.encode (encodeHex (exportSig ctx (highSVariant ctx s)))) :: Maybe Sig)
-          == Just (highSVariant ctx s)
+      forAll arbitrarySignature $ \(_, _, s) ->
+        (A.decode (A.encode (encodeHex (exportSig (highSVariant s)))) :: Maybe Sig)
+          == Just (highSVariant s)
     it "refuses a signature whose r is zero, like the binary form" $
-      (unmarshalJSON ctx "\"3006020100020101\"" :: Maybe Sig) `shouldBe` Nothing
+      (A.decode "\"3006020100020101\"" :: Maybe Sig) `shouldBe` Nothing
     it "refuses a signature that is not hex" $
-      (unmarshalJSON ctx "\"zz\"" :: Maybe Sig) `shouldBe` Nothing
+      (A.decode "\"zz\"" :: Maybe Sig) `shouldBe` Nothing
     it "does not copy the text it refuses into its error message" $
-      (A.parseEither (unmarshalValue ctx) (A.String "zz-attacker-text") :: Either String Sig)
+      (A.parseEither A.parseJSON (A.String "zz-attacker-text") :: Either String Sig)
         `shouldBe` Left "Error in $: Could not decode signature"
   describe "High-S signatures" $ do
     prop "are not in canonical half order" $
-      forAll (arbitrarySignature ctx) $ \(_, _, s) ->
-        not (isCanonicalHalfOrder ctx (highSVariant ctx s))
+      forAll arbitrarySignature $ \(_, _, s) ->
+        not (isCanonicalHalfOrder (highSVariant s))
     prop "still verify after normalisation, as in Bitcoin Core" $
-      forAll (arbitrarySignature ctx) $ \(m, key', s) ->
-        verifyHashSig ctx m (highSVariant ctx s) (derivePubKey ctx key')
+      forAll arbitrarySignature $ \(m, key', s) ->
+        verifyHashSig m (highSVariant s) (derivePubKey key')
     prop "a signature does not verify for another message" $
-      forAll (arbitrarySignature ctx) $ \(m, key', s) ->
+      forAll arbitrarySignature $ \(m, key', s) ->
         forAll arbitraryHash256 $ \other ->
-          other /= m ==> not (verifyHashSig ctx other s (derivePubKey ctx key'))
+          other /= m ==> not (verifyHashSig other s (derivePubKey key'))
   describe "Bitcoin Core deterministic signature vectors" $
     it "signs 'Very deterministic message' as Bitcoin Core does" $
-      case getImpl ctx of
+      case getImpl of
         Just ImplCore -> do
           let h = doubleSHA256 ("Very deterministic message" :: ByteString)
-          encodeHex (exportSig ctx (signHash ctx coreKey1 h))
+          encodeHex (exportSig (signHash coreKey1 h))
             `shouldBe` "304402205dbbddda71772d95ce91cd2d14b592cfbc1dd0aabd6a394b6c2d377bbe59d31d\
                        \022014ddda21494a4e221f0824f0b8b924c43fa43c0ad57dccdaa11f81a6bd4582f6"
-          encodeHex (exportSig ctx (signHash ctx coreKey2 h))
+          encodeHex (exportSig (signHash coreKey2 h))
             `shouldBe` "3044022052d8a32079c11e79db95af63bb9600c5b04f21a9ca33dc129c2bfa8ac9dc1cd5\
                        \022061d8ae5e0f6c1a16bde3719c64c2fd70e404b6428ab9a69566962e8771b5944d"
         _ -> pendingWith "the vector is for the nonce function of Bitcoin Core"
@@ -183,19 +183,19 @@ coreKey2 = (fromJust (fromWif btc "5KC4ejrDjv152FGwP386VD1i2NYc5KkfSMyv1nGy1VGDx
 
 -- | The same signature with s replaced by n - s. It verifies as well, but it
 -- is not in the low-S form that BIP62 requires.
-highSVariant :: Ctx -> Sig -> Sig
-highSVariant ctx s =
-  fromJust $ importCompactSig ctx $ fromJust $ compactSig (r <> highS)
+highSVariant :: Sig -> Sig
+highSVariant s =
+  fromJust $ importCompactSig $ fromJust $ compactSig (r <> highS)
   where
-    (r, lowS) = BS.splitAt 32 (exportCompactSig ctx s).get
+    (r, lowS) = BS.splitAt 32 (exportCompactSig s).get
     n = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141
     highS = padTo32 (integerToBS (n - bsToInteger lowS))
     padTo32 bs = BS.replicate (32 - BS.length bs) 0 <> bs
 
 -- github.com/bitcoin/bitcoin/blob/master/src/script.cpp
 -- from function IsCanonicalSignature
-testIsCanonical :: Ctx -> Sig -> Bool
-testIsCanonical ctx sig =
+testIsCanonical :: Sig -> Bool
+testIsCanonical sig =
   not $
     -- Non-canonical signature: too short
     (len < 8)
@@ -245,7 +245,7 @@ testIsCanonical ctx sig =
           && not (testBit (BS.index s (fromIntegral rlen + 7)) 7)
       )
   where
-    s = exportSig ctx sig
+    s = exportSig sig
     len = fromIntegral $ BS.length s
     rlen = BS.index s 3
     slen = BS.index s (fromIntegral rlen + 5)
@@ -259,12 +259,11 @@ data ValidImpl
   = ImplCore
   | ImplCash
 
-implSig :: Ctx -> Text
-implSig ctx =
+implSig :: Text
+implSig =
   encodeHex $
-    exportSig ctx $
+    exportSig $
       signMsg
-        ctx
         "0000000000000000000000000000000000000000000000000000000000000001"
         "0000000000000000000000000000000000000000000000000000000000000000"
 
@@ -284,16 +283,16 @@ validImplMap =
       )
     ]
 
-getImpl :: Ctx -> Maybe ValidImpl
-getImpl ctx = implSig ctx `Map.lookup` validImplMap
+getImpl :: Maybe ValidImpl
+getImpl = implSig `Map.lookup` validImplMap
 
 rfc6979files :: ValidImpl -> (FilePath, FilePath)
 rfc6979files ImplCore = ("rfc6979core.json", "rfc6979DERcore.json")
 rfc6979files ImplCash = ("rfc6979cash.json", "rfc6979DERcash.json")
 
-checkDistSig :: Ctx -> (FilePath -> FilePath -> Assertion) -> Assertion
-checkDistSig ctx go =
-  case rfc6979files <$> getImpl ctx of
+checkDistSig :: (FilePath -> FilePath -> Assertion) -> Assertion
+checkDistSig go =
+  case rfc6979files <$> getImpl of
     Just (file1, file2) -> go file1 file2
     _ -> assertFailure "invalid RFC6979 signature"
 
@@ -303,33 +302,33 @@ checkDistSig ctx go =
 toVector :: (Text, Text, Text) -> (SecKey, ByteString, Text)
 toVector (prv, m, res) = (fromJust $ (secKey <=< decodeHex) prv, cs m, res)
 
-testRFC6979Vector :: Ctx -> (SecKey, ByteString, Text) -> Assertion
-testRFC6979Vector ctx (prv, m, res) = do
-  assertEqual "RFC 6979 Vector" res (encodeHex (exportCompactSig ctx s).get)
-  assertBool "Signature is valid" $ verifyHashSig ctx h s (derivePubKey ctx prv)
-  assertBool "Signature is canonical" $ testIsCanonical ctx s
-  assertBool "Signature is normalized" $ isCanonicalHalfOrder ctx s
+testRFC6979Vector :: (SecKey, ByteString, Text) -> Assertion
+testRFC6979Vector (prv, m, res) = do
+  assertEqual "RFC 6979 Vector" res (encodeHex (exportCompactSig s).get)
+  assertBool "Signature is valid" $ verifyHashSig h s (derivePubKey prv)
+  assertBool "Signature is canonical" $ testIsCanonical s
+  assertBool "Signature is normalized" $ isCanonicalHalfOrder s
   where
     h = sha256 m
-    s = signHash ctx prv h
+    s = signHash prv h
 
 -- Test vectors from:
 -- https://crypto.stackexchange.com/questions/20838/request-for-data-to-test-deterministic-ecdsa-signature-algorithm-for-secp256k1
 
-testRFC6979DERVector :: Ctx -> (SecKey, ByteString, Text) -> Assertion
-testRFC6979DERVector ctx (prv, m, res) = do
-  assertEqual "RFC 6979 DER Vector" res (encodeHex $ exportSig ctx s)
-  assertBool "DER Signature is valid" $ verifyHashSig ctx h s (derivePubKey ctx prv)
-  assertBool "DER Signature is canonical" $ testIsCanonical ctx s
-  assertBool "DER Signature is normalized" $ isCanonicalHalfOrder ctx s
+testRFC6979DERVector :: (SecKey, ByteString, Text) -> Assertion
+testRFC6979DERVector (prv, m, res) = do
+  assertEqual "RFC 6979 DER Vector" res (encodeHex $ exportSig s)
+  assertBool "DER Signature is valid" $ verifyHashSig h s (derivePubKey prv)
+  assertBool "DER Signature is canonical" $ testIsCanonical s
+  assertBool "DER Signature is normalized" $ isCanonicalHalfOrder s
   where
     h = sha256 m
-    s = signHash ctx prv h
+    s = signHash prv h
 
 -- Reproduce the P2WPKH example from BIP 143
-testBip143p2wpkh :: Ctx -> Assertion
-testBip143p2wpkh ctx =
-  case getImpl ctx of
+testBip143p2wpkh :: Assertion
+testBip143p2wpkh =
+  case getImpl of
     Just ImplCore ->
       assertEqual "BIP143 Core p2wpkh" (Right signedTxCore) generatedSignedTx
     Just ImplCash ->
@@ -369,20 +368,20 @@ testBip143p2wpkh ctx =
     Just key0 =
       secHexKey
         "bbc27228ddcb9209d7fd6f36b02f7dfa6252af40bb2f1cbc7a557da8027ff866"
-    pubKey0 = toPubKey ctx key0
+    pubKey0 = toPubKey key0
     Just key1 =
       secHexKey
         "619c335025c7f4012e556c2a58b2506e30b8511b53ade95ea316fd8c3286feb9"
     [op0, op1] = (.outpoint) <$> unsignedTx.inputs
     sigIn0 = SigInput (PayPK pubKey0) 625000000 op0 sigHashAll Nothing
-    Just h = addressHash160 =<< pubKeyWitnessAddr ctx (toPubKey ctx key1)
+    Just h = addressHash160 =<< pubKeyWitnessAddr (toPubKey key1)
     sigIn1 = SigInput (PayWitnessPKHash h) 600000000 op1 sigHashAll Nothing
-    generatedSignedTx = signTx btc ctx unsignedTx [sigIn0, sigIn1] [key0, key1]
+    generatedSignedTx = signTx btc unsignedTx [sigIn0, sigIn1] [key0, key1]
 
 -- Reproduce the P2SH-P2WPKH example from BIP 143
-testBip143p2shp2wpkh :: Ctx -> Assertion
-testBip143p2shp2wpkh ctx =
-  case getImpl ctx of
+testBip143p2shp2wpkh :: Assertion
+testBip143p2shp2wpkh =
+  case getImpl of
     Just ImplCore ->
       assertEqual "BIP143 Core p2sh-p2wpkh" (Right signedTxCore) generatedSignedTx
     Just ImplCash ->
@@ -416,14 +415,14 @@ testBip143p2shp2wpkh ctx =
       secHexKey
         "eb696a065ef48a2192da5b28b694f87544b30fae8327c4510137a922f32c6dcf"
     op0 = (head unsignedTx.inputs).outpoint
-    Just h = addressHash160 =<< pubKeyWitnessAddr ctx (toPubKey ctx key0)
+    Just h = addressHash160 =<< pubKeyWitnessAddr (toPubKey key0)
     sigIn0 = SigInput (PayWitnessPKHash h) 1000000000 op0 sigHashAll Nothing
-    generatedSignedTx = signNestedWitnessTx btc ctx unsignedTx [sigIn0] [key0]
+    generatedSignedTx = signNestedWitnessTx btc unsignedTx [sigIn0] [key0]
 
 -- P2WSH multisig example (tested against bitcoin-core 0.19.0.1)
-testP2WSHMulsig :: Ctx -> Assertion
-testP2WSHMulsig ctx =
-  case getImpl ctx of
+testP2WSHMulsig :: Assertion
+testP2WSHMulsig =
+  case getImpl of
     Just ImplCore ->
       assertEqual "Core p2wsh multisig" (Right signedTxCore) generatedSignedTx
     Just ImplCash ->
@@ -466,20 +465,20 @@ testP2WSHMulsig ctx =
           "3030303030303030303030303030303030303030303030303030303030303032",
           "3030303030303030303030303030303030303030303030303030303030303033"
         ]
-    rdm = PayMulSig (toPubKey ctx <$> keys) 2
+    rdm = PayMulSig (toPubKey <$> keys) 2
     sigIn =
       SigInput
-        (either error id $ toP2WSH =<< encodeOutput ctx rdm)
+        (either error id $ toP2WSH =<< encodeOutput rdm)
         100000000
         op0
         sigHashAll
         (Just rdm)
-    generatedSignedTx = signTx btc ctx unsignedTx [sigIn] (take 2 keys)
+    generatedSignedTx = signTx btc unsignedTx [sigIn] (take 2 keys)
 
 -- Reproduce the P2SH-P2WSH multisig example from BIP 143
-testBip143p2shp2wpkhMulsig :: Ctx -> Assertion
-testBip143p2shp2wpkhMulsig ctx =
-  case getImpl ctx of
+testBip143p2shp2wpkhMulsig :: Assertion
+testBip143p2shp2wpkhMulsig =
+  case getImpl of
     Just ImplCore ->
       assertEqual
         "BIP143 Core p2sh-p2wsh multisig"
@@ -559,19 +558,19 @@ testBip143p2shp2wpkhMulsig ctx =
         "428a7aee9f0c2af0cd19af3cf1c78149951ea528726989b2e83e4778d2c3f890"
       ]
     Just keys = traverse secHexKey rawKeys
-    rdm = PayMulSig (toPubKey ctx <$> keys) 6
-    sigIn sh = SigInput (either error id $ toP2WSH =<< encodeOutput ctx rdm) 987654321 op0 sh (Just rdm)
+    rdm = PayMulSig (toPubKey <$> keys) 6
+    sigIn sh = SigInput (either error id $ toP2WSH =<< encodeOutput rdm) 987654321 op0 sh (Just rdm)
     sigHashesA = [sigHashAll, sigHashNone, sigHashSingle]
     sigHashesB = setAnyoneCanPay <$> sigHashesA
     sigIns = sigIn <$> (sigHashesA <> sigHashesB)
     generatedSignedTx = foldM addSig unsignedTx $ zip sigIns keys
-    addSig tx (sigIn', key') = signNestedWitnessTx btc ctx tx [sigIn'] [key']
+    addSig tx (sigIn', key') = signNestedWitnessTx btc tx [sigIn'] [key']
 
 secHexKey :: Text -> Maybe SecKey
 secHexKey = decodeHex >=> secKey
 
-toPubKey :: Ctx -> SecKey -> PublicKey
-toPubKey ctx = derivePublicKey ctx . wrapSecKey True
+toPubKey :: SecKey -> PublicKey
+toPubKey = derivePublicKey . wrapSecKey True
 
 -- | The test vectors of the Schnorr module of Bitcoin Cash Node
 -- (@src\/secp256k1\/src\/modules\/schnorr\/tests_impl.h@, version 29.0.0):
@@ -579,8 +578,7 @@ toPubKey ctx = derivePublicKey ctx . wrapSecKey True
 -- verifies.
 cashSchnorrVectors :: [(String, Text, Text, Text, Bool)]
 cashSchnorrVectors =
-  [
-    ( "1",
+  [ ( "1",
       "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
       "0000000000000000000000000000000000000000000000000000000000000000",
       "787a848e71043d280c50470e8e1532b2dd5d20ee912a45dbdd2bd1dfbf187ef6\
@@ -673,12 +671,12 @@ cashSchnorrVectors =
     )
   ]
 
-cashSchnorrSpec :: Ctx -> Spec
-cashSchnorrSpec ctx =
+cashSchnorrSpec :: Spec
+cashSchnorrSpec =
   describe "Schnorr signatures of Bitcoin Cash" $
     forM_ cashSchnorrVectors $ \(name, pk, digest, sig, valid) ->
       it ("vector " <> name) $ do
         let bytes = fromJust . decodeHex
-            pub = fromJust (importPubKey ctx (bytes pk))
+            pub = fromJust (importPubKey (bytes pk))
             h = either error id (S.decode (bytes digest)) :: Hash256
-        verifyCashSchnorr ctx pub (bytes sig) h `shouldBe` valid
+        verifyCashSchnorr pub (bytes sig) h `shouldBe` valid

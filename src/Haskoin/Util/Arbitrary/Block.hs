@@ -12,7 +12,6 @@ module Haskoin.Util.Arbitrary.Block where
 
 import qualified Data.HashMap.Strict as HashMap
 import Haskoin.Block
-import Haskoin.Crypto (Ctx)
 import Haskoin.Network.Data
 import Haskoin.Transaction.Common (Tx, TxHash (..), txHash)
 import Haskoin.Util.Arbitrary.Crypto
@@ -24,11 +23,11 @@ import Test.QuickCheck
 -- | Block of arbitrary transactions. The header has the Merkle root of the
 -- transactions when there are some. On a network without SegWit the
 -- transactions have no witness, as a block of that network has none.
-arbitraryBlock :: Network -> Ctx -> Gen Block
-arbitraryBlock net ctx = do
+arbitraryBlock :: Network -> Gen Block
+arbitraryBlock net = do
   h <- arbitraryBlockHeader
   c <- choose (0, 10)
-  txs <- vectorOf c (arbitraryNetworkTx net ctx)
+  txs <- vectorOf c (arbitraryNetworkTx net)
   let header = case buildMerkleRoot (map txHash txs) of
         Right root -> (h :: BlockHeader) {merkle = root}
         Left _ -> h
@@ -36,10 +35,10 @@ arbitraryBlock net ctx = do
 
 -- | Arbitrary transaction of the kind a peer of the network sends: with or
 -- without a witness where the network has SegWit, without one elsewhere.
-arbitraryNetworkTx :: Network -> Ctx -> Gen Tx
-arbitraryNetworkTx net ctx
-  | net.segWit = arbitraryTx net ctx
-  | otherwise = arbitraryLegacyTx net ctx
+arbitraryNetworkTx :: Network -> Gen Tx
+arbitraryNetworkTx net
+  | net.segWit = arbitraryTx net
+  | otherwise = arbitraryLegacyTx net
 
 -- | Block header with random hash.
 arbitraryBlockHeader :: Gen BlockHeader

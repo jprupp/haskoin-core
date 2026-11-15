@@ -115,9 +115,9 @@ dependency. Use the [latest version from Hackage](https://hackage.haskell.org/pa
 ```yaml
 resolver: nightly-2026-10-28
 extra-deps:
-  - haskoin-core-1.6.4
+  - haskoin-core-2.0.0
   - base16-2.0
-  - secp256k1-haskell-2.0.1
+  - secp256k1-haskell-3.0.0
 ```
 
 ## Quick start
@@ -139,15 +139,15 @@ mnemonic :: Text
 mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
 
 main :: IO ()
-main = withContext $ \ctx -> do
+main = do
   seed <- either fail pure (mnemonicToSeed "" mnemonic)
   let master = makeXPrvKey seed
       -- Hardened steps need the private key.
-      account = derivePath ctx ("m/84'/0'/0'" :: HardPath) master
-      accountPub = deriveXPubKey ctx account
+      account = derivePath ("m/84'/0'/0'" :: HardPath) master
+      accountPub = deriveXPubKey account
       -- The remaining steps only need the public key.
-      receiving = derivePubPath ctx ("m/0" :: SoftPath) accountPub
-      (address, _publicKey) = deriveWitnessAddr ctx receiving 0
+      receiving = derivePubPath ("m/0" :: SoftPath) accountPub
+      (address, _publicKey) = deriveWitnessAddr receiving 0
   print (addrToText btc address)
   -- => Just "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
 ```
@@ -160,17 +160,18 @@ publishes for this mnemonic.
 A few conventions apply across the whole library. Reading this section first
 will save you time.
 
-### The context
+### No context to pass
 
-Most cryptographic functions take a `Ctx`, a secp256k1 context. Create one when
-your program starts, with `withContext` or `createContext`. Then pass it around.
-You can share it between threads.
+Signing, verifying and deriving keys are pure functions that take only their
+data. The secp256k1 context that libsecp256k1 needs is created and randomized
+once, inside secp256k1-haskell, the first time a function uses it, and is
+shared by every thread. Up to version 1.6 most functions took that context as
+an argument. From 2.0.0 none does, and there is nothing to create or pass around.
 
 ### Networks
 
 A `Network` is a record of the parameters of one chain. Functions that depend on
-the chain take one as an argument. Functions that need both take the `Network`
-first and the `Ctx` second.
+the chain take one as their first argument.
 
 | Value        | Chain                 | Name for `netByName` |
 | ------------ | --------------------- | -------------------- |
@@ -216,23 +217,25 @@ Amounts are satoshi, as `Word64`.
 
 Most types have `Serial` instances, from the
 [bytes](https://hackage.haskell.org/package/bytes) package, and also `Binary` and
-`Serialize` instances. Some types need a context or a network to encode, so they
-have `Marshal` or `MarshalJSON` instances instead.
+`Serialize` instances, and `ToJSON` and `FromJSON` instances for JSON. Public
+keys, signatures and output scripts are among them. The encoding of some types
+depends on the network, so they have `Marshal` or `MarshalJSON` instances
+instead, which take the `Network` as their first argument. `XPrvKey`,
+`XPubKey`, `PrivateKey`, `Address`, `TxSignature` and `ScriptInput` are those.
 
 | Task                | Encode                     | Decode                       |
 | ------------------- | -------------------------- | ---------------------------- |
 | Binary              | `runPutS (serialize x)`    | `runGetS deserialize bytes`  |
-| Binary with context | `marshal ctx x`            | `unmarshal ctx bytes`        |
+| Binary, whole input | `encodeSerial x`           | `decodeSerial bytes`         |
+| Binary with network | `marshal net x`            | `unmarshal net bytes`        |
 | Hexadecimal         | `encodeHex bytes`          | `decodeHex text`             |
 | JSON                | `toJSON x`                 | `parseJSON value`            |
-| JSON with context   | `marshalJSON ctx x`        | `unmarshalJSON ctx json`     |
+| JSON with network   | `marshalJSON net x`        | `unmarshalJSON net json`     |
 
-The first argument depends on the type. For example, it is a `Ctx` for
-`PublicKey`, a `Network` for `XPrvKey` and a `(Network, Ctx)` pair for `XPubKey`.
-
-`unmarshal` fails when bytes are left over after the value, and `decodeTx` does
-the same for a transaction. `runGetS deserialize` reads a value from the start of
-the bytes and ignores the rest.
+`decodeSerial` and `unmarshal` fail when bytes are left over after the value,
+and `decodeTx` does the same for a transaction. `runGetS deserialize` reads a
+value from the start of the bytes and ignores the rest. `encodeSerial x` is
+`runPutS (serialize x)`.
 
 ### Hash byte order
 
@@ -257,7 +260,7 @@ import Data.Bytes.Serial (serialize)
 import Haskoin
 
 main :: IO ()
-main = withContext $ \ctx -> do
+main = do
   -- This is the public BIP-39 test mnemonic. Never send coins to it.
   seed <-
     either fail pure $
@@ -299,21 +302,21 @@ secret <- maybe (fail "bad key") pure (decodeSecKey bytes)
 
 -- True asks for the compressed form of the public key.
 let private = wrapSecKey True secret
-    public = derivePublicKey ctx private
+    public = derivePublicKey private
 
 print private
 -- => PrivateKey {key = <redacted>, compress = True}
 print (toWif btc private)
 -- => "KwDiBf89QgGbjEhKnhXJuH7LrciVrZi3qYjgd9M7rFU73sVHnoWn"
-print (encodeHex (marshal ctx public))
+print (encodeHex (encodeSerial public))
 -- => "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
-print (addrToText btc (pubKeyAddr ctx public))
+print (addrToText btc (pubKeyAddr public))
 -- => Just "1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH"
 
 -- Sign and verify a hash.
 let digest = doubleSHA256 bytes
-    signature = signHash ctx secret digest
-print (verifyHashSig ctx digest signature public.point)
+    signature = signHash secret digest
+print (verifyHashSig digest signature public.point)
 -- => True
 ```
 
@@ -328,15 +331,15 @@ only normal steps, which a public key can derive. A `DerivPath` can mix both.
 Hardened steps can be written `'`, `h` or `H`.
 
 ```haskell
-let account = derivePath ctx ("m/84'/0'/0'" :: HardPath) master
-    accountPub = deriveXPubKey ctx account
+let account = derivePath ("m/84'/0'/0'" :: HardPath) master
+    accountPub = deriveXPubKey account
 
-print (xPubExport btc ctx accountPub)
+print (xPubExport btc accountPub)
 -- => "xpub6CatWdiZiodmUeTDp8LT5or8nmbKNcuyvz7WyksVFkKB4RHwCD3XyuvPEbvqAQY3rAPshWcMLoP2fMFMKHPJ4ZeZXYVUhLv1VMrjPC7PW6V"
 
 -- The account's public key derives all its receiving addresses.
-let receiving = derivePubPath ctx ("m/0" :: SoftPath) accountPub
-    addresses = [address | (address, _, _) <- deriveWitnessAddrs ctx receiving 0]
+let receiving = derivePubPath ("m/0" :: SoftPath) accountPub
+    addresses = [address | (address, _, _) <- deriveWitnessAddrs receiving 0]
 print (map (addrToText btc) (take 2 addresses))
 -- => [Just "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu",Just "bc1qnjg0jd8228aq7egyzacy8cys3knf9xvrerkf9g"]
 ```
@@ -370,7 +373,7 @@ print (textToAddr bch text)
 -- => Nothing
 
 -- The output script an address pays to.
-print (encodeHex <$> (addressToScriptBS ctx =<< textToAddr btc text))
+print (encodeHex <$> (addressToScriptBS =<< textToAddr btc text))
 -- => Just "0014c0cebcd6c3d3ca8c75dc5ec62ebe55330ef910e2"
 ```
 
@@ -387,19 +390,19 @@ print (encodeHex <$> (addressToScriptBS ctx =<< textToAddr btc text))
 let keyA = wrapPubKey True "02ff12471208c14bd580709cb2358d98975247d8765f92bc25eab3b2763ed605f8"
     keyB = wrapPubKey True "02fe6f0a5a297eb38c391581c4413e084773ea23954d93f7753db7dc0adc188b2f"
     -- BIP-67 sorts the keys, so that all signers build the same script.
-    multisig = sortMulSig ctx (PayMulSig [keyA, keyB] 2)
+    multisig = sortMulSig (PayMulSig [keyA, keyB] 2)
 
 -- The address can fail, because a P2SH redeem script holds at most 520 bytes.
-print (addrToText btc <$> payToScriptAddress ctx multisig)
+print (addrToText btc <$> payToScriptAddress multisig)
 -- => Right (Just "39bgKC7RFbpoCRbtD5KEdkYKtNyhpsNa3Z")
 
 -- OP_RETURN is 6a, then the push of 5 bytes, then "hello".
-print (encodeHex (marshal ctx (DataCarrier ["hello"])))
+print (encodeHex (encodeSerial (DataCarrier ["hello"])))
 -- => "6a0568656c6c6f"
 
 -- Read the same bytes back.
 script <- maybe (fail "bad hex") pure (decodeHex "6a0568656c6c6f")
-print (unmarshal ctx script :: Either String ScriptOutput)
+print (decodeSerial script :: Either String ScriptOutput)
 -- => Right (DataCarrier {pushes = ["hello"]})
 ```
 
@@ -419,28 +422,28 @@ to 10,000 bytes, so a multisig of 16 to 20 keys needs P2WSH.
 
 ```haskell
 -- The key at m/84'/0'/0'/0/0 and its address.
-let key = derivePath ctx ("m/84'/0'/0'/0/0" :: DerivPath) master
-    address = xPubWitnessAddr ctx (deriveXPubKey ctx key)
+let key = derivePath ("m/84'/0'/0'/0/0" :: DerivPath) master
+    address = xPubWitnessAddr (deriveXPubKey key)
 
 -- The coin to spend, and the transaction that paid it. Both are made up.
 -- The coin holds 100,000 satoshi.
 coinScript <- maybe (fail "no output script") pure (addressToOutput address)
 let amount = 100000
     fundingInput = TxIn (OutPoint "1111111111111111111111111111111111111111111111111111111111111111" 0) "" 0xffffffff
-    funding = Tx 2 [fundingInput] [TxOut amount (marshal ctx coinScript)] [] 0
+    funding = Tx 2 [fundingInput] [TxOut amount (encodeSerial coinScript)] [] 0
     coin = OutPoint (txHash funding) 0
 
 -- Pay 99,000 satoshi. The 1,000 satoshi left over are the fee.
 unsigned <-
   either fail pure $
-    buildAddrTx btc ctx [coin] [("bc1qnjg0jd8228aq7egyzacy8cys3knf9xvrerkf9g", 99000)]
+    buildAddrTx btc [coin] [("bc1qnjg0jd8228aq7egyzacy8cys3knf9xvrerkf9g", 99000)]
 
 -- SigInput describes the coin. The last argument is the redeem script.
 signed <-
   either fail pure $
-    signTx btc ctx unsigned [SigInput coinScript amount coin sigHashAll Nothing] [key.key]
+    signTx btc unsigned [SigInput coinScript amount coin sigHashAll Nothing] [key.key]
 
-print (verifyStdTx btc ctx signed [(coinScript, amount, coin)])
+print (verifyStdTx btc signed [(coinScript, amount, coin)])
 -- => True
 print (txVirtualSize signed)
 -- => 110
@@ -547,10 +550,10 @@ let shared = encodePsbtBase64 updated
 
 -- Signer: read the text, and sign every input the keys can sign.
 received <- either fail pure (decodePsbtBase64 shared)
-signedPsbt <- either fail pure (signPsbt btc ctx (keySigner ctx key.key) received)
+signedPsbt <- either fail pure (signPsbt btc (keySigner key.key) received)
 
 -- Finalizer and extractor: check the signatures and build the transaction.
-finalized <- either fail pure (finalizePsbt btc ctx signedPsbt)
+finalized <- either fail pure (finalizePsbt btc signedPsbt)
 extracted <- either fail pure (psbtTransaction finalized)
 
 -- RFC 6979 signatures are deterministic, so this is the same transaction.
@@ -582,23 +585,23 @@ Some other useful functions:
 ### Taproot
 
 ```haskell
-let key = derivePath ctx ("m/86'/0'/0'/0/0" :: DerivPath) master
-    internalKey = (deriveXPubKey ctx key).key
+let key = derivePath ("m/86'/0'/0'/0/0" :: DerivPath) master
+    internalKey = (deriveXPubKey key).key
     -- Nothing means that the output has no script tree.
-    output = taprootScriptOutput ctx (TaprootOutput internalKey Nothing)
+    output = taprootScriptOutput (TaprootOutput internalKey Nothing)
 
-print (addrToText btc =<< outputAddress btc ctx output)
+print (addrToText btc =<< outputAddress btc output)
 -- => Just "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr"
 
 -- Spend a made-up coin of 100,000 satoshi by its key path.
 let coin = OutPoint "1111111111111111111111111111111111111111111111111111111111111111" 0
-    unsigned = buildTx ctx [coin] [(output, 99000)]
+    unsigned = buildTx [coin] [(output, 99000)]
 
 signed <-
   either fail pure $
-    signTx btc ctx unsigned [SigInput output 100000 coin sigHashDefault Nothing] [key.key]
+    signTx btc unsigned [SigInput output 100000 coin sigHashDefault Nothing] [key.key]
 
-print (verifyStdTx btc ctx signed [(output, 100000, coin)])
+print (verifyStdTx btc signed [(output, 100000, coin)])
 -- => True
 ```
 
@@ -655,8 +658,8 @@ Pass `bch` wherever the examples above pass `btc`. A few things differ.
 
 ```haskell
 -- The BIP-44 coin type of Bitcoin Cash is 145.
-let key = derivePath ctx ("m/44'/145'/0'/0/0" :: DerivPath) master
-    address = xPubAddr ctx (deriveXPubKey ctx key)
+let key = derivePath ("m/44'/145'/0'/0/0" :: DerivPath) master
+    address = xPubAddr (deriveXPubKey key)
 
 -- addrToText writes CashAddr on Bitcoin Cash.
 print (addrToText bch address)
@@ -669,7 +672,7 @@ print ((== Just address) (textToAddr bch "1mW6fDEMjKrDHvLvoEsaeLxSCzZBf3Bfg"))
 -- => True
 
 -- SegWit addresses do not exist on Bitcoin Cash.
-print (addrToText bch (xPubWitnessAddr ctx (deriveXPubKey ctx key)))
+print (addrToText bch (xPubWitnessAddr (deriveXPubKey key)))
 -- => Nothing
 ```
 
@@ -774,7 +777,8 @@ test network before you use it on mainnet.
   `getEntropy` from the entropy package. Never use `System.Random`.
 - **Secrets in logs.** `PrivateKey` and `XPrvKey` show as `<redacted>` and have no
   `Read` instance. `toWif` and `xPrvExport` write a key out on purpose. A bare
-  `SecKey`, such as the `key` field of a `PrivateKey`, still shows its bytes. The
+  `SecKey`, such as the `key` field of a `PrivateKey`, shows as
+  `SecKey <redacted>` too, since secp256k1-haskell 3.0.0. The
   errors of `fromMnemonic` and `mnemonicToSeed` name the position of a bad word,
   never the word.
 - **Secrets in memory.** Keys live in the GHC heap. The library cannot wipe them,

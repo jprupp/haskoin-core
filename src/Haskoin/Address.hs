@@ -590,29 +590,29 @@ base58get net = do
       | otherwise = fail "Does not recognize address prefix"
 
 -- | HASH160 of a public key in its serialized form.
-pubKeyHash :: Ctx -> PublicKey -> Hash160
-pubKeyHash ctx = addressHash . marshal ctx
+pubKeyHash :: PublicKey -> Hash160
+pubKeyHash = addressHash . encodeSerial
 
 -- | Obtain a standard pay-to-public-key-hash address from a public key.
-pubKeyAddr :: Ctx -> PublicKey -> Address
-pubKeyAddr ctx = p2pkhAddr . pubKeyHash ctx
+pubKeyAddr :: PublicKey -> Address
+pubKeyAddr = p2pkhAddr . pubKeyHash
 
 -- | Obtain a SegWit pay-to-witness-public-key-hash (P2WPKH) address from a
 -- public key. Returns 'Nothing' for an uncompressed key. BIP-143 makes witness
 -- spends with uncompressed keys non-standard, so coins sent to such an address
 -- could not be spent through the normal network.
-pubKeyWitnessAddr :: Ctx -> PublicKey -> Maybe Address
-pubKeyWitnessAddr ctx pk = do
+pubKeyWitnessAddr :: PublicKey -> Maybe Address
+pubKeyWitnessAddr pk = do
   guard pk.compress
-  return . p2wpkhAddr $ pubKeyHash ctx pk
+  return . p2wpkhAddr $ pubKeyHash pk
 
 -- | Obtain a backwards-compatible SegWit P2SH-P2WPKH address from a public key.
 -- Returns 'Nothing' for an uncompressed key, for the same reason as
 -- 'pubKeyWitnessAddr'.
-pubKeyCompatWitnessAddr :: Ctx -> PublicKey -> Maybe Address
-pubKeyCompatWitnessAddr ctx pk = do
+pubKeyCompatWitnessAddr :: PublicKey -> Maybe Address
+pubKeyCompatWitnessAddr pk = do
   guard pk.compress
-  return . p2shP2wpkhAddr $ pubKeyHash ctx pk
+  return . p2shP2wpkhAddr $ pubKeyHash pk
 
 -- | Obtain a standard pay-to-public-key-hash (P2PKH) address from a 'Hash160'.
 p2pkhAddr :: Hash160 -> Address
@@ -649,9 +649,9 @@ p2shP2wpkhAddr h =
 --
 -- Also fails for a value that 'encodeOutput' cannot write, such as a multisig
 -- that requires more signatures than it has keys.
-payToScriptAddress :: Ctx -> ScriptOutput -> Either String Address
-payToScriptAddress ctx =
-  fmap p2shAddr . p2shScriptHash <=< encodeOutput ctx
+payToScriptAddress :: ScriptOutput -> Either String Address
+payToScriptAddress =
+  fmap p2shAddr . p2shScriptHash <=< encodeOutput
 
 -- | Compute a SegWit pay-to-witness-script-hash (P2WSH) address for an output
 -- script.
@@ -662,17 +662,17 @@ payToScriptAddress ctx =
 -- than consensus: it does not relay the spend of a witness script above 3,600
 -- bytes, nor one with an uncompressed key. This function does not check
 -- either.
-payToWitnessScriptAddress :: Ctx -> ScriptOutput -> Either String Address
-payToWitnessScriptAddress ctx =
-  fmap p2wshAddr . p2wshScriptHash <=< encodeOutput ctx
+payToWitnessScriptAddress :: ScriptOutput -> Either String Address
+payToWitnessScriptAddress =
+  fmap p2wshAddr . p2wshScriptHash <=< encodeOutput
 
 -- | Compute a backwards-compatible SegWit P2SH-P2WSH address: the
 -- pay-to-script-hash address of the witness program of the script. Fails as
 -- 'payToWitnessScriptAddress' does.
-payToNestedScriptAddress :: Ctx -> ScriptOutput -> Either String Address
-payToNestedScriptAddress ctx out = do
-  h <- p2wshScriptHash =<< encodeOutput ctx out
-  payToScriptAddress ctx (PayWitnessScriptHash h)
+payToNestedScriptAddress :: ScriptOutput -> Either String Address
+payToNestedScriptAddress out = do
+  h <- p2wshScriptHash =<< encodeOutput out
+  payToScriptAddress (PayWitnessScriptHash h)
 
 -- | Get the output script that locks coins sent to an address. Token-aware
 -- CashAddr addresses use the same script as their plain counterparts. Other
@@ -707,19 +707,19 @@ cashAddressOutput v b
     len = B.length b
 
 -- | Get output script AST for an 'Address'.
-addressToScript :: Ctx -> Address -> Maybe Script
-addressToScript ctx addr =
-  addressToOutput addr >>= eitherToMaybe . encodeOutput ctx
+addressToScript :: Address -> Maybe Script
+addressToScript addr =
+  addressToOutput addr >>= eitherToMaybe . encodeOutput
 
 -- | Encode address as output script in 'ByteString' form.
-addressToScriptBS :: Ctx -> Address -> Maybe ByteString
-addressToScriptBS ctx addr = (runPutS . serialize) <$> addressToScript ctx addr
+addressToScriptBS :: Address -> Maybe ByteString
+addressToScriptBS addr = (runPutS . serialize) <$> addressToScript addr
 
 -- | Decode an output script into the 'Address' it has on a network, if it
 -- has one there. See 'outputAddress'.
-scriptToAddress :: Network -> Ctx -> Script -> Either String Address
-scriptToAddress net ctx =
-  maybeToEither e . outputAddress net ctx <=< decodeOutput ctx
+scriptToAddress :: Network -> Script -> Either String Address
+scriptToAddress net =
+  maybeToEither e . outputAddress net <=< decodeOutput
   where
     e = "Could not decode address"
 
@@ -732,10 +732,10 @@ scriptToAddress net ctx =
 -- hash. A server reads the address of every input and output that it shows,
 -- and parsing took most of that time. Any other script is parsed, and gives
 -- what it gave before; the tests hold both ways to the same answers.
-scriptToAddressBS :: Network -> Ctx -> ByteString -> Either String Address
-scriptToAddressBS net ctx bytes
+scriptToAddressBS :: Network -> ByteString -> Either String Address
+scriptToAddressBS net bytes
   | Just a <- standard = Right a
-  | otherwise = maybeToEither e . outputAddress net ctx =<< unmarshal ctx bytes
+  | otherwise = maybeToEither e . outputAddress net =<< decodeSerial bytes
   where
     e = "Could not decode address"
     n = B.length bytes
@@ -772,8 +772,8 @@ scriptToAddressBS net ctx bytes
 -- plain hash lock, which Bitcoin Core reports as non-standard. Every address
 -- this function returns has a text form on the network, so 'addrToText' and
 -- the JSON encoder succeed for it.
-outputAddress :: Network -> Ctx -> ScriptOutput -> Maybe Address
-outputAddress net _ =
+outputAddress :: Network -> ScriptOutput -> Maybe Address
+outputAddress net =
   \case
     PayPKHash h -> Just $ PubKeyAddress h
     PayScriptHash h -> Just $ ScriptAddress h
@@ -798,10 +798,10 @@ outputAddress net _ =
 -- 'maxRedeemScriptSize' bytes, since no valid input can carry one. The
 -- function does not look at the output being spent, so it is a guess that a
 -- caller should confirm against that output when it has it.
-inputAddress :: Ctx -> ScriptInput -> Maybe Address
-inputAddress ctx =
+inputAddress :: ScriptInput -> Maybe Address
+inputAddress =
   \case
-    (RegularInput (SpendPKHash _ key)) -> Just $ pubKeyAddr ctx key
-    (ScriptHashInput _ rdm) -> eitherToMaybe $ payToScriptAddress ctx rdm
-    (NestedWitnessInput rdm) -> eitherToMaybe $ payToScriptAddress ctx rdm
+    (RegularInput (SpendPKHash _ key)) -> Just $ pubKeyAddr key
+    (ScriptHashInput _ rdm) -> eitherToMaybe $ payToScriptAddress rdm
+    (NestedWitnessInput rdm) -> eitherToMaybe $ payToScriptAddress rdm
     _ -> Nothing
