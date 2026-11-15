@@ -111,6 +111,7 @@ import Haskoin.Network.Data
 import Haskoin.Script.Common
 import Haskoin.Script.Standard
 import Haskoin.Util
+import Haskoin.Util.Direct (getDirect)
 import Text.Read
   ( Lexeme (Ident, Punc),
     Read (readListPrec, readPrec),
@@ -289,6 +290,7 @@ instance Serial Address where
       putWord8 0x06
       putWord8 v
       putSized d
+  {-# INLINEABLE serialize #-}
 
   deserialize =
     getWord8 >>= \case
@@ -311,6 +313,7 @@ instance Serial Address where
             <> encodeHex (B.singleton b)
     where
       checked kind = maybe (fail ("Invalid " <> kind <> " address")) return
+  {-# INLINEABLE deserialize #-}
 
 -- | Write bytes behind their length. The length is a 64-bit word to stay
 -- compatible with data serialized by earlier versions.
@@ -318,6 +321,7 @@ putSized :: (MonadPut m) => ByteString -> m ()
 putSized d = do
   putWord64be (fromIntegral (B.length d))
   putByteString d
+{-# INLINEABLE putSized #-}
 
 -- | Read bytes written by 'putSized'. The length is checked against a maximum
 -- while it is still a 64-bit word, so a corrupt or hostile length can neither
@@ -327,10 +331,15 @@ getSized maxLen = do
   n <- getWord64be
   when (n > fromIntegral maxLen) $ fail "Address payload too long"
   getByteString (fromIntegral n)
+{-# INLINEABLE getSized #-}
 
+-- | Through cereal an address is read on a buffer directly, with
+-- 'getDirect': an index of the chain has an address in the key of every
+-- output and of every balance. It is written through the builder of cereal,
+-- which costs less for a tag and a hash than a buffer of their own.
 instance Serialize Address where
   put = serialize
-  get = deserialize
+  get = getDirect deserialize
 
 instance Binary Address where
   put = serialize

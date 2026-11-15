@@ -76,6 +76,8 @@ instance ToJSON Script where
   toEncoding = hexEncoding . runPutL . serialize
 
 instance Serial Script where
+  {-# INLINEABLE serialize #-}
+  {-# INLINEABLE deserialize #-}
   deserialize =
     Script <$> getScriptOps
     where
@@ -262,6 +264,8 @@ pattern OP_CHECKSIGADD :: ScriptOp
 pattern OP_CHECKSIGADD = OP_CHECKDATASIG
 
 instance Serial ScriptOp where
+  {-# INLINEABLE serialize #-}
+  {-# INLINEABLE deserialize #-}
   deserialize = go . fromIntegral =<< getWord8
     where
       go op

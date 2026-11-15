@@ -5,6 +5,7 @@
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE NoFieldSelectors #-}
 
@@ -42,13 +43,16 @@ where
 import Control.DeepSeq
 import Control.Monad (guard)
 import Crypto.Hash
+import Crypto.Hash.IO (hashInternalContextSize, hashInternalFinalize, hashInternalInit, hashInternalUpdate)
 import Crypto.MAC.HMAC (HMAC, hmac)
 import Data.Binary (Binary (..))
 import Data.Bits (shiftL, (.|.))
 import Data.ByteArray (ByteArrayAccess, convert)
+import Data.ByteArray qualified as BA
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as B
 import Data.ByteString.Short (ShortByteString, fromShort, toShort)
+import Data.ByteString.Short qualified as Short
 import Data.Bytes.Get
 import Data.Bytes.Put
 import Data.Bytes.Serial (Serial (..))
@@ -58,10 +62,14 @@ import Data.Serialize (Serialize (..))
 import Data.String (IsString, fromString)
 import Data.String.Conversions (cs)
 import Data.Void (Void)
-import Data.Word (Word32)
+import Data.Word (Word32, Word8)
+import Foreign.Marshal.Alloc (allocaBytesAligned)
+import Foreign.Ptr (Ptr, castPtr, plusPtr)
 import GHC.Generics (Generic)
+import Haskoin.Util.Direct (getShortBytes, putShortBytes)
 import Haskoin.Util.Helpers
 import Haskoin.Util.Marshal
+import System.IO.Unsafe (unsafeDupablePerformIO)
 import Text.Read as R
 
 -- | 'Word32' wrapped for type-safe 32-bit checksums.
@@ -137,8 +145,10 @@ instance IsString Hash512 where
       e = error "Could not decode hash from hex string"
 
 instance Serial Hash512 where
-  deserialize = Hash512 . toShort <$> getByteString 64
-  serialize = putByteString . fromShort . (.get)
+  deserialize = Hash512 <$> getShortBytes 64
+  {-# INLINE deserialize #-}
+  serialize = putShortBytes . (.get)
+  {-# INLINE serialize #-}
 
 instance Serialize Hash512 where
   put = serialize
@@ -154,8 +164,10 @@ instance IsString Hash256 where
       e = error "Could not decode hash from hex string"
 
 instance Serial Hash256 where
-  deserialize = Hash256 . toShort <$> getByteString 32
-  serialize = putByteString . fromShort . (.get)
+  deserialize = Hash256 <$> getShortBytes 32
+  {-# INLINE deserialize #-}
+  serialize = putShortBytes . (.get)
+  {-# INLINE serialize #-}
 
 instance Serialize Hash256 where
   put = serialize
@@ -171,8 +183,10 @@ instance IsString Hash160 where
       e = error "Could not decode hash from hex string"
 
 instance Serial Hash160 where
-  deserialize = Hash160 . toShort <$> getByteString 20
-  serialize = putByteString . fromShort . (.get)
+  deserialize = Hash160 <$> getShortBytes 20
+  {-# INLINE deserialize #-}
+  serialize = putShortBytes . (.get)
+  {-# INLINE serialize #-}
 
 instance Serialize Hash160 where
   put = serialize
@@ -188,7 +202,13 @@ sha512 = Hash512 . toShort . convert . hashWith SHA512
 
 -- | Calculate SHA256 hash.
 sha256 :: (ByteArrayAccess b) => b -> Hash256
-sha256 = Hash256 . toShort . convert . hashWith SHA256
+sha256 b =
+  Hash256 . unsafeDupablePerformIO . BA.withByteArray b $ \input ->
+    withSHA256 $ \context digest -> do
+      hashSHA256 context input (BA.length b) digest
+      Short.packCStringLen (castPtr digest, 32)
+{-# INLINEABLE sha256 #-}
+{-# SPECIALIZE sha256 :: ByteString -> Hash256 #-}
 
 -- | Calculate RIPEMD160 hash.
 ripemd160 :: (ByteArrayAccess b) => b -> Hash160
@@ -200,8 +220,46 @@ sha1 = Hash160 . toShort . convert . hashWith SHA1
 
 -- | Compute two rounds of SHA-256.
 doubleSHA256 :: (ByteArrayAccess b) => b -> Hash256
-doubleSHA256 =
-  Hash256 . toShort . convert . hashWith SHA256 . hashWith SHA256
+doubleSHA256 b =
+  Hash256 . unsafeDupablePerformIO . BA.withByteArray b $ \input ->
+    withSHA256 $ \context digest -> do
+      hashSHA256 context input (BA.length b) digest
+      -- the first digest is read whole before the second is written over it
+      hashSHA256 context digest 32 digest
+      Short.packCStringLen (castPtr digest, 32)
+{-# INLINEABLE doubleSHA256 #-}
+{-# SPECIALIZE doubleSHA256 :: ByteString -> Hash256 #-}
+
+-- | Memory for a SHA-256 context and, after it, for a digest of 32 bytes.
+--
+-- 'sha256' and 'doubleSHA256' hash every transaction and every block
+-- header that a node sees, most of them a few hundred bytes long. The pure
+-- interface of crypton allocates a context, copies it for every step, and
+-- copies the digest twice on its way to a 'ShortByteString': about 1.5 kB
+-- and 400 ns for each hash, more than the hashing of a short input takes.
+-- These two functions call the same C code on memory that they hold for
+-- the length of the call, and copy the digest once.
+withSHA256 :: (Ptr (Context SHA256) -> Ptr Word8 -> IO a) -> IO a
+withSHA256 action =
+  allocaBytesAligned (size + 32) 16 $ \context -> action context (context `plusPtr` size)
+  where
+    size = hashInternalContextSize SHA256
+{-# INLINE withSHA256 #-}
+
+-- | Write the SHA-256 digest of that many bytes of input. The C code takes
+-- a length of 32 bits, so a longer input is given to it in pieces.
+hashSHA256 :: Ptr (Context SHA256) -> Ptr Word8 -> Int -> Ptr Word8 -> IO ()
+hashSHA256 context input len digest = do
+  hashInternalInit context
+  update input len
+  hashInternalFinalize context (castPtr digest)
+  where
+    update from left
+      | left <= 0 = return ()
+      | otherwise = do
+          let piece = min left (fromIntegral (maxBound :: Word32))
+          hashInternalUpdate context from (fromIntegral piece)
+          update (from `plusPtr` piece) (left - piece)
 
 -- | Compute SHA-256 followed by RIPMED-160.
 addressHash :: (ByteArrayAccess b) => b -> Hash160

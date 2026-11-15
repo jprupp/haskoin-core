@@ -234,8 +234,35 @@ instead, which take the `Network` as their first argument. `XPrvKey`,
 
 `decodeSerial` and `unmarshal` fail when bytes are left over after the value,
 and `decodeTx` does the same for a transaction. `runGetS deserialize` reads a
-value from the start of the bytes and ignores the rest. `encodeSerial x` is
-`runPutS (serialize x)`.
+value from the start of the bytes and ignores the rest. `encodeSerial x` gives
+the bytes of `runPutS (serialize x)`.
+
+**Which one is fast.** All of these give the same bytes, but not at the same
+price. `encodeSerial` and `decodeSerial` are the cheapest: they write into one
+buffer of the exact length and read the bytes where they are. `decode` of
+cereal reads the same way for transactions, their inputs and outputs,
+outpoints, block headers, blocks and addresses, and `encode` writes the same
+way for transactions, inputs, headers and blocks. But `encode` first allocates
+a buffer of 4 kB whatever the value, which is most of the cost of a value of a
+few bytes. `runPutS (serialize x)` and `runGetS deserialize` go through the
+builder and the continuations of cereal one field at a time, and are several
+times slower on a transaction: keep them for a value that is part of a longer
+stream.
+
+The module `Haskoin.Util.Direct` has the functions behind this, for your own
+types: give `encodeDirect`, `decodeDirect` or `sizeDirect` a serializer written
+for any `MonadPut` or `MonadGet`, or write the `put` and `get` of a cereal
+instance with `putDirect` and `getDirect`. They give what cereal gives, errors
+included.
+
+```haskell
+instance Serialize Record where
+  put record = putDirect (serialize record)
+  get = getDirect deserialize
+```
+
+Mark the `serialize` and `deserialize` of such a type `INLINEABLE`, so that GHC
+can compile them for the monads of that module.
 
 ### Hash byte order
 
@@ -752,7 +779,7 @@ and `bloomContains` build BIP-37 filters for `filterload`.
 
 ## Module overview
 
-`import Haskoin` brings in everything below except the two modules marked as
+`import Haskoin` brings in everything below except the modules marked as
 separate. It exports many short names, so you may prefer to import only the
 modules you need, or to import it qualified.
 
@@ -766,6 +793,7 @@ modules you need, or to import it qualified.
 | `Haskoin.Script`              | Scripts, standard templates and signature hashes                     |
 | `Haskoin.Transaction`         | Transaction types, builder, signing, SegWit, Taproot and PSBT        |
 | `Haskoin.Util`                | Hexadecimal helpers, `Marshal` and small utilities                   |
+| `Haskoin.Util.Direct`         | Serializers run straight on a buffer (separate import)               |
 | `Haskoin.Util.Arbitrary`      | QuickCheck generators such as `arbitraryTx` (separate import)        |
 
 ## Security notes
@@ -825,15 +853,23 @@ The benchmarks are in `bench/Bench.hs` and use
 [tasty-bench](https://hackage.haskell.org/package/tasty-bench). They time the
 functions that a server calls for every input and output it shows: hex,
 `scriptToAddressBS`, the text of an address, the JSON of a transaction, and
-Base58.
+Base58. The group `serial` times the binary encoding of hashes, outpoints,
+transactions, headers, blocks and addresses, written and read through cereal,
+through `runPutS` and `runGetS`, and through `encodeSerial` and `decodeSerial`,
+and the hashing of transactions and headers.
 
 ```sh
 stack bench                                                 # at -O1, as the package builds by default
 stack bench --ghc-options -O2                               # at -O2
 stack bench --benchmark-arguments '-p hexBuilder'           # one group
+stack bench --benchmark-arguments '-p /All.serial/'         # the binary encodings
 stack bench --benchmark-arguments '--csv before.csv'        # keep the timings
 stack bench --benchmark-arguments '--baseline before.csv'   # compare with them
 ```
+
+Each line shows the memory allocated next to the time. The time of an encoder
+of a few bytes is mostly the time it takes to allocate, and the memory does
+not move from one run to the next as the time does, so compare that first.
 
 Run them at both levels. Most users build this package at `-O1`, so a change
 that is only faster at `-O2` is not faster for them. Stack does not always

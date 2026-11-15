@@ -805,6 +805,7 @@ instance Serial VarInt where
               show n ++ "-byte encoding of",
               show x
             ]
+  {-# INLINEABLE deserialize #-}
 
   serialize (VarInt x)
     | x < 0xfd =
@@ -818,6 +819,7 @@ instance Serial VarInt where
     | otherwise = do
         putWord8 0xff
         putWord64le x
+  {-# INLINEABLE serialize #-}
 
 instance Binary VarInt where
   put = serialize
@@ -829,6 +831,7 @@ instance Serialize VarInt where
 
 putVarInt :: (MonadPut m, Integral a) => a -> m ()
 putVarInt = serialize . VarInt . fromIntegral
+{-# INLINE putVarInt #-}
 
 -- | Largest number of elements that a serialized list may announce, and
 -- largest number of bytes that a serialized string may announce. Bitcoin Core
@@ -845,6 +848,7 @@ getVarIntList element = do
   when (count > maxListSize) $
     fail ("List count too large: " ++ show count)
   getElements count element
+{-# INLINEABLE getVarIntList #-}
 
 -- | Read the given number of elements, in a loop that keeps nothing but the
 -- elements read so far.
@@ -855,6 +859,7 @@ getElements count element = go count []
     go n acc = do
       x <- element
       go (n - 1) (x : acc)
+{-# INLINEABLE getElements #-}
 
 -- | Read a list like 'getVarIntList', and fail when its count is above the
 -- given limit. The count is checked right after it is read, before any
@@ -865,6 +870,7 @@ getVarIntListMax name limit element = do
   when (count > limit) $
     fail (name ++ ": too many entries: " ++ show count ++ ", the limit is " ++ show limit)
   getElements count element
+{-# INLINEABLE getVarIntListMax #-}
 
 -- | Largest number of entries in an @inv@ or a @getdata@ message. Bitcoin
 -- Core and Bitcoin Cash Node punish a peer that sends more (@MAX_INV_SZ@).
@@ -896,6 +902,7 @@ putVarIntList :: (MonadPut m) => (a -> m ()) -> [a] -> m ()
 putVarIntList element xs = do
   putVarInt (length xs)
   mapM_ element xs
+{-# INLINEABLE putVarIntList #-}
 
 -- | Read bytes that start with their count as a 'VarInt'. A count above
 -- 'maxListSize' fails the parse. A count of zero gives the one shared empty
@@ -909,12 +916,14 @@ getVarIntBytes = do
   if count == 0
     then return B.empty
     else getByteString (fromIntegral count)
+{-# INLINEABLE getVarIntBytes #-}
 
 -- | Write bytes with their count as a 'VarInt' in front.
 putVarIntBytes :: (MonadPut m) => ByteString -> m ()
 putVarIntBytes bs = do
   putVarInt (B.length bs)
   putByteString bs
+{-# INLINEABLE putVarIntBytes #-}
 
 -- | Data type for serialization of variable-length strings.
 newtype VarString = VarString {get :: ByteString}

@@ -134,3 +134,4 @@ getNetworkTx :: (MonadGet m) => Network -> m Tx
 getNetworkTx net
   | net.segWit = deserialize
   | otherwise = parseLegacyTx
+{-# INLINE getNetworkTx #-}

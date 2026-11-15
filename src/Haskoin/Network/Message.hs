@@ -45,6 +45,7 @@ import Haskoin.Network.Common
 import Haskoin.Network.CompactBlock
 import Haskoin.Network.Data
 import Haskoin.Transaction.Common
+import Haskoin.Util.Direct (decodeDirect, encodeDirect)
 
 -- | Data type representing the header of a 'Message'. All messages sent between
 -- nodes contain a message header.
@@ -214,7 +215,14 @@ getMessage net = do
   unless
     (checkSum32 payload == chk)
     (fail $ "get: Invalid message checksum: " ++ show chk)
-  either fail return (runGetS (getPayload net cmd len) payload)
+  -- Blocks and transactions are nearly all the bytes that a node
+  -- downloads. Their payload is whole here, so it is read where it is, with
+  -- 'decodeDirect', which gives what 'runGetS' gives. The parsers of the
+  -- other messages are not compiled for that, and stay with cereal.
+  let parse
+        | cmd == MCBlock || cmd == MCTx = decodeDirect (getPayload net cmd len)
+        | otherwise = runGetS (getPayload net cmd len)
+  either fail return (parse payload)
 
 getPayload :: (MonadGet m) => Network -> MessageCommand -> Word32 -> m Message
 getPayload net cmd len =
@@ -273,8 +281,8 @@ putMessage net msg = do
           MNotFound m -> (MCNotFound, runPutS $ serialize m)
           MGetBlocks m -> (MCGetBlocks, runPutS $ serialize m)
           MGetHeaders m -> (MCGetHeaders, runPutS $ serialize m)
-          MTx m -> (MCTx, runPutS $ serialize m)
-          MBlock m -> (MCBlock, runPutS $ serialize m)
+          MTx m -> (MCTx, encodeDirect (serialize m))
+          MBlock m -> (MCBlock, encodeDirect (serialize m))
           MMerkleBlock m -> (MCMerkleBlock, runPutS $ serialize m)
           MHeaders m -> (MCHeaders, runPutS $ serialize m)
           MGetAddr -> (MCGetAddr, B.empty)

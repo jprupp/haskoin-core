@@ -417,6 +417,7 @@ putInt32be :: (MonadPut m) => Int32 -> m ()
 putInt32be n
   | n < 0 = putWord32be (complement (fromIntegral (abs n)) + 1)
   | otherwise = putWord32be (fromIntegral (abs n))
+{-# INLINEABLE putInt32be #-}
 
 getInt32be :: (MonadGet m) => m Int32
 getInt32be = do
@@ -424,11 +425,13 @@ getInt32be = do
   if testBit n 31
     then return (negate (complement (fromIntegral n) + 1))
     else return (fromIntegral n)
+{-# INLINEABLE getInt32be #-}
 
 putInt64be :: (MonadPut m) => Int64 -> m ()
 putInt64be n
   | n < 0 = putWord64be (complement (fromIntegral (abs n)) + 1)
   | otherwise = putWord64be (fromIntegral (abs n))
+{-# INLINEABLE putInt64be #-}
 
 getInt64be :: (MonadGet m) => m Int64
 getInt64be = do
@@ -436,6 +439,7 @@ getInt64be = do
   if testBit n 63
     then return (negate (complement (fromIntegral n) + 1))
     else return (fromIntegral n)
+{-# INLINEABLE getInt64be #-}
 
 putInteger :: (MonadPut m) => Integer -> m ()
 putInteger n
@@ -451,6 +455,7 @@ putInteger n
   where
     lo = fromIntegral (minBound :: Int32)
     hi = fromIntegral (maxBound :: Int32)
+{-# INLINEABLE putInteger #-}
 
 -- | Read an 'Integer' that 'putInteger' wrote. A number has one encoding, and
 -- any other way to write it is refused:
@@ -482,6 +487,7 @@ getInteger =
   where
     fitsInt32 n =
       n >= fromIntegral (minBound :: Int32) && n <= fromIntegral (maxBound :: Int32)
+{-# INLINEABLE getInteger #-}
 
 -- | The number that a string of bytes spells, least significant byte first.
 -- The string is split in halves and the two numbers are joined. Adding one
@@ -499,6 +505,7 @@ littleEndianToInteger bs
 putMaybe :: (MonadPut m) => (a -> m ()) -> Maybe a -> m ()
 putMaybe f Nothing = putWord8 0x00
 putMaybe f (Just x) = putWord8 0x01 >> f x
+{-# INLINEABLE putMaybe #-}
 
 getMaybe :: (MonadGet m) => m a -> m (Maybe a)
 getMaybe f =
@@ -506,14 +513,17 @@ getMaybe f =
     0x00 -> return Nothing
     0x01 -> Just <$> f
     _ -> fail "Not a Maybe"
+{-# INLINEABLE getMaybe #-}
 
 putLengthBytes :: (MonadPut m) => ByteString -> m ()
 putLengthBytes bs = do
   putWord64be (fromIntegral (B.length bs))
   putByteString bs
+{-# INLINEABLE putLengthBytes #-}
 
 getLengthBytes :: (MonadGet m) => m ByteString
 getLengthBytes = getByteString =<< getCount
+{-# INLINEABLE getLengthBytes #-}
 
 -- | A 64-bit count that must fit an 'Int'. A larger one fails the parse
 -- instead of wrapping around to a negative number.
@@ -523,6 +533,7 @@ getCount = do
   when (n > fromIntegral (maxBound :: Int)) $
     fail ("Count too large: " <> show n)
   return (fromIntegral n)
+{-# INLINEABLE getCount #-}
 
 --
 -- Fold and unfold an Integer to and from a list of its bytes
@@ -556,25 +567,31 @@ getIntMap i m = do
   unless (and (zipWith (<) keys (drop 1 keys))) $
     fail "getIntMap: the keys are not in ascending order"
   return (IntMap.fromDistinctAscList pairs)
+{-# INLINEABLE getIntMap #-}
 
 putIntMap :: (MonadPut m) => (Int -> m ()) -> (a -> m ()) -> IntMap a -> m ()
 putIntMap f g = putList (putTwo f g) . IntMap.toAscList
+{-# INLINEABLE putIntMap #-}
 
 putTwo :: (MonadPut m) => (a -> m ()) -> (b -> m ()) -> (a, b) -> m ()
 putTwo f g (x, y) = f x >> g y
+{-# INLINEABLE putTwo #-}
 
 getTwo :: (MonadGet m) => m a -> m b -> m (a, b)
 getTwo f g = (,) <$> f <*> g
+{-# INLINEABLE getTwo #-}
 
 putList :: (MonadPut m) => (a -> m ()) -> [a] -> m ()
 putList f ls = do
   putWord64be (fromIntegral (length ls))
   mapM_ f ls
+{-# INLINEABLE putList #-}
 
 getList :: (MonadGet m) => m a -> m [a]
 getList f = do
   l <- getCount
   replicateM l f
+{-# INLINEABLE getList #-}
 
 --
 -- Test Helpers

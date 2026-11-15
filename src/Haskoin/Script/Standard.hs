@@ -351,6 +351,8 @@ encodeOutput s =
 -- 'encodeOutput' rejects fails with an 'error' call, since 'serialize'
 -- cannot report a failure.
 instance Serial ScriptOutput where
+  {-# INLINEABLE serialize #-}
+  {-# INLINEABLE deserialize #-}
   deserialize = do
     script <- deserialize
     case decodeOutput script of

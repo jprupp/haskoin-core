@@ -62,6 +62,8 @@ verifyHashSig :: Hash256 -> Sig -> PubKey -> Bool
 verifyHashSig h s p = verifySig p (normalizeSig s) (hashToMsg h)
 
 instance Serial Sig where
+  {-# INLINEABLE serialize #-}
+  {-# INLINEABLE deserialize #-}
   deserialize = do
     l <- lookAhead $ do
       t <- getWord8

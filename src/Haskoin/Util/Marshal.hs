@@ -31,6 +31,7 @@ import Data.ByteString.Lazy qualified as Lazy
 import Data.Bytes.Get
 import Data.Bytes.Put
 import Data.Bytes.Serial
+import Haskoin.Util.Direct (decodeDirect, encodeDirect)
 
 class Marshal s a | a -> s where
   marshalPut :: (MonadPut m) => s -> a -> m ()
@@ -63,10 +64,18 @@ marshalGetAll s = do
 
 -- | Write a value of an ordinary 'Serial' type to bytes. It is the
 -- counterpart of 'marshal' for the types that need nothing to be read or
--- written, such as public keys, signatures and output scripts, and is only a
--- shorter way to write @'runPutS' . 'serialize'@.
+-- written, such as public keys, signatures and output scripts. The bytes
+-- are those of @'runPutS' . 'serialize'@.
+--
+-- They are written with 'encodeDirect', into one buffer of their exact
+-- length, and the function is inlined where it is called so that GHC
+-- compiles the serializer of the type for that. This is the cheapest way
+-- to the bytes of a small value: 'runPutS', and @encode@ of cereal, first
+-- allocate a buffer of 4 kB whatever the value, which costs about 200 ns
+-- before the first byte is written.
 encodeSerial :: (Serial a) => a -> ByteString
-encodeSerial = runPutS . serialize
+encodeSerial x = encodeDirect (serialize x)
+{-# INLINE encodeSerial #-}
 
 -- | Read a value of an ordinary 'Serial' type from bytes that hold the value
 -- and nothing else. It is the counterpart of 'unmarshal' for the types that
@@ -80,11 +89,13 @@ encodeSerial = runPutS . serialize
 -- here, behind the 'Serial' dictionary of a type not yet known, it would run
 -- every step through the dictionary of the monad. Inlined at a call that
 -- names the type, it becomes the parser that GHC compiled for that type and
--- for the one monad used here. For an output script of 34 bytes that is the
--- difference between about 900 ns and about 150 ns, which
+-- for the one monad used here, which is that of 'decodeDirect': it reads
+-- the bytes where they are, and leaves cereal to report the error of bytes
+-- that do not parse. For an output script of 34 bytes that is the
+-- difference between about 900 ns and under 100 ns, which
 -- 'Haskoin.Address.scriptToAddressBS' pays for every script it parses.
 decodeSerial :: (Serial a) => ByteString -> Either String a
-decodeSerial = runGetS $ do
+decodeSerial = decodeDirect $ do
   value <- deserialize
   done <- isEmpty
   unless done $ fail "decodeSerial: bytes left over after the value"

@@ -57,6 +57,7 @@ import GHC.Generics
 import Haskoin.Crypto.Hash
 import Haskoin.Network.Common
 import Haskoin.Transaction.Common
+import Haskoin.Util.Direct (encodeDirect, getDirect, putDirect)
 import Haskoin.Util.Helpers
 import Text.Read qualified as R
 
@@ -78,13 +79,17 @@ instance Serial Block where
     header <- deserialize
     txs <- getVarIntList deserialize
     return $ Block header txs
+  {-# INLINEABLE deserialize #-}
   serialize (Block h txs) = do
     serialize h
     putVarIntList serialize txs
+  {-# INLINEABLE serialize #-}
 
+-- | Through cereal a block is written and read on a buffer directly, like
+-- its transactions: see the instance of 'Tx'.
 instance Serialize Block where
-  get = deserialize
-  put = serialize
+  get = getDirect deserialize
+  put b = putDirect (serialize b)
 
 instance Binary Block where
   get = deserialize
@@ -107,7 +112,16 @@ instance FromJSON Block where
 
 -- | Block header hash. To be serialized reversed for display purposes.
 newtype BlockHash = BlockHash {get :: Hash256}
-  deriving (Eq, Ord, Generic, Hashable, Serial, NFData)
+  deriving (Eq, Ord, Generic, Hashable, NFData)
+
+-- | The instance is written out so that it can be inlined: one derived from
+-- that of 'Hash256' has no code that GHC can see from another module, and a
+-- block hash was then read through a dictionary, at thirty times the cost.
+instance Serial BlockHash where
+  serialize (BlockHash h) = serialize h
+  {-# INLINE serialize #-}
+  deserialize = BlockHash <$> deserialize
+  {-# INLINE deserialize #-}
 
 instance Serialize BlockHash where
   put = serialize
@@ -249,6 +263,7 @@ instance Serial BlockHeader where
           bits = b,
           nonce = n
         }
+  {-# INLINEABLE deserialize #-}
   serialize (BlockHeader v p m bt bb n) = do
     putWord32le v
     serialize p
@@ -256,18 +271,19 @@ instance Serial BlockHeader where
     putWord32le bt
     putWord32le bb
     putWord32le n
+  {-# INLINEABLE serialize #-}
 
 instance Binary BlockHeader where
   put = serialize
   get = deserialize
 
 instance Serialize BlockHeader where
-  put = serialize
-  get = deserialize
+  put h = putDirect (serialize h)
+  get = getDirect deserialize
 
 -- | Compute hash of 'BlockHeader'.
 headerHash :: BlockHeader -> BlockHash
-headerHash = BlockHash . doubleSHA256 . runPutS . serialize
+headerHash h = BlockHash (doubleSHA256 (encodeDirect (serialize h)))
 
 -- | A block locator is a set of block headers, denser towards the best block
 -- and sparser towards the genesis block. It starts at the highest block known.

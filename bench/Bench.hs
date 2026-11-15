@@ -1,5 +1,6 @@
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 -- |
 -- Module      : Main
@@ -16,6 +17,13 @@
 -- benchmark to check them with. This suite is here so that a claim about
 -- speed can be checked by anyone, and so that the next rewrite is measured
 -- before it is released.
+--
+-- The group @serial@ is about the other half of such a server: the bytes
+-- that it keeps. It reads a transaction from its database for every one that
+-- it returns, and writes and hashes every transaction of a block that it
+-- imports. That group has no reference from 1.6.0: it measures each type
+-- through every way to its bytes, with the memory that each allocates, and
+-- is compared with a run of the release before.
 --
 -- Wherever it is possible, a function of the library is measured next to the
 -- same work done the way haskoin-core 1.6.0 did it, copied into this file as
@@ -35,10 +43,12 @@
 -- The README says how to run a part of it and how to compare two runs.
 module Main (main) where
 
+import Control.DeepSeq (NFData)
 import Control.Monad (unless, (<=<))
 import Data.Aeson (ToJSON (toEncoding))
 import Data.Aeson.Encoding (Encoding, encodingToLazyByteString, unsafeToEncoding)
 import Data.Base16.Types (extractBase16)
+import Data.Binary qualified as Binary
 import Data.Bits (shiftR, xor)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as B
@@ -52,10 +62,11 @@ import Data.Bytes.Serial (Serial (deserialize, serialize))
 import Data.Char (chr)
 import Data.List (intercalate)
 import Data.Maybe (fromMaybe)
+import Data.Serialize qualified as Cereal
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Lazy qualified as LT
-import Data.Word (Word64)
+import Data.Word (Word32, Word64)
 import Haskoin
 import Numeric (showIntAtBase)
 import Test.Tasty.Bench
@@ -66,7 +77,8 @@ main =
     [ bgroup "hex" hexBenchmarks,
       bgroup "address" addressBenchmarks,
       bgroup "json" jsonBenchmarks,
-      bgroup "base58" base58Benchmarks
+      bgroup "base58" base58Benchmarks,
+      bgroup "serial" serialBenchmarks
     ]
 
 -- | The benchmark of a function of the library, named @now@, after the same
@@ -305,7 +317,7 @@ jsonBenchmarks =
   where
     encoded :: (ToJSON a) => a -> L.ByteString
     encoded = encodingToLazyByteString . toEncoding
-    header = BlockHeader 1 blockid (doubleSHA256 (bytes 50 64)) 1231006505 0x1d00ffff 2083236893
+    header = blockHeader
 
 -- | The JSON encoding of 'TxHash' of haskoin-core 1.6.0.
 txHashEncoding160 :: TxHash -> Encoding
@@ -339,3 +351,130 @@ encodeBase58160 bs = T.replicate (B.length zeros) "1" <> digits
       | B.null rest = T.empty
       | otherwise = T.pack (showIntAtBase 58 (chr . fromIntegral . B.index alphabet) (bsToInteger rest) "")
     alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+-- Binary encoding
+
+-- | The binary form of the types that a server reads and writes most. A
+-- server that indexes the chain decodes every transaction it returns from
+-- its database, writes a key of a hash or an outpoint for every input and
+-- output of a block that it imports, and hashes every transaction of that
+-- block. The time and the memory of these few encoders decide how fast it
+-- imports a block.
+--
+-- Each type is measured through the entry points that such a server calls:
+-- @encode@ and @decode@ of cereal, and 'runPutS' with 'serialize' and
+-- 'runGetS' with 'deserialize' of the bytes package. They give the same
+-- bytes, but they reach the code of the library by different doors, and one
+-- may be fast while the other is not. A transaction is measured through
+-- binary too.
+--
+-- Run these with @+RTS -T@ to see the memory allocated by each: the time
+-- of an encoder of a few bytes is mostly the time that it takes to allocate.
+serialBenchmarks :: [Benchmark]
+serialBenchmarks =
+  [ codec "TxHash" txid,
+    codec "BlockHash" blockid,
+    codec "Hash256" (doubleSHA256 (bytes 70 32)),
+    codec "Hash160" (addressHash (bytes 71 33)),
+    codec "VarInt of 1 byte" (VarInt 107),
+    codec "VarInt of 3 bytes" (VarInt 3000),
+    codec "OutPoint" outpoint,
+    codec "TxOut" (TxOut 123456 (hex "0020" <> bytes 43 32)),
+    codec "TxIn" (TxIn outpoint (bytes 72 107) 0xffffffff),
+    codec "BlockHeader" blockHeader,
+    codec "Address, P2PKH" (PubKeyAddress (addressHash (bytes 73 33))),
+    codec "Address, P2WSH" (WitnessScriptAddress (sha256 (bytes 74 33))),
+    bgroup "Tx" $
+      [ bgroup name (codecs tx <> binaryCodecs tx)
+      | (name, tx) <- take 2 transactions
+      ],
+    codec ("Block of " <> show blockSize <> " transactions") block,
+    -- a block as a node gets it from a peer and sends it to one; half of
+    -- the time is the checksum of the payload
+    bgroup
+      ("Message with a block of " <> show blockSize <> " transactions")
+      [ bench "putMessage" (nf (runPutS . putMessage btc) (MBlock block)),
+        bench "getMessage" (nf (runGetS (getMessage btc)) (runPutS (putMessage btc (MBlock block))))
+      ],
+    bgroup "hash" $
+      [ bgroup
+          name
+          [ bench "txHash" (nf txHash tx),
+            bench "txWitnessHash" (nf txWitnessHash tx),
+            bench "txWeight" (nf txWeight tx),
+            -- what is left of the two above once the bytes are written
+            bench "doubleSHA256 of its bytes" (nf doubleSHA256 (runPutS (serialize tx)))
+          ]
+      | (name, tx) <- take 2 transactions
+      ]
+        <> [ bench "headerHash" (nf headerHash blockHeader),
+             bench ("txHash of " <> show blockSize <> " transactions") (nf (map txHash) blockTransactions)
+           ]
+  ]
+  where
+    outpoint = OutPoint txid 1
+
+-- | A value written and read through cereal and through the bytes package.
+codec :: (Serial a, Cereal.Serialize a, NFData a) => String -> a -> Benchmark
+codec name x = bgroup name (codecs x)
+{-# INLINE codec #-}
+
+-- | The benchmarks of 'codec'. The pragma makes a copy of them for every
+-- type that they are used at, so that each one calls the library as a
+-- program that names the type does, not through a dictionary that only this
+-- file would have.
+codecs :: forall a. (Serial a, Cereal.Serialize a, NFData a) => a -> [Benchmark]
+codecs x =
+  [ bench "cereal encode" (nf Cereal.encode x),
+    bench "cereal decode" (nf (Cereal.decode :: ByteString -> Either String a) encoded),
+    bench "runPutS serialize" (nf (runPutS . serialize) x),
+    bench "runGetS deserialize" (nf (runGetS deserialize :: ByteString -> Either String a) encoded),
+    bench "encodeSerial" (nf encodeSerial x),
+    bench "decodeSerial" (nf (decodeSerial :: ByteString -> Either String a) encoded)
+  ]
+  where
+    encoded = runPutS (serialize x)
+{-# INLINE codecs #-}
+
+-- | A value written and read through binary, which works on lazy bytes.
+binaryCodecs :: forall a. (Binary.Binary a, NFData a) => a -> [Benchmark]
+binaryCodecs x =
+  [ bench "binary encode" (nf Binary.encode x),
+    bench "binary decode" (nf (Binary.decode :: L.ByteString -> a) (Binary.encode x))
+  ]
+{-# INLINE binaryCodecs #-}
+
+blockHeader :: BlockHeader
+blockHeader = BlockHeader 1 blockid (doubleSHA256 (bytes 50 64)) 1231006505 0x1d00ffff 2083236893
+
+-- | The number of transactions of 'block': about as many as a full block of
+-- Bitcoin has.
+blockSize :: Int
+blockSize = 3000
+
+-- | A block of about 1.1 MB, of transactions that differ in their bytes, in
+-- their numbers of inputs and outputs, and in whether they have a witness:
+-- two in three do, as in a block of Bitcoin today.
+block :: Block
+block = Block blockHeader blockTransactions
+
+-- | The transactions of 'block'.
+blockTransactions :: [Tx]
+blockTransactions = map transaction [1 .. fromIntegral blockSize]
+  where
+    transaction :: Word64 -> Tx
+    transaction k
+      | k `mod` 3 == 0 = Tx 1 (map (input 107) (seeds k)) (outputs k) [] 0
+      | otherwise = Tx 2 (map (input 0) (seeds k)) (outputs k) (map witness (seeds k)) (fromIntegral k)
+    -- one to three seeds, all different from those of every other transaction
+    seeds k = [1000 * k + i | i <- [1 .. 1 + k `mod` 3]]
+    input size seed =
+      TxIn (OutPoint (TxHash (doubleSHA256 (bytes seed 32))) (index seed)) (bytes (seed + 500) size) 0xfffffffd
+    index :: Word64 -> Word32
+    index seed = fromIntegral (seed `mod` 4)
+    outputs k = concat (replicate (fromIntegral (1 + k `mod` 2)) (pair k))
+    pair k =
+      [ TxOut (1000 + k) (hex "0014" <> bytes (k + 1) 20),
+        TxOut (5000000 + k) (hex "5120" <> bytes (k + 2) 32)
+      ]
+    witness seed = [bytes (seed + 600) 72, bytes (seed + 700) 33]

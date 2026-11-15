@@ -92,6 +92,8 @@ instance FromJSON PublicKey where
       either fail return $ decodePubKey bs
 
 instance Serial PublicKey where
+  {-# INLINEABLE serialize #-}
+  {-# INLINEABLE deserialize #-}
   deserialize = do
     c <-
       lookAhead $

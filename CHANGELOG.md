@@ -31,14 +31,110 @@ is gone from the whole API.
 - Requires secp256k1-haskell 3.0. With it, `show` of a `SecKey` prints
   `SecKey <redacted>` and is no longer the inverse of `read`. `PrivateKey` and
   `XPrvKey` already hid their secret.
+- **Transactions, blocks, headers, outpoints and addresses are written and
+  read through cereal several times faster, and hashed in half the time.**
+  No byte and no error message changed, and no exported name.
+
+  The serializers are written for any monad, and GHC already compiled them
+  for the monads of cereal: they did not run through a class dictionary.
+  The time went into those monads themselves. Cereal writes through a
+  builder, one closure for each field, into a first buffer of 4 kB that it
+  then copies, and reads through continuations. A transaction of 387 bytes
+  cost 10.7 kB of memory to write and 7.2 kB to read. A hash cost more
+  memory than time: the pure interface of crypton allocated 1.5 kB for each
+  round of SHA-256.
+
+  The `Serialize` instances of `Tx`, `TxIn`, `BlockHeader` and `Block` now
+  run the same serializers on a buffer directly, with the new module
+  `Haskoin.Util.Direct`: once to count the bytes, once to write them into a
+  buffer of that length, and to read, at a position in the bytes at hand.
+  Those of `TxOut`, `OutPoint` and `Address` read that way, and still write
+  through the builder, which is cheaper for two or three fields.
+  `encodeSerial`, `decodeSerial`, `decodeTx`, `txHash`, `txWitnessHash`,
+  `nosigTxHash`, `headerHash`, `txWeight` and `txVirtualSize` use the module
+  too, and so do `getMessage` and `putMessage` for the payload of a `block`
+  or a `tx` message. `txWeight` counts and writes nothing. `sha256` and
+  `doubleSHA256` call the C code of crypton on memory that they hold for the
+  call. A hash is read with one copy where it took two.
+
+  What did not change: the `Serial` instances, so `runPutS . serialize` and
+  `runGetS deserialize` cost about what they did, and the `Binary`
+  instances. Binary reads a transaction in under half the time all the
+  same: the helpers that read a list are now `INLINEABLE`, and for binary
+  they had been running through a class dictionary. Use `encodeSerial` and
+  `decodeSerial`, or cereal, where speed matters. `encode` of cereal still
+  allocates its buffer of 4 kB, about 200 ns, before the first byte:
+  `encodeSerial` does not, and is ten times as fast as `encode` for a value
+  of a few bytes.
+
+  One thing is slower. When bytes do not parse, they are read twice:
+  directly, and then by cereal, which reports the error. The one case that
+  was measured is a script that does not parse, in the table of
+  `scriptToAddressBS` below: it takes a sixth longer than it did.
+
+  The timings are from the benchmark of this package, built with GHC 9.12.4
+  on an AMD Ryzen 9 3900X at `-O1` and at `-O2`, before this change and
+  after it. Each is the lower of two runs, in nanoseconds. A timing moves by
+  about a tenth from one run to the next. The memory is what one call
+  allocates at `-O2`, which does not move, and is about the same at `-O1`.
+
+  | ns | before `-O1` | now `-O1` | before `-O2` | now `-O2` | allocated before | now |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | `encode` of a SegWit transaction of 387 bytes | 1,640 | 503 | 1,580 | 521 | 11 kB | 5.5 kB |
+  | `decode` of it | 1,050 | 520 | 1,030 | 422 | 7.2 kB | 2.2 kB |
+  | `encodeSerial` of it | 1,630 | 189 | 1,640 | 181 | 11 kB | 502 B |
+  | `decodeSerial` of it | 1,060 | 507 | 1,100 | 410 | 7.2 kB | 2.1 kB |
+  | `runPutS . serialize` of it | 1,640 | 1,530 | 1,650 | 1,550 | 11 kB | 10 kB |
+  | `runGetS deserialize` of it | 1,060 | 966 | 1,030 | 984 | 7.2 kB | 6.7 kB |
+  | `encode` of it through binary | 1,600 | 1,510 | 1,700 | 1,560 | 11 kB | 10 kB |
+  | `decode` of it through binary | 1,700 | 745 | 1,630 | 579 | 6.4 kB | 3.7 kB |
+  | `encode` of a block of 3,000 transactions, 1.1 MB | 5,287,000 | 520,000 | 5,026,000 | 496,000 | 20.1 MB | 1.2 MB |
+  | `decode` of it | 5,073,000 | 1,984,000 | 5,793,000 | 1,619,000 | 21.7 MB | 6.7 MB |
+  | `getMessage` of it, checksum included | 8,945,000 | 5,834,000 | 9,233,000 | 5,663,000 | 22.9 MB | 8.2 MB |
+  | `putMessage` of it, checksum included | 9,048,000 | 4,395,000 | 8,778,000 | 4,837,000 | 21.4 MB | 2.4 MB |
+  | `txHash` of the SegWit transaction | 2,960 | 1,060 | 2,870 | 1,070 | 11 kB | 712 B |
+  | `txWitnessHash` of it | 4,370 | 1,950 | 4,380 | 1,960 | 14 kB | 927 B |
+  | `txWeight` of it | 2,730 | 85 | 2,740 | 75 | 19 kB | 0 B |
+  | `txHash` of the 3,000 transactions | 10,477,000 | 3,909,000 | 10,916,000 | 4,113,000 | 35.0 MB | 2.5 MB |
+  | `headerHash` | 1,910 | 811 | 1,930 | 817 | 8.5 kB | 600 B |
+  | `doubleSHA256` of 387 bytes | 2,430 | 1,680 | 2,520 | 1,690 | 3.4 kB | 433 B |
+  | `decode` of an `OutPoint` | 59 | 26 | 55 | 18 | 407 B | 151 B |
+  | `encodeSerial` of an `OutPoint` | 236 | 24 | 256 | 21 | 4.7 kB | 119 B |
+  | `decodeSerial` of an `OutPoint` | 69 | 11 | 63 | 11 | 431 B | 87 B |
+  | `decode` of a `TxHash` | 42 | 20 | 38 | 17 | 279 B | 135 B |
+  | `encodeSerial` of a `TxHash` | 235 | 26 | 208 | 20 | 4.6 kB | 95 B |
+  | `decode` of a `BlockHeader` | 122 | 42 | 120 | 38 | 911 B | 303 B |
+  | `decode` of a P2WSH `Address` | 59 | 25 | 56 | 20 | 431 B | 159 B |
+
+- Requires bytestring 0.11 or later, for the layout of a `ByteString` that
+  `Haskoin.Util.Direct` reads.
 
 ### Added
 
+- `Haskoin.Util.Direct`, the module behind the entry above, for the types of
+  other packages. `encodeDirect`, `decodeDirect` and `sizeDirect` take a
+  serializer written for any `MonadPut` or `MonadGet` and give what
+  `runPutS` and `runGetS` give, or the length of it. `putDirect` and
+  `getDirect` do the same inside cereal, for the `put` and `get` of a
+  `Serialize` instance. `putShortBytes` and `getShortBytes` write and read a
+  short byte string with one copy. When bytes do not parse, the parser runs
+  again through cereal, which reports the error: a failure costs a little
+  more than it did, and its message is the same. `import Haskoin` does not
+  bring the module in.
+- The `Serial` methods of the types above, and of `VarInt`, `Script`,
+  `ScriptOp`, `ScriptOutput`, `PublicKey`, `Sig` and `XOnlyPubKey`, are
+  `INLINEABLE`, and so are the helpers `putList`, `getList`, `putMaybe`,
+  `getMaybe`, `putLengthBytes`, `getLengthBytes`, `putIntMap`, `getIntMap`,
+  `putInteger`, `getInteger` and the `VarInt` ones. A package that writes its
+  own records with them can have GHC compile the lot for
+  `Haskoin.Util.Direct`.
+- The group `serial` of the benchmark suite, which times all of this and
+  shows the memory that each call allocates.
 - `encodeSerial` and `decodeSerial` in `Haskoin.Util.Marshal`, for the types
-  that are now `Serial`. `encodeSerial` is `runPutS . serialize`.
-  `decodeSerial` reads a value from bytes that hold it and nothing else, and
-  fails on bytes left over, as `unmarshal` did for these types. Plain
-  `runGetS deserialize` accepts a value followed by junk.
+  that are now `Serial`. `encodeSerial` gives the bytes of
+  `runPutS . serialize`. `decodeSerial` reads a value from bytes that hold
+  it and nothing else, and fails on bytes left over, as `unmarshal` did for
+  these types. Plain `runGetS deserialize` accepts a value followed by junk.
 - A benchmark suite, `bench/Bench.hs`, run with `stack bench`. It times hex,
   `scriptToAddressBS`, the text of an address, the JSON of a transaction and
   Base58, most of them next to a copy of what 1.6.0 did, and prints the ratio.
@@ -114,26 +210,30 @@ difference smaller than that between two columns means nothing.
   context, earlier in this release, had brought those back to the time of
   1.6.0. That time was itself long, because the parser ran through a class
   dictionary. `decodeSerial` is now inlined where it is called, so the parser
-  that GHC compiled for the type is the one that runs. A Taproot output takes
-  a sixth of the time it took in 1.6.0, and an eleventh of the time it took
-  in 1.6.4. The answers are the same, and so is the text of every `Left`.
+  that GHC compiled for the type is the one that runs, and it reads the
+  script where it is, with `Haskoin.Util.Direct`, instead of through the
+  continuations of cereal. A Taproot output takes a tenth of the time it took
+  in 1.6.0, and an eighteenth of the time it took in 1.6.4. A script that
+  does not parse is read twice, directly and then by cereal for the text of
+  the error, and takes a sixth longer than cereal alone took. The answers
+  are the same, and so is the text of every `Left`.
 
   | `scriptToAddressBS`, ns | 1.6.0 `-O1` | 1.6.4 `-O1` | 2.0.0 `-O1` | 1.6.0 `-O2` | 1.6.4 `-O2` | 2.0.0 `-O2` |
   | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-  | P2PKH | 1,613 | 66 | 71 | 1,549 | 67 | 67 |
-  | P2SH | 1,111 | 68 | 73 | 1,105 | 70 | 68 |
-  | P2WPKH | 934 | 70 | 73 | 892 | 75 | 69 |
-  | P2WSH | 936 | 59 | 62 | 892 | 64 | 57 |
-  | Taproot | 901 | 1,595 | 148 | 868 | 1,585 | 141 |
-  | witness version 2, 20 bytes | 914 | 1,581 | 148 | 872 | 1,521 | 142 |
-  | `OP_RETURN`, 20 bytes | 940 | 1,635 | 204 | 920 | 1,576 | 196 |
-  | `OP_RETURN`, 80 bytes | 973 | 1,797 | 193 | 963 | 1,649 | 189 |
-  | P2SH32 on Bitcoin Cash | 1,152 | 1,826 | 197 | 1,110 | 1,786 | 204 |
-  | P2WPKH form on Bitcoin Cash | 983 | 1,695 | 227 | 960 | 1,613 | 220 |
-  | empty script | 776 | 979 | 667 | 782 | 929 | 680 |
-  | non-standard script | 2,390 | 3,259 | 962 | 2,352 | 3,174 | 966 |
-  | pay to public key | 5,253 | 6,178 | 4,333 | 5,133 | 5,958 | 4,283 |
-  | multisig 2 of 3 | 14,869 | 16,663 | 13,143 | 14,762 | 15,898 | 13,219 |
+  | P2PKH | 1,613 | 66 | 27 | 1,549 | 67 | 25 |
+  | P2SH | 1,111 | 68 | 28 | 1,105 | 70 | 25 |
+  | P2WPKH | 934 | 70 | 31 | 892 | 75 | 29 |
+  | P2WSH | 936 | 59 | 18 | 892 | 64 | 17 |
+  | Taproot | 901 | 1,595 | 86 | 868 | 1,585 | 82 |
+  | witness version 2, 20 bytes | 914 | 1,581 | 85 | 872 | 1,521 | 82 |
+  | `OP_RETURN`, 20 bytes | 940 | 1,635 | 136 | 920 | 1,576 | 128 |
+  | `OP_RETURN`, 80 bytes | 973 | 1,797 | 127 | 963 | 1,649 | 118 |
+  | P2SH32 on Bitcoin Cash | 1,152 | 1,826 | 80 | 1,110 | 1,786 | 72 |
+  | P2WPKH form on Bitcoin Cash | 983 | 1,695 | 113 | 960 | 1,613 | 109 |
+  | empty script | 776 | 979 | 668 | 782 | 929 | 713 |
+  | non-standard script | 2,390 | 3,259 | 1,119 | 2,352 | 3,174 | 1,122 |
+  | pay to public key | 5,253 | 6,178 | 4,248 | 5,133 | 5,958 | 4,320 |
+  | multisig 2 of 3 | 14,869 | 16,663 | 13,069 | 14,762 | 15,898 | 13,364 |
 
 - **`encodeBase58` is faster than 1.6.0 at every length.** The limbs of 1.6.3
   were faster for an address and slower than 1.6.0 from about 500 bytes up.

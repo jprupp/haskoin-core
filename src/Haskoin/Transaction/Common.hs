@@ -65,6 +65,7 @@ import Data.Word (Word32, Word64, Word8)
 import GHC.Generics (Generic)
 import Haskoin.Crypto.Hash
 import Haskoin.Network.Common
+import Haskoin.Util.Direct (decodeDirect, encodeDirect, getDirect, putDirect, sizeDirect)
 import Haskoin.Util.Helpers
 import Text.Read as R
 
@@ -78,7 +79,9 @@ newtype TxHash = TxHash {get :: Hash256}
 
 instance Serial TxHash where
   serialize (TxHash h) = serialize h
+  {-# INLINE serialize #-}
   deserialize = TxHash <$> deserialize
+  {-# INLINE deserialize #-}
 
 instance Serialize TxHash where
   put = serialize
@@ -115,7 +118,7 @@ instance ToJSON TxHash where
 -- signatures go in the input scripts or in the witness.
 nosigTxHash :: Tx -> TxHash
 nosigTxHash Tx {..} =
-  TxHash . doubleSHA256 . runPutS $ serialize tx
+  TxHash (doubleSHA256 (encodeDirect (serialize tx)))
   where
     tx = Tx {inputs = map clr inputs, witness = [], ..}
     clr TxIn {..} = TxIn {script = B.empty, ..}
@@ -163,19 +166,19 @@ data Tx = Tx
 -- | Compute transaction hash: the transaction id, which leaves the witness
 -- out.
 txHash :: Tx -> TxHash
-txHash tx = TxHash . doubleSHA256 . runPutS $ serialize tx {witness = []}
+txHash tx = TxHash (doubleSHA256 (encodeDirect (putLegacyTx tx)))
 
 -- | The witness transaction id of BIP 141: the hash of the transaction with
 -- its witness. It is the same as 'txHash' when the transaction has no
 -- witness, as @GetWitnessHash@ gives it in Bitcoin Core.
 txWitnessHash :: Tx -> TxHash
-txWitnessHash = TxHash . doubleSHA256 . runPutS . serialize
+txWitnessHash tx = TxHash (doubleSHA256 (encodeDirect (serialize tx)))
 
 -- | The weight of the transaction in weight units, as BIP 141 defines it:
--- three times the size without the witness, plus the size with it.
+-- three times the size without the witness, plus the size with it. The
+-- sizes are counted, and the transaction is not written to get them.
 txWeight :: Tx -> Int
-txWeight tx =
-  3 * B.length (runPutS (serialize tx {witness = []})) + B.length (runPutS (serialize tx))
+txWeight tx = 3 * sizeDirect (putLegacyTx tx) + sizeDirect (serialize tx)
 
 -- | The virtual size of the transaction in virtual bytes, as BIP 141
 -- defines it: the weight divided by four, rounded up. Fees are charged by
@@ -202,7 +205,7 @@ hasWitness tx = any (not . null) (take (length tx.inputs) tx.witness)
 -- and so it does not notice bytes that follow. Use this function for a
 -- transaction that arrives on its own.
 decodeTx :: ByteString -> Either String Tx
-decodeTx = runGetS $ do
+decodeTx = decodeDirect $ do
   tx <- deserialize
   done <- isEmpty
   unless done $ fail "Trailing bytes after transaction"
@@ -224,22 +227,30 @@ instance Serial Tx where
       Just 0x00 -> parseLegacyTx
       Just 0x01 -> parseWitnessTx
       Just other -> fail $ "Unknown transaction optional data: flags " ++ show other
+  {-# INLINEABLE deserialize #-}
   serialize tx
     | hasWitness tx = putWitnessTx tx
     | otherwise = putLegacyTx tx
+  {-# INLINEABLE serialize #-}
 
 instance Binary Tx where
   put = serialize
   get = deserialize
 
+-- | Through cereal a transaction is written and read on a buffer directly,
+-- with the functions of "Haskoin.Util.Direct": a node hashes, stores and
+-- loads transactions all day, and the builder and the continuations of
+-- cereal took several times as long as the bytes themselves. The bytes and
+-- the errors are those of the 'Serial' instance.
 instance Serialize Tx where
-  put = serialize
-  get = deserialize
+  put tx = putDirect (serialize tx)
+  get = getDirect deserialize
 
 putInOut :: (MonadPut m) => Tx -> m ()
 putInOut tx = do
   putVarIntList serialize tx.inputs
   putVarIntList serialize tx.outputs
+{-# INLINEABLE putInOut #-}
 
 -- | Non-SegWit transaction serializer.
 putLegacyTx :: (MonadPut m) => Tx -> m ()
@@ -247,6 +258,7 @@ putLegacyTx tx = do
   putWord32le tx.version
   putInOut tx
   putWord32le tx.locktime
+{-# INLINEABLE putLegacyTx #-}
 
 -- | Witness transaction serializer. One stack is written per input: an
 -- input without a stack gets an empty one, and stacks beyond the inputs
@@ -261,6 +273,7 @@ putWitnessTx tx = do
   putWord32le tx.locktime
   where
     n = length tx.inputs
+{-# INLINEABLE putWitnessTx #-}
 
 -- | The flags byte of the extended format of BIP 144, when the transaction
 -- has one: the byte after an input count of zero, as @UnserializeTransaction@
@@ -275,6 +288,7 @@ witnessFlags = do
   if marker == 0x00
     then Just <$> getWord8
     else return Nothing
+{-# INLINEABLE witnessFlags #-}
 
 -- | Non-SegWit transaction deserializer: the old format, without the
 -- marker, flags and witness of BIP 144. Use it where the bytes are known
@@ -290,6 +304,7 @@ parseLegacyTx = do
   outputs <- getVarIntList deserialize
   locktime <- getWord32le
   return Tx {witness = [], ..}
+{-# INLINEABLE parseLegacyTx #-}
 
 -- | Witness transaction deserializer. A transaction with the witness marker
 -- must have a witness: one whose stacks are all empty fails, as it does in
@@ -307,14 +322,17 @@ parseWitnessTx = do
     fail "Superfluous witness record"
   locktime <- getWord32le
   return Tx {..}
+{-# INLINEABLE parseWitnessTx #-}
 
 -- | Witness data deserializer. Requires count of inputs.
 parseWitnessData :: (MonadGet m) => Int -> m WitnessData
 parseWitnessData n = replicateM n (getVarIntList getVarIntBytes)
+{-# INLINEABLE parseWitnessData #-}
 
 -- | Witness data serializer.
 putWitnessData :: (MonadPut m) => WitnessData -> m ()
 putWitnessData = mapM_ (putVarIntList putVarIntBytes)
+{-# INLINEABLE putWitnessData #-}
 
 -- | The witness of the JSON form has one stack per input, or none at all:
 -- a stack without an input would not be part of the transaction.
@@ -366,19 +384,21 @@ data TxIn = TxIn
 instance Serial TxIn where
   deserialize =
     TxIn <$> deserialize <*> getVarIntBytes <*> getWord32le
+  {-# INLINEABLE deserialize #-}
 
   serialize (TxIn o s q) = do
     serialize o
     putVarIntBytes s
     putWord32le q
+  {-# INLINEABLE serialize #-}
 
 instance Binary TxIn where
   get = deserialize
   put = serialize
 
 instance Serialize TxIn where
-  get = deserialize
-  put = serialize
+  get = getDirect deserialize
+  put x = putDirect (serialize x)
 
 instance FromJSON TxIn where
   parseJSON =
@@ -414,18 +434,23 @@ data TxOut = TxOut
 
 instance Serial TxOut where
   deserialize = TxOut <$> getWord64le <*> getVarIntBytes
+  {-# INLINEABLE deserialize #-}
 
   serialize (TxOut o s) = do
     putWord64le o
     putVarIntBytes s
+  {-# INLINEABLE serialize #-}
 
 instance Binary TxOut where
   put = serialize
   get = deserialize
 
+-- | Read on a buffer directly, like a transaction. Written through the
+-- builder of cereal: for a value of two or three fields that costs less than
+-- a buffer of its own, which 'putDirect' would allocate and then copy.
 instance Serialize TxOut where
   put = serialize
-  get = deserialize
+  get = getDirect deserialize
 
 instance FromJSON TxOut where
   parseJSON =
@@ -458,15 +483,19 @@ instance Serial OutPoint where
   deserialize = do
     (h, i) <- liftM2 (,) deserialize getWord32le
     return $ OutPoint h i
+  {-# INLINEABLE deserialize #-}
   serialize (OutPoint h i) = serialize h >> putWord32le i
+  {-# INLINEABLE serialize #-}
 
 instance Binary OutPoint where
   put = serialize
   get = deserialize
 
+-- | Read on a buffer directly, and written through the builder of cereal,
+-- like a 'TxOut'.
 instance Serialize OutPoint where
   put = serialize
-  get = deserialize
+  get = getDirect deserialize
 
 instance FromJSON OutPoint where
   parseJSON =

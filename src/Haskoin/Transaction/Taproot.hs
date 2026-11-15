@@ -127,6 +127,8 @@ instance Eq XOnlyPubKey where
       f = BS.take 32 . (.get)
 
 instance Serial XOnlyPubKey where
+  {-# INLINEABLE serialize #-}
+  {-# INLINEABLE deserialize #-}
   serialize (XOnlyPubKey pk) =
     putByteString (exportXOnlyPubKey pk)
 
