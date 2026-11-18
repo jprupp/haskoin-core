@@ -1,4 +1,5 @@
 {-# LANGUAGE ImportQualifiedPost #-}
+{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
@@ -45,6 +46,7 @@ module Main (main) where
 
 import Control.DeepSeq (NFData)
 import Control.Monad (unless, (<=<))
+import Control.Monad.State.Strict (runState)
 import Data.Aeson (ToJSON (toEncoding))
 import Data.Aeson.Encoding (Encoding, encodingToLazyByteString, unsafeToEncoding)
 import Data.Base16.Types (extractBase16)
@@ -60,7 +62,7 @@ import Data.Bytes.Get (isEmpty, runGetS)
 import Data.Bytes.Put (runPutL, runPutS)
 import Data.Bytes.Serial (Serial (deserialize, serialize))
 import Data.Char (chr)
-import Data.List (intercalate)
+import Data.List (foldl', intercalate)
 import Data.Maybe (fromMaybe)
 import Data.Serialize qualified as Cereal
 import Data.Text (Text)
@@ -78,7 +80,8 @@ main =
       bgroup "address" addressBenchmarks,
       bgroup "json" jsonBenchmarks,
       bgroup "base58" base58Benchmarks,
-      bgroup "serial" serialBenchmarks
+      bgroup "serial" serialBenchmarks,
+      bgroup "headers" headerBenchmarks
     ]
 
 -- | The benchmark of a function of the library, named @now@, after the same
@@ -478,3 +481,41 @@ blockTransactions = map transaction [1 .. fromIntegral blockSize]
         TxOut (5000000 + k) (hex "5120" <> bytes (k + 2) 32)
       ]
     witness seed = [bytes (seed + 600) 72, bytes (seed + 700) 33]
+
+-- | Connecting a batch of 2,000 headers, the most a peer sends in one
+-- @headers@ message, on top of a chain of 100,000 headers that already uses
+-- the aserti3-2d difficulty algorithm of Bitcoin Cash. That algorithm needs
+-- the anchor block of the chain, which is far below the tip, and a node
+-- syncing headers spends its time here. The headers are mined at the easiest
+-- target of a test network, so that the chain can be built in a moment, and
+-- kept in the memory store of the library, so that the figure is the cost of
+-- the validation and not of a database.
+headerBenchmarks :: [Benchmark]
+headerBenchmarks =
+  [ env (return (chain, batch)) $ \ ~(mem, hs) ->
+      bench "connectBlocks 2000 at 100000" $
+        nf (\hs' -> fst (runState (connectBlocks net now hs') mem)) hs
+  ]
+  where
+    base = 100000
+    (old, batch) = splitAt base (appendBlocks net 0 net.genesisHeader (base + 2000))
+    now = net.genesisHeader.timestamp + 600 * fromIntegral (base + 3000)
+    net =
+      bchRegTest
+        { powNoRetarget = False,
+          minDiffBlocks = False,
+          edaHeight = Nothing,
+          daaHeight = Nothing,
+          asertActivationTime = Just (net.genesisHeader.timestamp + 600 * 20),
+          checkpoints = []
+        }
+    -- The store holding the first headers, built directly, without
+    -- validation, so that building it is quick.
+    chain = foldl' add (initialChain net) old
+    add :: HeaderMemory -> BlockHeader -> HeaderMemory
+    add mem bh =
+      let par = mem.best
+          h = par.height + 1
+          sk = fromMaybe (error "no skip") (fst (runState (getAncestor (skipHeight h) par) mem))
+          node = BlockNode bh h (par.work + headerWork bh) (headerHash sk.header)
+       in snd (runState (addBlockHeader node >> setBestBlockHeader node) mem)

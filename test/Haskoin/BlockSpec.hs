@@ -947,6 +947,17 @@ asertSpec = describe "asert" $ do
     -- 1793800487 - 1605447844 = 188352643 seconds and 975898 - 661647 =
     -- 314251 blocks after the anchor.
     computeAsertBits mainnetLimit 172800 0x1804dafe 188352643 314251 `shouldBe` 0x1802308e
+  it "connects a run of headers that crosses the activation as one batch" $
+    -- 'connectBlocks' finds the anchor once for a run of headers. The run
+    -- starts before the activation and comes faster than the schedule, so
+    -- the bits change on every block; each must match what the headers
+    -- connected one by one required.
+    let fastNet = (asertNet :: Network) {asertHalfLife = 3600}
+        hs = mineAsert fastNet 60
+        batch = withChain fastNet (connectBlocks fastNet myTime hs)
+     in do
+          length (filter (/= 0x207fffff) (map (.bits) hs)) `shouldSatisfy` (> 20)
+          fmap (map (.height)) batch `shouldBe` Right [60, 59 .. 1]
   describe "aserti3-2d test vectors" $
     mapM_
       ( \x ->
@@ -962,6 +973,18 @@ asertSpec = describe "asert" $ do
       let parent = (last nodes).header
           t0 = asertNet.genesisHeader.timestamp
        in connectHeight asertNet myTime (mineOn asertNet parent (t0 + 600 * 30 + 428) 0x1f400000)
+    -- Mine headers 300 seconds apart, each with the bits that the chain
+    -- connected so far one by one requires.
+    mineAsert :: Network -> Int -> [BlockHeader]
+    mineAsert net n = withChain net (replicateM n next)
+      where
+        next = do
+          par <- getBestBlockHeader
+          let time = par.header.timestamp + 300
+          bits <- nextWorkRequired net par (headerOn par.header time 0)
+          let h = mineOn net par.header time bits
+          _ <- either error id <$> connectBlock net myTime h
+          return h
     anchorHeights = withChain asertNet $ do
       nodes <- storeChain (evenlySpaced asertNet 600 30 0x1f400000)
       forM [nodes !! 13, nodes !! 14, nodes !! 19, last nodes] $ \n ->

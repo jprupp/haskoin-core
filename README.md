@@ -724,6 +724,11 @@ work, difficulty, timestamps, versions and checkpoints. It runs in any monad wit
 a `BlockHeaders` instance. `StateT HeaderMemory` is the in-memory one. Write your
 own instance to keep headers in a database.
 
+Give `connectBlocks` all the headers of a `headers` message at once rather than
+one by one with `connectBlock`. On Bitcoin Cash the difficulty depends on an
+anchor block far down the chain, and finding it takes some hundreds of reads
+from the store. `connectBlocks` finds it once for the whole run.
+
 Once the best block has the `minimumChainWork` of the network, a fork with less
 work is refused. Below that work nothing bounds the side chains a peer can send,
 so a node that is still syncing should not keep headers from a peer it does not
@@ -856,7 +861,10 @@ functions that a server calls for every input and output it shows: hex,
 Base58. The group `serial` times the binary encoding of hashes, outpoints,
 transactions, headers, blocks and addresses, written and read through cereal,
 through `runPutS` and `runGetS`, and through `encodeSerial` and `decodeSerial`,
-and the hashing of transactions and headers.
+and the hashing of transactions and headers. The group `headers` times
+`connectBlocks` on a batch of 2,000 headers, the most that a `headers` message
+holds, on top of a Bitcoin Cash chain of 100,000 that uses the aserti3-2d
+difficulty rule, the case where a node syncing headers spends its time.
 
 ```sh
 stack bench                                                 # at -O1, as the package builds by default

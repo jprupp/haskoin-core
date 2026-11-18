@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/)
 and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.html).
 
+## [2.0.1] - 2026-11-18
+
+### Fixed
+
+- **`connectBlocks` is fast on Bitcoin Cash again.** It searched for the
+  aserti3-2d anchor block for every header: a binary search over the whole
+  chain with a median time past at each step, some hundreds of reads. A node
+  syncing Bitcoin Cash headers from a database took about 10 ms per header,
+  20 seconds for each `headers` message of 2,000. The anchor of a block is
+  also the anchor of all its descendants, so `connectBlocks` now finds it once
+  for a run of headers. The new benchmark `headers` connects 2,000 headers on
+  top of 100,000 in memory: 4.7 s before, 72 ms after, at `-O1`.
+
+### Added
+
+- `nextWorkRequiredWith`: `nextWorkRequired` with the anchor block of the
+  parent already found, for callers that connect many headers.
+
 ## [2.0.0] - 2026-11-15
 
 This release breaks backwards compatibility on purpose: the secp256k1 context

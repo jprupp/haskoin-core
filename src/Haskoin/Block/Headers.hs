@@ -57,6 +57,7 @@ module Haskoin.Block.Headers
 
     -- ** Difficulty
     nextWorkRequired,
+    nextWorkRequiredWith,
     nextPowWorkRequired,
     calcNextWork,
     lastNoMinDiff,
@@ -338,17 +339,17 @@ connectBlocks net t bhs
   | not (chained bhs) = return $ Left "Blocks to connect do not form a chain"
   | otherwise = do
       best <- getBestBlockHeader
-      (result, nodes, best') <- go best [] bhs
+      (result, nodes, best') <- go Nothing best [] bhs
       when (best' /= best) $ setBestBlockHeader best'
       return $ either Left (const (Right nodes)) result
   where
     chained (h1 : h2 : hs) = headerHash h1 == h2.prev && chained (h2 : hs)
     chained _ = True
-    go best nodes [] = return (Right (), nodes, best)
-    go best nodes (bh : rest) =
-      connectHeader net t best bh >>= \case
+    go _ best nodes [] = return (Right (), nodes, best)
+    go cache best nodes (bh : rest) =
+      connectHeader net t cache best bh >>= \case
         Left err -> return (Left err, nodes, best)
-        Right node -> go (chooseBest best node) (node : nodes) rest
+        Right (node, cache') -> go cache' (chooseBest best node) (node : nodes) rest
 
 -- | Block's parent. If the block header is in the store, its parent must also
 -- be there. No block header get deleted or pruned from the store.
@@ -370,10 +371,40 @@ connectBlock ::
 connectBlock net t bh =
   runExceptT $ do
     best <- lift getBestBlockHeader
-    node <- ExceptT $ connectHeader net t best bh
+    (node, _) <- ExceptT $ connectHeader net t Nothing best bh
     let best' = chooseBest best node
     when (best' /= best) $ lift $ setBestBlockHeader best'
     return node
+
+-- | The aserti3-2d anchor found for a block, kept while a run of headers is
+-- connected. Finding the anchor is a binary search over the whole chain, with
+-- a median time past at each step, and it cost milliseconds for every header
+-- when each one searched again. The anchor of a block is also the anchor of
+-- all of its descendants, since the median time past never decreases along a
+-- chain, so one search serves a whole run of headers. The cache holds the
+-- hash of the block that the anchor was found for, and the anchor.
+type AnchorCache = Maybe (BlockHash, BlockNode)
+
+-- | The anchor for the chain that ends at the given block, from the cache when
+-- the block is the one cached or its child, and from 'asertAnchor' otherwise.
+-- Returns the cache to use for the next header.
+cachedAnchor ::
+  (BlockHeaders m) =>
+  Network ->
+  AnchorCache ->
+  BlockNode ->
+  m (Maybe BlockNode, AnchorCache)
+cachedAnchor net cache par =
+  case cache of
+    Just (k, anchor)
+      | k == parHash || k == par.header.prev ->
+          return (Just anchor, Just (parHash, anchor))
+    _ ->
+      asertAnchor net par >>= \case
+        Just anchor -> return (Just anchor, Just (parHash, anchor))
+        Nothing -> return (Nothing, Nothing)
+  where
+    parHash = headerHash par.header
 
 -- | Validate one header against the store and add it to the store. The best
 -- block passed in is only used by the checkpoint rule and is not updated.
@@ -381,23 +412,25 @@ connectHeader ::
   (BlockHeaders m) =>
   Network ->
   Timestamp ->
+  AnchorCache ->
   BlockNode ->
   BlockHeader ->
-  m (Either String BlockNode)
-connectHeader net t best bh =
+  m (Either String (BlockNode, AnchorCache))
+connectHeader net t cache best bh =
   getBlockHeader (headerHash bh) >>= \case
-    Just known -> return (Right known)
-    Nothing -> connectNewHeader net t best bh
+    Just known -> return (Right (known, cache))
+    Nothing -> connectNewHeader net t cache best bh
 
 -- | Validate a header that is not in the store yet, and add it.
 connectNewHeader ::
   (BlockHeaders m) =>
   Network ->
   Timestamp ->
+  AnchorCache ->
   BlockNode ->
   BlockHeader ->
-  m (Either String BlockNode)
-connectNewHeader net t best bh =
+  m (Either String (BlockNode, AnchorCache))
+connectNewHeader net t cache best bh =
   runExceptT $ do
     par <-
       maybeToExceptT
@@ -411,10 +444,14 @@ connectNewHeader net t best bh =
           throwError $
             "BUG: Could not get skip for block "
               ++ show (headerHash par.header)
-    requiredBits <- lift $ nextWorkRequired net par bh
+    (anchor, cache') <-
+      if needsAnchor net
+        then lift $ cachedAnchor net cache par
+        else return (Nothing, cache)
+    requiredBits <- lift $ nextWorkRequiredWith net anchor par bh
     node <- ExceptT . return $ validBlock net t best par pars bh skipNode requiredBits
     lift $ addBlockHeader node
-    return node
+    return (node, cache')
 
 -- | Validate this block header. Build a 'BlockNode' if successful. The checks
 -- follow @CheckBlockHeader@ and @ContextualCheckBlockHeader@ in Bitcoin Core.
@@ -645,18 +682,39 @@ nextWorkRequired ::
   BlockHeader ->
   m Word32
 nextWorkRequired net par bh
+  | needsAnchor net = asertAnchor net par >>= \a -> nextWorkRequiredWith net a par bh
+  | otherwise = nextWorkRequiredWith net Nothing par bh
+
+-- | Does the network need the aserti3-2d anchor to work out the difficulty?
+needsAnchor :: Network -> Bool
+needsAnchor net = isJust net.asertActivationTime && not (usesCashRules net && net.powNoRetarget)
+
+-- | Does the network follow the difficulty rules of Bitcoin Cash?
+usesCashRules :: Network -> Bool
+usesCashRules net =
+  isJust net.edaHeight || isJust net.daaHeight || isJust net.asertActivationTime
+
+-- | 'nextWorkRequired' with the result of 'asertAnchor' for the parent
+-- already found, so that a caller connecting many headers can find it once.
+nextWorkRequiredWith ::
+  (BlockHeaders m) =>
+  Network ->
+  -- | 'asertAnchor' of the parent
+  Maybe BlockNode ->
+  BlockNode ->
+  BlockHeader ->
+  m Word32
+nextWorkRequiredWith net anchor par bh
   -- Bitcoin Cash Node never retargets on regtest, before picking an algorithm.
-  | usesCashRules && net.powNoRetarget = return par.header.bits
+  | usesCashRules net && net.powNoRetarget = return par.header.bits
   | otherwise =
-      asertAnchor net par >>= \case
-        Just anchor -> nextAsertWorkRequired net anchor par bh
+      case anchor of
+        Just a -> nextAsertWorkRequired net a par bh
         Nothing
           | activeAt net.daaHeight -> nextDaaWorkRequired net par bh
           | activeAt net.edaHeight -> nextEdaWorkRequired net par bh
           | otherwise -> nextPowWorkRequired net par bh
   where
-    usesCashRules =
-      isJust net.edaHeight || isJust net.daaHeight || isJust net.asertActivationTime
     activeAt = maybe False (\h -> par.height + 1 >= h)
 
 -- | Find out the next amount of work required according to the Emergency
