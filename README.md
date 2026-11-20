@@ -446,6 +446,41 @@ Decoding a `ScriptOutput` fails for a script that matches no template. A `Script
 holds any script, as a list of `ScriptOp` values, so use that type for the others.
 `encodeOutput` and `decodeOutput` convert between `ScriptOutput` and `Script`.
 
+#### Opcodes on the two chains
+
+Bitcoin and Bitcoin Cash split a script into opcodes in the same way, so one
+`ScriptOp` type serves both, with one constructor per byte, and a script parses
+without a network. The chains name twelve bytes differently. Their constructors
+carry the Bitcoin name, but 0xba carries the Bitcoin Cash name
+`OP_CHECKDATASIG`, and each has a pattern synonym for the other name:
+
+| Byte       | Bitcoin                            | Bitcoin Cash                           |
+| ---------- | ---------------------------------- | -------------------------------------- |
+| 0x65, 0x66 | `OP_VERIF`, `OP_VERNOTIF`          | `OP_BEGIN`, `OP_UNTIL`                 |
+| 0x7f–0x81  | `OP_SUBSTR`, `OP_LEFT`, `OP_RIGHT` | `OP_SPLIT`, `OP_NUM2BIN`, `OP_BIN2NUM` |
+| 0x89, 0x8a | `OP_RESERVED1`, `OP_RESERVED2`     | `OP_DEFINE`, `OP_INVOKE`               |
+| 0x8d, 0x8e | `OP_2MUL`, `OP_2DIV`               | `OP_LSHIFTNUM`, `OP_RSHIFTNUM`         |
+| 0x98, 0x99 | `OP_LSHIFT`, `OP_RSHIFT`           | `OP_LSHIFTBIN`, `OP_RSHIFTBIN`         |
+| 0xba       | `OP_CHECKSIGADD`                   | `OP_CHECKDATASIG`                      |
+
+Both names build and match the same value: `OP_SPLIT == OP_SUBSTR`. The
+opcodes that only Bitcoin Cash defines have constructors of their own:
+`OP_CHECKDATASIGVERIFY` and `OP_REVERSEBYTES`, the introspection opcodes from
+`OP_INPUTINDEX` (0xc0) to `OP_OUTPUTBYTECODE` (0xcd), the token opcodes from
+`OP_UTXOTOKENCATEGORY` (0xce) to `OP_OUTPUTTOKENAMOUNT` (0xd3), and the
+reserved `OP_RESERVED3` and `OP_RESERVED4`.
+
+`Show` prints the constructor. To show an opcode as a chain names it, use
+`opName`, which gives the name that the reference node of the network prints:
+
+```haskell
+print (opName btc OP_SUBSTR, opName bch OP_SUBSTR)
+-- => ("OP_SUBSTR","OP_SPLIT")
+```
+
+Which opcodes a chain enables, and from which block, is a matter for a script
+interpreter, which this library does not have.
+
 `payToWitnessScriptAddress` and `payToNestedScriptAddress` give the P2WSH and
 P2SH-P2WSH addresses of a script.
 
