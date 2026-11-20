@@ -794,6 +794,10 @@ spentCoins tx given =
 --   the push of the program and nothing else (BIP 141).
 -- * A redeem script is at most 'maxRedeemScriptSize' bytes, and a witness
 --   script at most 'maxWitnessScriptSize'.
+-- * A multisig of Taproot has at most 999 keys, the limit of @multi_a@ in
+--   BIP 387. The stack holds at most 1000 items after each opcode (BIP
+--   342). The witness puts an item there for each key, and the script
+--   starts with the push of a key on top of them.
 -- * A network without SegWit has no witness inputs.
 --
 -- The answer can be 'False' for an input that a block may hold but that
@@ -1167,8 +1171,20 @@ judgeInputs net tx given = zipWith judge [0 ..] decoded
           return (verdict (verifySchnorr key s (hashToMsg m)))
         verdict ok = if ok then InputVerified else InputForged
 
+-- | The most keys that a Taproot multisig script can have and still be
+-- spent: @MAX_PUBKEYS_PER_MULTI_A@ of Bitcoin Core, and the limit of
+-- @multi_a@ in BIP 387. The stack holds at most 1000 items after each
+-- opcode (BIP 342). The witness puts an item there for each key, and the
+-- script starts with the push of a key on top of them: 999 + 1 = 1000. A
+-- limit of 1000 witness items would not do: with 1000 keys the witness is
+-- allowed, and that first push is not.
+maxTaprootMultisigKeys :: Int
+maxTaprootMultisigKeys = 999
+
 -- | The keys of a Taproot multisig script and the number of signatures it
--- asks for, if the script is one: see 'verifyStdInput'.
+-- asks for, if the script is one: see 'verifyStdInput'. A script of more
+-- than 'maxTaprootMultisigKeys' keys is not one, since no block can hold
+-- a spend of it.
 multiA :: [ScriptOp] -> Maybe ([B.ByteString], Int)
 multiA (OP_PUSHDATA first OPCODE : OP_CHECKSIG : rest) = go [first] rest
   where
@@ -1176,6 +1192,7 @@ multiA (OP_PUSHDATA first OPCODE : OP_CHECKSIG : rest) = go [first] rest
     go keys [number, OP_NUMEQUAL]
       | Right asked <- scriptOpToInt number,
         asked <= length keys,
+        length keys <= maxTaprootMultisigKeys,
         all ((== 32) . B.length) keys =
           Just (reverse keys, asked)
     go _ _ = Nothing
