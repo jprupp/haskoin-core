@@ -16,7 +16,7 @@ cabal.sandbox.config
 *.hp
 *.eventlog
 .stack-work/
-# The work folder of the documentation (scripts/dev docs)
+# The work folder of the documentation (haskell-dev docs, of jprupp/tools)
 .stack-work-docs/
 cabal.project.local
 cabal.project.local~

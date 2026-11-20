@@ -845,6 +845,22 @@ stack haddock --no-haddock-deps                     # build the API documentatio
 `cabal build` and `cabal test` work too. On NixOS, or with `stack --nix`, the
 `nix` section of `stack.yaml` provides libsecp256k1.
 
+These commands build the library as it is released, with optimisation, which
+takes minutes. For the time between two commits there is a faster loop:
+`haskell-dev`, from [jprupp/tools](https://github.com/jprupp/tools), on your
+`PATH`.
+
+```sh
+haskell-dev build          # build without optimisation: seconds, not minutes
+haskell-dev test Slip39    # run the tests in several processes at once
+haskell-dev docs           # build the documentation and check its comments
+```
+
+`haskell-dev.toml` tells it which spec modules are slow, so that it shares
+them between the test processes. Do not mix the two kinds of build in one
+folder: the flags differ, so each switch compiles everything again. Never
+time the library with `haskell-dev`: see [Benchmarks](#benchmarks).
+
 `package.yaml` is the source of the package description. Change it rather than
 `haskoin-core.cabal`, which [hpack](https://github.com/sol/hpack) generates. Stack
 regenerates the file whenever it builds.

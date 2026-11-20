@@ -1,0 +1,13 @@
+# What sets haskoin-core apart for haskell-dev, the development loop of
+# https://github.com/jprupp/tools: `haskell-dev build`, `test` and `docs`.
+
+# The spec modules that take most of the time of the tests. Each of their
+# groups is run apart, so that the test processes share them evenly.
+slow-specs = [
+  "Haskoin.Block",
+  "Haskoin.Crypto.Keys.Slip39",
+  "Haskoin.Network",
+  "Haskoin.Transaction",
+  "Haskoin.Transaction.Psbt",
+  "Haskoin.Util.Direct",
+]

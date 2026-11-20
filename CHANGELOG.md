@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 - `scripts/format` and `scripts/release` are gone: `haskell-format` and
   `haskell-release`, from jprupp/tools, replace them. `haskell-release`
   builds and tests before it tags and uploads.
+- `scripts/dev`, the fast loop of work on the code, is gone too:
+  `haskell-dev`, from jprupp/tools, replaces it, with the same three
+  commands, `build`, `test` and `docs`. What it needs to know about this
+  package, the slow spec modules, is in the new `haskell-dev.toml`.
 
 ## [2.0.1] - 2026-11-18
 
