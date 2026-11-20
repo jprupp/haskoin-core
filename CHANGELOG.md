@@ -18,7 +18,7 @@ This release breaks backwards compatibility in two places:
   outputs added, before it runs with 3.0.0: see "Upgrading an index of
   addresses" below.
 
-The testnet3 networks are deprecated and still work.
+Bitcoin testnet3 is deprecated and still works.
 
 ### Added
 
@@ -92,15 +92,28 @@ The testnet3 networks are deprecated and still work.
 
 ### Deprecated
 
-- **The testnet3 networks, `btcTest` and `bchTest`.** Using them gives a
-  deprecation warning; use `btcTest4` and `bchTest4`. Bitcoin Core has
-  deprecated testnet3 and says it will remove it in an upcoming release.
-  Bitcoin Cash Node still supports testnet3 without a notice: deprecating
-  `bchTest` is a choice of this library, to keep the two chains alike. They
-  stay in `allNets` and `netByName` still finds them, and a later major
-  version will remove them.
+- **Bitcoin testnet3, `btcTest`.** Using it gives a deprecation warning; use
+  `btcTest4`. Bitcoin Core has deprecated testnet3 and says it will remove it
+  in an upcoming release. It stays in `allNets` and `netByName` still finds
+  it, and a later major version will remove it. `bchTest` is not deprecated:
+  Bitcoin Cash Node still supports testnet3 without a notice.
 
 ### Changed
+
+- **The constants of the networks match the reference nodes,** Bitcoin Core
+  32.1 and Bitcoin Cash Node 29.2.0:
+  - `btc` and `btcTest` have no checkpoints, as Bitcoin Core has none. The
+    minimum chain work still protects a header sync.
+  - The checkpoints of `bch`, `bchTest` and `bchTest4` are those of Bitcoin
+    Cash Node: 39, 19 and 19 of them. Two checkpoints were not in Bitcoin
+    Cash Node: block 504031 of `bch` and block 1188697 of `bchTest`, the
+    blocks before the DAA. It checkpoints 504032 and 1188698, the first
+    blocks of the DAA.
+  - `bchRegTest` has `edaHeight` and `daaHeight` of `Just 1`, from the
+    heights of 0 in Bitcoin Cash Node. Regtest does not retarget, so no
+    difficulty changes.
+  - The regtest seeds are those of the nodes: none on `bchRegTest`, and the
+    placeholder `dummySeed.invalid` on `btcRegTest`, in place of `localhost`.
 
 - **Outputs that hold tokens have an address on Bitcoin Cash.**
   `scriptToAddressBS` and `scriptToAddress` take the token prefix off before

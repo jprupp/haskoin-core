@@ -33,7 +33,7 @@ storage.
 
 | Area         | What you get                                                                                                         |
 | ------------ | -------------------------------------------------------------------------------------------------------------------- |
-| Networks     | Bitcoin and Bitcoin Cash: mainnet, testnet4 and regtest; testnet3, deprecated                                        |
+| Networks     | Bitcoin and Bitcoin Cash: mainnet, testnet3, testnet4 and regtest; Bitcoin testnet3 is deprecated                    |
 | Keys         | secp256k1 keys, WIF, BIP-32 extended keys and paths, BIP-39 mnemonics, SLIP-39 Shamir shares                         |
 | Signatures   | Deterministic ECDSA (RFC 6979) and BIP-340 Schnorr                                                                   |
 | Addresses    | Base58, Bech32, Bech32m and CashAddr, including P2SH32 and the token-aware CashAddr types                            |
@@ -185,14 +185,17 @@ the chain take one as their first argument.
 | `bchTest4`   | Bitcoin Cash testnet4 | `bchtest4`           |
 | `bchRegTest` | Bitcoin Cash regtest  | `bchreg`             |
 
-`btcTest` and `bchTest`, the testnet3 networks, are deprecated: using them
-gives a warning when you compile. Bitcoin Core has deprecated testnet3 in
-favour of testnet4, whose BIP94 rules stop the storms of minimum-difficulty
-blocks that made testnet3 hard to use, and will remove it. Bitcoin Cash Node
-still supports testnet3: deprecating `bchTest` is a choice of this library, so
-that both chains point to testnet4. Use `btcTest4` and `bchTest4` instead. The testnet3
-values are still in `allNets` and `netByName` still finds them, so that code
-reading old testnet3 data keeps working; a later major version will remove them.
+`btcTest`, Bitcoin testnet3, is deprecated: using it gives a warning when you
+compile. Bitcoin Core has deprecated testnet3 in favour of testnet4, whose BIP94
+rules stop the storms of minimum-difficulty blocks that made testnet3 hard to
+use, and will remove it. Use `btcTest4` instead. `btcTest` is still in `allNets`
+and `netByName` still finds it, so that code reading old testnet3 data keeps
+working; a later major version will remove it. `bchTest` is not deprecated:
+Bitcoin Cash Node still supports testnet3.
+
+The constants of each network are those of the reference node: Bitcoin Core
+32.1 for Bitcoin and Bitcoin Cash Node 29.2.0 for Bitcoin Cash. Bitcoin Core
+has no checkpoints, so the Bitcoin networks have none either.
 
 ### Record fields
 

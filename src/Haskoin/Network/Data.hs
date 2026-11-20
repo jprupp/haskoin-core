@@ -86,7 +86,11 @@ data Network = Network
     targetTimespan :: !Word32,
     -- | time between blocks
     targetSpacing :: !Word32,
-    -- | checkpoints
+    -- | blocks that the chain must hold at these heights, as the reference
+    -- node pins them. 'Haskoin.Block.Headers.connectBlocks' refuses a header
+    -- at such a height with another hash, and a fork below the last
+    -- checkpoint the chain has reached. Bitcoin Core 32.1 has none, so the
+    -- Bitcoin networks have none either; Bitcoin Cash Node keeps them.
     checkpoints :: ![(BlockHeight, BlockHash)],
     -- | work that the best chain is known to have, @nMinimumChainWork@ of the
     -- reference node. Once the best block has this much work,
@@ -95,7 +99,9 @@ data Network = Network
     minimumChainWork :: !Integer,
     -- | BIP44 derivation path root
     bip44Coin :: !Word32,
-    -- | peer-to-peer network seeds
+    -- | DNS seeds of the network, as the reference node lists them. On
+    -- regtest they are a placeholder that does not resolve (Bitcoin Core) or
+    -- none (Bitcoin Cash Node).
     seeds :: ![String],
     -- | fork id for replay protection
     sigHashForkId :: !(Maybe Word32),

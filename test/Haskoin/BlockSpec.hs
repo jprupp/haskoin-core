@@ -1042,18 +1042,20 @@ zoomChain act = state $ \(mem, n) -> let (a, mem') = runState act mem in (a, (me
 checkpointSpec :: Spec
 checkpointSpec = describe "checkpoints and versions" $ do
   it "accepts the checkpoint hash at its height" $
-    validCP btc 11111 "0000000069e244f73d78e8fd29ba2fd2ed618bd6fa2ee92559f542fdb26e7c1d" `shouldBe` True
+    validCP bch 11111 "0000000069e244f73d78e8fd29ba2fd2ed618bd6fa2ee92559f542fdb26e7c1d" `shouldBe` True
   it "rejects another hash at a checkpoint height" $
-    validCP btc 11111 genesisHash `shouldBe` False
+    validCP bch 11111 genesisHash `shouldBe` False
   it "accepts any hash where there is no checkpoint" $
-    validCP btc 11112 genesisHash `shouldBe` True
+    validCP bch 11112 genesisHash `shouldBe` True
   it "requires new blocks above the last checkpoint reached" $ do
-    -- the checkpoints at or below height 50000 are 11111 and 33333
-    afterLastCP btc 50000 33334 `shouldBe` True
-    afterLastCP btc 50000 33333 `shouldBe` False
-    afterLastCP btc 50000 11112 `shouldBe` False
-    afterLastCP btc 10000 1 `shouldBe` True
+    -- the checkpoints of Bitcoin Cash at or below height 50000 are 11111
+    -- and 33333; Bitcoin has none
+    afterLastCP bch 50000 33334 `shouldBe` True
+    afterLastCP bch 50000 33333 `shouldBe` False
+    afterLastCP bch 50000 11112 `shouldBe` False
+    afterLastCP bch 10000 1 `shouldBe` True
     afterLastCP btcRegTest 10000 1 `shouldBe` True
+    afterLastCP btc 50000 11112 `shouldBe` True
   it "checks the BIP34 activation block" $ do
     bip34 btc 227931 "000000000000024b89b42a942fe0d9fea3bb44ab7bd1b19115dd6a759c0808b8" `shouldBe` True
     bip34 btc 227931 genesisHash `shouldBe` False
@@ -1654,10 +1656,13 @@ chainConstantsSpec = describe "chain parameters of the reference nodes" $ do
     map diffInterval [btc, btcTest, btcTest4, bch, bchTest, bchTest4, bchRegTest] `shouldBe` replicate 7 2016
   it "starts the EDA and the DAA one block after the heights of Bitcoin Cash Node" $ do
     -- chainparams.cpp of Bitcoin Cash Node: uahfHeight 478558, daaHeight
-    -- 504031 on mainnet; 1155875 and 1188697 on testnet3; 6 and 3000 on testnet4
+    -- 504031 on mainnet; 1155875 and 1188697 on testnet3; 6 and 3000 on
+    -- testnet4
     (bch.edaHeight, bch.daaHeight) `shouldBe` (Just 478559, Just 504032)
     (bchTest.edaHeight, bchTest.daaHeight) `shouldBe` (Just 1155876, Just 1188698)
     (bchTest4.edaHeight, bchTest4.daaHeight) `shouldBe` (Just 7, Just 3001)
+    -- 0 and 0 on regtest
+    (bchRegTest.edaHeight, bchRegTest.daaHeight) `shouldBe` (Just 1, Just 1)
   it "activates ASERT at the time of Bitcoin Cash Node, with its half-lives" $ do
     -- axionActivationTime = 1605441600; nASERTHalfLife is two days on
     -- mainnet (172800 seconds) and one hour on the test networks (3600)
@@ -1684,9 +1689,25 @@ chainConstantsSpec = describe "chain parameters of the reference nodes" $ do
     -- 33 halvings: 5000000000 shifted right by 32 is 1, by 33 is 0
     computeSubsidy btc 6929999 `shouldBe` 1
     computeSubsidy btc 6930000 `shouldBe` 0
-  it "has the checkpoint of block 33333 on bitcoin" $ do
-    validCP btc 33333 "000000002dd5588a74784eaa7ab0507a18ad16a236e7b1ce69f00d7ddfb5d0a6" `shouldBe` True
-    validCP btc 33333 "000000002dd5588a74784eaa7ab0507a18ad16a236e7b1ce69f00d7ddfb5d0a7" `shouldBe` False
+  it "has no checkpoints on bitcoin, as Bitcoin Core 32.1 has none" $ do
+    map (.checkpoints) [btc, btcTest, btcTest4, btcRegTest] `shouldBe` replicate 4 []
+    validCP btc 33333 "000000002dd5588a74784eaa7ab0507a18ad16a236e7b1ce69f00d7ddfb5d0a7" `shouldBe` True
+  it "has the checkpoints of Bitcoin Cash Node on bitcoin cash" $ do
+    -- mapCheckpoints of chainparams.cpp: 39 on mainnet, 19 on each testnet
+    -- and the genesis block on regtest
+    map (length . (.checkpoints)) [bch, bchTest, bchTest4, bchRegTest] `shouldBe` [39, 19, 19, 1]
+    validCP bch 33333 "000000002dd5588a74784eaa7ab0507a18ad16a236e7b1ce69f00d7ddfb5d0a6" `shouldBe` True
+    validCP bch 33333 "000000002dd5588a74784eaa7ab0507a18ad16a236e7b1ce69f00d7ddfb5d0a7" `shouldBe` False
+    -- the first blocks of the DAA, not the blocks before them
+    lookup 504032 bch.checkpoints
+      `shouldBe` Just "00000000000000000343e9875012f2062554c8752929892c82a0c0743ac7dcfd"
+    lookup 504031 bch.checkpoints `shouldBe` Nothing
+    lookup 1188698 bchTest.checkpoints
+      `shouldBe` Just "0000000000051b450faa75bb8e1ea30bc18c4b9736e765d2794259a53bc83f99"
+    lookup 1188697 bchTest.checkpoints `shouldBe` Nothing
+  it "has the seeds of the nodes on regtest" $ do
+    btcRegTest.seeds `shouldBe` ["dummySeed.invalid"]
+    bchRegTest.seeds `shouldBe` []
   it "enforces BIP94 on bitcoin testnet4 only" $ do
     map (.bip94) [btc, btcTest, btcTest4, btcRegTest, bch, bchTest, bchTest4, bchRegTest]
       `shouldBe` [False, False, True, False, False, False, False, False]
