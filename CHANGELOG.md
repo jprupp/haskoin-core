@@ -22,6 +22,28 @@ The testnet3 networks are deprecated and still work.
 
 ### Added
 
+- **Protocol machines of the reference nodes.** The new module
+  `Haskoin.Network.Protocol`, a separate import, models how the reference node
+  of each network treats one peer, as a pure state machine translated from the
+  upstream source: Bitcoin Core 32.1 (`Haskoin.Network.Protocol.BitcoinCore`)
+  for `btc`, `btcTest`, `btcTest4` and `btcRegTest`, and Bitcoin Cash Node
+  29.2.0 (`Haskoin.Network.Protocol.BitcoinCashNode`) for `bch`, `bchTest`,
+  `bchTest4` and `bchRegTest`. `machine` picks the machine of a network with
+  the node's default options, `start` opens a connection from a `Setup` and
+  `step` feeds it a message, a framing error, a tick or a notification. Each
+  `Effect` (send, ignore, misbehaviour score, discourage, ban, disconnect)
+  carries a `Cite` of the upstream file and line that decides it. Connection
+  types, the permissions of whitelisted peers, node options such as
+  `-blocksonly`, and the timers of both nodes are modelled; validation and the
+  state of the chain and the mempool come from an `Env`. The vocabulary is in
+  `Haskoin.Network.Protocol.Types`.
+- **A report of the protocol of both nodes,** `doc/protocol/README.md`, with
+  one file per node: every rule with a link to its upstream line and the
+  Haskell function that implements it, the differences by network, by
+  permission and by connection type, and where the two nodes differ. The
+  script `scripts/protocol-cites.sh` prints every citation of a machine next
+  to the upstream line it names, to check them and to bring the machines to a
+  new release.
 - **The opcodes of Bitcoin Cash.** `ScriptOp` has constructors for the
   introspection opcodes of May 2022, `OP_INPUTINDEX` (0xc0) to
   `OP_OUTPUTBYTECODE` (0xcd), the token opcodes of May 2023,

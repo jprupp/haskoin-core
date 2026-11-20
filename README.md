@@ -44,6 +44,7 @@ storage.
 | Taproot      | Script trees, output keys, witnesses, control blocks and signature hashes (BIP-341, BIP-342)                         |
 | Blocks       | Header validation, proof of work, the difficulty rules of both chains, Merkle trees and an in-memory header chain    |
 | Peer-to-peer | Message encoding, including `addrv2`, compact blocks and compact filter messages, and BIP-37 Bloom filters           |
+| Protocol     | State machines of how Bitcoin Core and Bitcoin Cash Node treat a peer, one per network                               |
 | Testing      | QuickCheck generators for the library's types                                                                        |
 
 ### What is not included
@@ -893,6 +894,78 @@ learn how many more bytes to take from the socket, and refuse a length above
 `Message` has a constructor for each message type. `bloomCreate`, `bloomInsert`
 and `bloomContains` build BIP-37 filters for `filterload`.
 
+### Protocol machines
+
+The messages are half of the protocol. The other half is what a node does with
+them: which messages it drops before the handshake, which ones cost the peer
+its connection or its address, when it pings and how long it waits, what a
+whitelisted peer may do. No BIP says it; the code of the reference nodes does.
+`Haskoin.Network.Protocol` translates that code into pure state machines, one
+per network: Bitcoin Core 32.1 for the Bitcoin networks and Bitcoin Cash Node
+29.2.0 for the Bitcoin Cash networks. A program that talks to these nodes can
+use them to know what the node will do, and its tests can use them as an
+oracle.
+
+A machine models how the node treats one peer. `start` opens a connection from
+a `Setup` (who opened it, the peer's permissions, its address network), and
+`step` feeds it one input: a message, a framing error, a tick of the clock, or
+news from the rest of the node. It returns what the node did, and each
+`Effect` carries a `Cite` of the upstream file and line that decides it. The
+machine reads nothing on its own: an `Env` gives the time and the answers about
+the chain and the mempool.
+
+```haskell
+import qualified Data.Set as Set
+import Haskoin
+import Haskoin.Network.Protocol
+
+let -- A peer that connects to the node, with no permissions.
+    setup =
+      Setup
+        { connectionType = Inbound,
+          permissions = Set.empty,
+          peerNetwork = AddrIPv4,
+          peerIsLocal = False,
+          transport = TransportV1,
+          openedAt = seconds 1700000000,
+          seed = 42
+        }
+    -- A node that has only the genesis block of its network.
+    envOf net =
+      let info =
+            BlockInfo
+              { hash = headerHash net.genesisHeader,
+                height = 0,
+                status = HaveData,
+                inActiveChain = True,
+                work = 0,
+                time = net.genesisHeader.timestamp
+              }
+       in defaultEnv info (genesisBlock net) (seconds 1700000001)
+    -- The peer sends verack before version.
+    tryIt net =
+      snd (step (envOf net) (start (machine net) setup) (Receive MVerAck))
+
+print (map (.action) (tryIt btc))
+-- => [Ignore]
+print (map (.action) (tryIt bch))
+-- => [Misbehave 10]
+print (map (.because) (tryIt bch))
+-- => [Cite {file = "src/net_processing.cpp", line = 2311, reason = "missing-version"}]
+```
+
+Bitcoin Core drops the early `verack`; Bitcoin Cash Node adds 10 to the peer's
+ban score, so ten such messages get its address discouraged. The report in
+[`doc/protocol`](doc/protocol/README.md) describes the protocol of both nodes
+in prose, with the same references, and lists where they differ. It changes
+with the machines: `scripts/protocol-cites.sh` prints every citation next to
+the upstream line it names, which is how both are brought to a new release.
+
+What the machines leave out: validation, the chain and the mempool, which come
+from the `Env`; decisions that span peers, such as which peer to download a
+block from, which come in as notifications; and bytes, since a machine sees
+whole messages.
+
 ## Module overview
 
 `import Haskoin` brings in everything below except the modules marked as
@@ -906,6 +979,7 @@ modules you need, or to import it qualified.
 | `Haskoin.Crypto`              | Hashes, keys, signatures and the `Crypto.Secp256k1` API              |
 | `Haskoin.Crypto.Keys.Slip39`  | SLIP-39 secret sharing (separate import)                             |
 | `Haskoin.Network`             | Network constants, P2P messages, Bloom filters                       |
+| `Haskoin.Network.Protocol`    | State machines of the reference nodes' protocol (separate import)    |
 | `Haskoin.Script`              | Scripts, standard templates, signature hashes and CashTokens         |
 | `Haskoin.Transaction`         | Transaction types, builder, signing, SegWit, Taproot and PSBT        |
 | `Haskoin.Util`                | Hexadecimal helpers, `Marshal` and small utilities                   |
