@@ -1,5 +1,60 @@
 # Instructions for Claude
 
+## How this file is kept
+
+This file is loaded into every session, so each line costs tokens every time.
+It has three parts:
+
+- **The rules**: everything above `## Feature notes`. Only the maintainer
+  changes them. If a change makes a rule out of date, say so in your report
+  and leave the rule alone.
+- **The feature notes**: the index of the files of `claude-notes/`, one file
+  for each kind of feature. A file costs tokens only in the sessions that
+  work on its feature.
+- **The working notes**: the last section. It holds only what applies to
+  every session, whatever the feature.
+
+Claude owns the working notes, the files of `claude-notes/` and their index,
+and keeps them without asking, by the rules below.
+
+### Rules for the notes
+
+The notes save the next session the research this session paid for.
+
+- **Before the work.** Read each file of `claude-notes/` that the index names
+  for the task, before you read the code.
+- **When to add.** Something about this repository took real effort to find
+  out (several searches, a failed build or test run, a wrong first approach),
+  and it would take that effort again. At the end of a task, ask what would
+  have saved the most effort, and write that down, or nothing.
+- **Where it goes.** What helps on one kind of feature goes to the file of
+  that feature. What helps whatever the feature goes to the working notes:
+  the build, the tests, the layout of the code, a trap that any change can
+  fall into. A fact has one home: another file points to it.
+- **A new file.** When no file fits, create one, named after the feature. Add
+  its line to the index in the same change: the file, then when to read it,
+  in one or two lines. A file starts with a title and what it covers. Delete
+  a file, and its line, when nothing is left in it.
+- **What to leave out.** What one `grep` or the module names show. The story
+  of a task. What matters to one task only. The maintainer's decisions and
+  preferences, which go to memory. What the rules, the README or a module
+  header already say: point to it instead. When a note covers what a memory
+  says about the repository, trim that memory to what is left.
+- **Only what was checked.** An entry states what this session saw in the
+  code or in a run. Never a guess.
+- **Form.** The task or the symptom first, then what to do. Name files and
+  functions, never line numbers. An entry of the working notes is one or two
+  lines. An entry of a feature file is four lines at most. Put it under the
+  heading it fits, and add a heading only when none fits.
+- **Upkeep.** Update an entry instead of adding a second one. Fix or delete
+  an entry in the same change that makes it wrong, and at once when you find
+  one wrong.
+- **Size.** 80 lines at most for the working notes, and 120 lines at most for
+  a file of `claude-notes/`. When one is full, merge entries or drop the
+  least useful one before adding. A feature file that stays full is split in
+  two, by the parts of its feature.
+- **Report.** Name each change to the notes in one line of your report.
+
 ## Keep the documentation up to date with every change
 
 Every change to this repository must update all the documentation it affects,
@@ -80,3 +135,34 @@ libraries and with `stack --nix`.
 List the lines of 120 columns or more with
 `git ls-files '*.hs' '*.yaml' '*.cabal' '*.md' | xargs grep -n '.\{120,\}'`,
 and fix every one that is code and is not one of the exceptions above.
+
+## Feature notes
+
+Read a file before any work on what its line names.
+
+- `claude-notes/difficulty.md`: the work a new header must show, on Bitcoin
+  or on Bitcoin Cash (EDA, DAA, aserti3-2d), and the tests of those rules.
+
+## Working notes
+
+### Where things are
+
+- The helpers that the specs share are in the library, not in `test/`:
+  `src/Haskoin/Util/Arbitrary/` holds the generators, and its `Util.hs` holds
+  `testIdentity`, `testSerial` and `testJson`. A change there is a change of
+  the public API. The helpers of one spec are at the top of its file.
+- A new module: `stack build --dry-run` writes `haskoin-core.cabal` again in
+  under a second, without a build. The file is tracked, so it is part of the
+  change.
+
+### Running the checks
+
+- `stack haddock --no-haddock-deps` on a tree that Stack already built prints
+  six lines and no warning, because it ran nothing. `touch` on a source file
+  does not change that. Add `--force-dirty`: 14 seconds for the 52 modules.
+- That run prints 204 lines that start with `Warning` at 2.0.1. None is about
+  markup: names that are ambiguous or out of scope, and links to packages with
+  no documentation. Keep the log in a file and compare with `grep -c '^Warning'`.
+- The long-line check prints 978 lines at 2.0.1, most of them test vectors
+  and `CHANGELOG.md`. With `grep -c` in place of `grep -n` it counts them for
+  each file: compare the counts before and after the change.
