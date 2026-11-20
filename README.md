@@ -33,7 +33,7 @@ storage.
 
 | Area         | What you get                                                                                                         |
 | ------------ | -------------------------------------------------------------------------------------------------------------------- |
-| Networks     | Bitcoin and Bitcoin Cash: mainnet, testnet3, testnet4 and regtest                                                    |
+| Networks     | Bitcoin and Bitcoin Cash: mainnet, testnet4 and regtest; testnet3, deprecated                                        |
 | Keys         | secp256k1 keys, WIF, BIP-32 extended keys and paths, BIP-39 mnemonics, SLIP-39 Shamir shares                         |
 | Signatures   | Deterministic ECDSA (RFC 6979) and BIP-340 Schnorr                                                                   |
 | Addresses    | Base58, Bech32, Bech32m and CashAddr, including token-aware CashAddr types                                           |
@@ -183,6 +183,13 @@ the chain take one as their first argument.
 | `bchTest`    | Bitcoin Cash testnet3 | `bchtest`            |
 | `bchTest4`   | Bitcoin Cash testnet4 | `bchtest4`           |
 | `bchRegTest` | Bitcoin Cash regtest  | `bchreg`             |
+
+`btcTest` and `bchTest`, the testnet3 networks, are deprecated: using them
+gives a warning when you compile. Bitcoin Core has replaced testnet3 with
+testnet4, whose BIP94 rules stop the storms of minimum-difficulty blocks that
+made testnet3 hard to use. Use `btcTest4` and `bchTest4` instead. The testnet3
+values are still in `allNets` and `netByName` still finds them, so that code
+reading old testnet3 data keeps working; a later major version will remove them.
 
 ### Record fields
 

@@ -166,7 +166,13 @@ btc =
       halvingInterval = 210000
     }
 
--- | Testnet for Bitcoin SegWit network.
+-- | Testnet3 for Bitcoin SegWit network. Deprecated: use 'btcTest4'.
+--
+-- Bitcoin Core has deprecated testnet3 in favour of testnet4, whose BIP94
+-- rules stop the storms of minimum-difficulty blocks that made testnet3 hard
+-- to use. This value stays, still in 'allNets' and found by 'netByName', so
+-- that code reading old testnet3 data keeps working, and will be removed in a
+-- later major version.
 btcTest :: Network
 btcTest =
   Network
@@ -560,7 +566,12 @@ bchTest4 =
       halvingInterval = 210000
     }
 
--- | Testnet for Bitcoin Cash network.
+-- | Testnet3 for Bitcoin Cash network. Deprecated: use 'bchTest4'.
+--
+-- Testnet4 is the test network that Bitcoin Cash tooling uses; testnet3 is
+-- deprecated together with the Bitcoin one. This value stays, still in
+-- 'allNets' and found by 'netByName', and will be removed in a later major
+-- version.
 bchTest :: Network
 bchTest =
   Network
@@ -703,6 +714,11 @@ bchRegTest =
       halvingInterval = 150
     }
 
--- | List of all networks supported by this library.
+{-# DEPRECATED btcTest "Testnet3 is deprecated: use btcTest4" #-}
+
+{-# DEPRECATED bchTest "Testnet3 is deprecated: use bchTest4" #-}
+
+-- | List of all networks supported by this library, the deprecated testnet3
+-- ones included.
 allNets :: [Network]
 allNets = [btc, bch, btcTest, btcTest4, bchTest4, bchTest, btcRegTest, bchRegTest]

@@ -18,6 +18,12 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
   does not hold that block at that height still gets the search. Code that
   builds a `Network` record field by field must now set this field.
 
+### Deprecated
+- **The testnet3 networks, `btcTest` and `bchTest`.** Using them gives a
+  deprecation warning; use `btcTest4` and `bchTest4`. Bitcoin Core has
+  replaced testnet3 with testnet4. They stay in `allNets` and `netByName`
+  still finds them, and a later major version will remove them.
+
 ### Changed
 - The benchmark `headers` checks before it times that its 2,000 headers
   connect, so a change that made them fail cannot look fast. It also times
