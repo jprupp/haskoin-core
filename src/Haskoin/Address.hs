@@ -45,6 +45,8 @@ module Haskoin.Address
     witnessScriptAddress,
     script32Address,
     cashAddress,
+    tokenAwareAddress,
+    plainAddress,
     addressHash160,
     addressHash256,
     addressVersion,
@@ -108,6 +110,7 @@ import Haskoin.Address.CashAddr
 import Haskoin.Crypto.Hash
 import Haskoin.Crypto.Keys.Common
 import Haskoin.Network.Data
+import Haskoin.Script.CashToken (hasTokenPrefix, splitTokenData)
 import Haskoin.Script.Common
 import Haskoin.Script.Standard
 import Haskoin.Util
@@ -431,6 +434,50 @@ cashAddress v b = do
     (1, 32) -> Script32Address <$> decodeHash b
     _ -> return $ OtherCashAddress v b
 
+-- | The token-aware form of an address of Bitcoin Cash: CashAddr type 2 for
+-- a P2PKH address, type 3 for a P2SH or P2SH32 address. A token-aware
+-- address is its own token-aware form. 'Nothing' for any other address,
+-- which has no such form.
+--
+-- CashTokens added these types so that a wallet can tell a sender that it
+-- knows about tokens: software that does not would burn tokens sent to it,
+-- by spending the coins without carrying the tokens over. Both forms lock
+-- coins with the same script, so the token-aware form changes nothing on the
+-- chain, only what a sender is told it may send.
+--
+-- Use it to show the address of an output that holds tokens, or to give a
+-- token wallet an address to receive at. 'scriptToAddressBS' returns the
+-- plain form for every output, with or without tokens; see there why.
+--
+-- Bitcoin has no token-aware addresses: 'addrToText' of the result is
+-- 'Nothing' on a Bitcoin network, and on Bitcoin Cash it starts with @z@
+-- for type 2 and @r@ for type 3 with a 32-byte hash.
+tokenAwareAddress :: Address -> Maybe Address
+tokenAwareAddress = \case
+  PubKeyAddress h -> cashAddress tokenPubKeyType (hashBytes h)
+  ScriptAddress h -> cashAddress tokenScriptType (hashBytes h)
+  Script32Address h -> cashAddress tokenScriptType (hashBytes h)
+  a@(OtherCashAddress v b)
+    | isJust (cashAddressOutput v b) -> Just a
+  _ -> Nothing
+
+-- | The plain form of a token-aware address: the inverse of
+-- 'tokenAwareAddress'. Every other address is returned as it is.
+--
+-- Two addresses that lock coins with the same script are different values,
+-- so @plainAddress@ is how to put a token-aware address that a user gives
+-- next to the addresses that 'scriptToAddressBS' returns, for instance to
+-- look up its balance.
+plainAddress :: Address -> Address
+plainAddress = \case
+  a@(OtherCashAddress v b)
+    | v == tokenPubKeyType && len == 20 -> maybe a PubKeyAddress (decodeHash b)
+    | v == tokenScriptType && len == 20 -> maybe a ScriptAddress (decodeHash b)
+    | v == tokenScriptType && len == 32 -> maybe a Script32Address (decodeHash b)
+    where
+      len = B.length b
+  a -> a
+
 -- | Read a hash from bytes of the right length.
 decodeHash :: (Serial a) => ByteString -> Maybe a
 decodeHash = eitherToMaybe . runGetS deserialize
@@ -726,9 +773,19 @@ addressToScriptBS addr = (runPutS . serialize) <$> addressToScript addr
 
 -- | Decode an output script into the 'Address' it has on a network, if it
 -- has one there. See 'outputAddress'.
+--
+-- On the Bitcoin Cash networks, a script that starts with the token prefix
+-- byte 0xef, which parses as @OP_INVALIDOPCODE 0xef@, is the script field of
+-- an output that holds tokens. It is handled as 'scriptToAddressBS' handles
+-- it. Most such fields do not parse as a 'Script' at all: give their bytes to
+-- 'scriptToAddressBS'.
 scriptToAddress :: Network -> Script -> Either String Address
-scriptToAddress net =
-  maybeToEither e . outputAddress net <=< decodeOutput
+scriptToAddress net script
+  | isJust net.cashAddrPrefix,
+    OP_INVALIDOPCODE 0xef : _ <- script.ops =
+      scriptToAddressBS net (encodeSerial script)
+  | otherwise =
+      maybeToEither e . outputAddress net =<< decodeOutput script
   where
     e = "Could not decode address"
 
@@ -754,8 +811,33 @@ scriptToAddress net =
 -- parsed every script, and a Taproot output or a data carrier takes about a
 -- fifth. Versions 1.6.3 and 1.6.4 were as fast for the four kinds, and
 -- nearly twice as slow as 1.6.0 for every script they parsed.
+--
+-- On the Bitcoin Cash networks, the script field of an output that holds
+-- tokens (CashTokens) starts with a token prefix, which
+-- 'Haskoin.Script.CashToken.splitTokenData' takes off. The address is the
+-- one of the locking script after it, and is in its plain form: a P2PKH,
+-- P2SH or P2SH32 address of CashAddr type 0 or 1, as for an output without
+-- tokens. A field with a prefix that is not valid has no address, and gives
+-- the error of the prefix in a 'Left'. On Bitcoin the byte 0xef is no
+-- prefix, and such a script has no address.
+--
+-- The plain form is the one an output has whatever it holds. Bitcoin Cash
+-- Node shows the same, with the tokens apart. It keeps all the coins of a
+-- key or a script under one address, as an index of addresses should: a
+-- wallet receives coins with and without tokens at the same script, and the
+-- token-aware form would split its history and its balance in two. Read the
+-- tokens with 'splitTokenData', and show the token-aware form with
+-- 'tokenAwareAddress' where a user wants it.
 scriptToAddressBS :: Network -> ByteString -> Either String Address
 scriptToAddressBS net bytes
+  | isJust net.cashAddrPrefix,
+    hasTokenPrefix bytes =
+      scriptToAddressBS' net . snd =<< splitTokenData bytes
+  | otherwise = scriptToAddressBS' net bytes
+
+-- | 'scriptToAddressBS' for a script without a token prefix.
+scriptToAddressBS' :: Network -> ByteString -> Either String Address
+scriptToAddressBS' net bytes
   | Just a <- standard = Right a
   | otherwise = maybeToEither e . outputAddress net =<< decodeSerial bytes
   where

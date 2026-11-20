@@ -5,7 +5,7 @@ cabal-version: 1.12
 -- see: https://github.com/sol/hpack
 
 name:           haskoin-core
-version:        3.0.0
+version:        3.1.0
 synopsis:       Bitcoin & Bitcoin Cash library for Haskell
 description:    Please see the README on GitHub at <https://github.com/jprupp/haskoin-core#readme>
 category:       Bitcoin, Finance, Network
@@ -20,6 +20,8 @@ extra-source-files:
     data/block_100000.hex
     data/bip341.json
     data/bip39_vectors.json
+    data/cashtokens_prefix_invalid.json
+    data/cashtokens_prefix_valid.json
     data/complex_psbt.json
     data/core_signed_txs.json
     data/forkid_script_tests.json
@@ -91,6 +93,7 @@ library
       Haskoin.Network.Data
       Haskoin.Network.Message
       Haskoin.Script
+      Haskoin.Script.CashToken
       Haskoin.Script.Common
       Haskoin.Script.SigHash
       Haskoin.Script.Standard
@@ -172,6 +175,7 @@ test-suite spec
       Haskoin.Crypto.KeysSpec
       Haskoin.Crypto.SignatureSpec
       Haskoin.NetworkSpec
+      Haskoin.Script.CashTokenSpec
       Haskoin.ScriptSpec
       Haskoin.Transaction.PsbtSpec
       Haskoin.Transaction.TaprootSpec

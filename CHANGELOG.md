@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/)
 and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.html).
 
+## [3.1.0] - 2026-11-20
+
+### Added
+
+- **CashTokens (CHIP-2022-02).** The new module `Haskoin.Script.CashToken`,
+  exported by `Haskoin.Script` and `Haskoin`, reads and writes the token
+  prefix that Bitcoin Cash puts at the front of the script field of an
+  output that holds tokens. `splitTokenData` splits a script field into a
+  `TokenData` (category, fungible amount, and an `NFToken` with its
+  `TokenCapability` and commitment) and the locking script after it.
+  `encodeTokenPrefix` writes a prefix. `TokenData` has `Serial`, `Binary`,
+  `Serialize`, `Read`, `Show` and JSON instances; the JSON is that of the
+  CashTokens test vectors and of the RPC of Bitcoin Cash Node, with the
+  amount as a string. The official test vectors of the token prefix, 62 valid
+  and 55 invalid, are in `data/` and pass.
+- `tokenAwareAddress` gives the token-aware CashAddr of a P2PKH, P2SH or
+  P2SH32 address (type 2 or 3), and `plainAddress` turns a token-aware
+  address back into its plain form.
+- `arbitraryTokenData` and `arbitraryNFToken` in `Haskoin.Util.Arbitrary`.
+
+### Changed
+
+- **Outputs that hold tokens have an address on Bitcoin Cash.**
+  `scriptToAddressBS` and `scriptToAddress` take the token prefix off before
+  they match the templates, on the Bitcoin Cash networks only. Before, such an
+  output had no address: transaction e3abdbdc…f5a809 of block 978089 had none
+  for four of its five outputs. The address is the plain form, CashAddr type 0
+  or 1, as for an output without tokens and as Bitcoin Cash Node shows it, so
+  that the coins of one script stay under one address. A script field with a
+  prefix that is not valid still has no address. On Bitcoin nothing changed.
+- `splitTokenPrefix` is written on top of `splitTokenData`. It accepts and
+  refuses the same prefixes as before.
+
 ## [3.0.0] - 2026-11-20
 
 This release breaks backwards compatibility in one place: the `Network` record

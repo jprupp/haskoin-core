@@ -416,7 +416,7 @@ spec = do
       -- outputs of every kind, of any network, read on any network
       forAll ((,) <$> arbitraryNetwork <*> (arbitraryNetwork >>= \other -> arbitraryScriptOutput other)) $ \(net, out) ->
         let bytes = encodeSerial out
-         in scriptToAddressBS net bytes `shouldBe` parsed net bytes
+         in scriptToAddressBS net bytes `shouldBe` parsedField net bytes
     prop "reads bytes that are nearly of a standard kind as the parser reads them" $
       -- a standard script with one byte changed, or one too many or too few
       forAll ((,,) <$> arbitraryNetwork <*> elements standardShapes <*> arbitrary) $ \(net, hex, (i, w, cut)) -> do
@@ -427,7 +427,7 @@ spec = do
               0 -> changed
               1 -> changed <> "\x00"
               _ -> B.take (B.length changed - 1) changed
-        scriptToAddressBS net bytes `shouldBe` parsed net bytes
+        scriptToAddressBS net bytes `shouldBe` parsedField net bytes
     it "recovers the address of every standard locking script on a network that has its kind" $
       forM_ scriptTable $ \(net, a, hex) ->
         assertEqual (T.unpack hex) (Right a) (scriptToAddressBS net (fromJust (decodeHex hex)))
@@ -477,6 +477,55 @@ spec = do
       -- This is the value an indexer encodes for that output
       marshalValue btc <$> eitherToMaybe (scriptToAddressBS btc (fromJust (decodeHex "aa206fe28c0ab6f1b372c1a6a246ae63f74f931e8365e15a089c68d619000000000087")))
         `shouldBe` Nothing
+  describe "Outputs that hold CashTokens" $ do
+    it "have the plain address of their locking script on Bitcoin Cash" $
+      forM_ tokenOutputs $ \(field, plain, _) ->
+        (addrToText bch =<< eitherToMaybe (scriptToAddressBS bch (fromJust (decodeHex field))))
+          `shouldBe` Just plain
+    it "have the token-aware address of the independent vectors" $
+      forM_ tokenOutputs $ \(field, plain, aware) -> do
+        let a = fromJust (eitherToMaybe (scriptToAddressBS bch (fromJust (decodeHex field))))
+        (addrToText bch =<< tokenAwareAddress a) `shouldBe` Just aware
+        (plainAddress <$> textToAddr bch aware) `shouldBe` Just a
+        textToAddr bch plain `shouldBe` Just a
+    it "have the same address through scriptToAddress when the field parses as a script" $ do
+      -- Most fields do not parse: a byte of the prefix reads as a push longer
+      -- than the rest. This one does: OP_1 for each byte of the category,
+      -- then the flags of an NFT with a commitment, which read as OP_16, and
+      -- a push of the one byte of the commitment.
+      let bytes =
+            fromJust . decodeHex $
+              "ef" <> T.replicate 32 "51" <> "600151\
+              \76a9146e0810ceea13412b73feb41566a3d2d0ce54e10188ac"
+      script <- either fail return (decodeSerial bytes)
+      (addrToText bch =<< eitherToMaybe (scriptToAddress bch script))
+        `shouldBe` Just "bitcoincash:qphqsyxwagf5z2mnl66p2e4r6tgvu48pqyhmvay0uy"
+      scriptToAddress btc script `shouldSatisfy` isLeft
+    it "have no address on Bitcoin, where 0xef is no prefix" $
+      forM_ tokenOutputs $ \(field, _, _) ->
+        forM_ [btc, btcTest, btcTest4, btcRegTest] $ \net ->
+          scriptToAddressBS net (fromJust (decodeHex field)) `shouldSatisfy` isLeft
+    it "have no address with a prefix that is not valid" $
+      -- no token flag set, then a P2PKH script
+      scriptToAddressBS bch (fromJust (decodeHex (T.take 66 tokenField4 <> "00" <> T.drop 76 tokenField4)))
+        `shouldSatisfy` isLeft
+    prop "have the address of the script after any valid prefix" $
+      forAll ((,,) <$> arbitraryTokenData <*> arbitraryScriptOutput bch <*> elements [bch, bchTest]) $
+        \(t, out, net) -> do
+          let bytes = encodeSerial out
+              field = fromJust (encodeTokenPrefix t) <> bytes
+          scriptToAddressBS net field `shouldBe` scriptToAddressBS net bytes
+    it "token-aware forms exist for P2PKH, P2SH and P2SH32 only" $ do
+      (addressVersion <$> tokenAwareAddress p2pkh) `shouldBe` Just 2
+      (addressVersion <$> tokenAwareAddress p2sh) `shouldBe` Just 3
+      (addressVersion <$> tokenAwareAddress p2sh32) `shouldBe` Just 3
+      (tokenAwareAddress =<< tokenAwareAddress p2sh32) `shouldBe` tokenAwareAddress p2sh32
+      tokenAwareAddress p2wpkh `shouldBe` Nothing
+      tokenAwareAddress p2tr `shouldBe` Nothing
+      (addrToText btc =<< tokenAwareAddress p2pkh) `shouldBe` Nothing
+    prop "plainAddress undoes tokenAwareAddress" $
+      forAll (arbitraryAddress bch) $ \a ->
+        (plainAddress <$> tokenAwareAddress a) `shouldSatisfy` maybe True (== plainAddress a)
   describe "inputAddress" $ do
     it "gives the P2PKH address of the key in a public key hash input" $
       (addrToText btc =<< inputAddress (RegularInput (SpendPKHash TxSignatureEmpty compressedKey)))
@@ -892,6 +941,47 @@ slowBase58 bs = T.replicate (B.length zeros) "1" <> T.pack (map (T.index alphabe
 -- 'scriptToAddressBS' did for every script until haskoin-core 1.6.2.
 parsed :: Network -> ByteString -> Either String Address
 parsed net bytes = maybeToEither "Could not decode address" . outputAddress net =<< decodeSerial bytes
+
+-- | 'parsed' for the script field of an output, after its token prefix on a
+-- network that has CashTokens.
+parsedField :: Network -> ByteString -> Either String Address
+parsedField net bytes
+  | isJust net.cashAddrPrefix, hasTokenPrefix bytes = parsed net . snd =<< splitTokenData bytes
+  | otherwise = parsed net bytes
+
+-- | Outputs of BCH transaction
+-- e3abdbdc093c08cab3d6c23c320ca61f23c6e2cf4d8b3058398dcf0e78f5a809, in block
+-- 978089, that hold tokens of category 7fe0cd51…b2f3062c: the script field,
+-- the plain address and the token-aware address. The token-aware addresses
+-- were computed by an independent script.
+tokenOutputs :: [(Text, Text, Text)]
+tokenOutputs =
+  [ ( "ef2c06f3b2565d0818a8e41f58beff5918d5dbdc64b11ee8ad474e499751cde07f10fe554a0700\
+      \aa20656cdb1806fdb2c60baefe95a759637ec62fb7a778e65c2a75f4a6b13be88e5087",
+      "bitcoincash:pdjkekccqm7m93st4mlftf6evdlvvtah5auwvhp2wh62dvfmaz89qln3srgfn",
+      "bitcoincash:rdjkekccqm7m93st4mlftf6evdlvvtah5auwvhp2wh62dvfmaz89qdqd36fsc"
+    ),
+    ( "ef2c06f3b2565d0818a8e41f58beff5918d5dbdc64b11ee8ad474e499751cde07f10fe4e7a0600\
+      \aa203ad77e7a68a924669f8f195263c9c17e4e449d01dc222f4d3e551d3f83fc519a87",
+      "bitcoincash:pvadwln6dz5jge5l3uv4yc7fc9lyu3yaq8wzyt6d8e2360url3ge52h6cellw",
+      "bitcoincash:rvadwln6dz5jge5l3uv4yc7fc9lyu3yaq8wzyt6d8e2360url3ge5cyxeq7x9"
+    ),
+    ( "ef2c06f3b2565d0818a8e41f58beff5918d5dbdc64b11ee8ad474e499751cde07f10fec3800100\
+      \aa204e913324a857399b8da9253c835759b930b40e8e047b0bf82ab64c415c9efd2287",
+      "bitcoincash:pd8fzvey4ptnnxud4yjneq6htxunpdqw3cz8kzlc92mycs2unm7jyrlqp9eks",
+      "bitcoincash:rd8fzvey4ptnnxud4yjneq6htxunpdqw3cz8kzlc92mycs2unm7jy3vuquc0m"
+    ),
+    ( tokenField4,
+      "bitcoincash:qphqsyxwagf5z2mnl66p2e4r6tgvu48pqyhmvay0uy",
+      "bitcoincash:zphqsyxwagf5z2mnl66p2e4r6tgvu48pqys3lr2frh"
+    )
+  ]
+
+-- | Output 4 of that transaction: 110,830 fungible tokens on a P2PKH script.
+tokenField4 :: Text
+tokenField4 =
+  "ef2c06f3b2565d0818a8e41f58beff5918d5dbdc64b11ee8ad474e499751cde07f10feeeb00100\
+  \76a9146e0810ceea13412b73feb41566a3d2d0ce54e10188ac"
 
 -- | The four kinds of script that 'scriptToAddressBS' reads by their bytes.
 standardShapes :: [Text]
