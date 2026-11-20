@@ -162,6 +162,8 @@ Read a file before any work on what its line names.
 
 - `claude-notes/difficulty.md`: the work a new header must show, on Bitcoin
   or on Bitcoin Cash (EDA, DAA, aserti3-2d), and the tests of those rules.
+- `claude-notes/protocol.md`: the protocol machines of the reference nodes
+  (`Haskoin.Network.Protocol`), their report in `doc/protocol/` and citations.
 
 ## Working notes
 
@@ -181,6 +183,8 @@ Read a file before any work on what its line names.
 
 ### Running the checks
 
+- A type and a constructor of the same name: write `t'Name'` in Haddock, or
+  the check of `haskell-dev docs` counts it as ambiguous.
 - The check of `haskell-dev docs` reports 146 problems at 2.0.1, all older
   than the script: 94 ambiguous names, 27 names out of scope, 19 slashes and
   6 links. Keep the lines after `Documentation check` in a file before the

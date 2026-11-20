@@ -18,10 +18,32 @@ This release breaks backwards compatibility in two places:
   outputs added, before it runs with 3.0.0: see "Upgrading an index of
   addresses" below.
 
-The testnet3 networks are deprecated and still work.
+Bitcoin testnet3 is deprecated and still works.
 
 ### Added
 
+- **Protocol machines of the reference nodes.** The new module
+  `Haskoin.Network.Protocol`, a separate import, models how the reference node
+  of each network treats one peer, as a pure state machine translated from the
+  upstream source: Bitcoin Core 32.1 (`Haskoin.Network.Protocol.BitcoinCore`)
+  for `btc`, `btcTest`, `btcTest4` and `btcRegTest`, and Bitcoin Cash Node
+  29.2.0 (`Haskoin.Network.Protocol.BitcoinCashNode`) for `bch`, `bchTest`,
+  `bchTest4` and `bchRegTest`. `machine` picks the machine of a network with
+  the node's default options, `start` opens a connection from a `Setup` and
+  `step` feeds it a message, a framing error, a tick or a notification. Each
+  `Effect` (send, ignore, misbehaviour score, discourage, ban, disconnect)
+  carries a `Cite` of the upstream file and line that decides it. Connection
+  types, the permissions of whitelisted peers, node options such as
+  `-blocksonly`, and the timers of both nodes are modelled; validation and the
+  state of the chain and the mempool come from an `Env`. The vocabulary is in
+  `Haskoin.Network.Protocol.Types`.
+- **A report of the protocol of both nodes,** `doc/protocol/README.md`, with
+  one file per node: every rule with a link to its upstream line and the
+  Haskell function that implements it, the differences by network, by
+  permission and by connection type, and where the two nodes differ. The
+  script `scripts/protocol-cites.sh` prints every citation of a machine next
+  to the upstream line it names, to check them and to bring the machines to a
+  new release.
 - **The opcodes of Bitcoin Cash.** `ScriptOp` has constructors for the
   introspection opcodes of May 2022, `OP_INPUTINDEX` (0xc0) to
   `OP_OUTPUTBYTECODE` (0xcd), the token opcodes of May 2023,
@@ -70,15 +92,28 @@ The testnet3 networks are deprecated and still work.
 
 ### Deprecated
 
-- **The testnet3 networks, `btcTest` and `bchTest`.** Using them gives a
-  deprecation warning; use `btcTest4` and `bchTest4`. Bitcoin Core has
-  deprecated testnet3 and says it will remove it in an upcoming release.
-  Bitcoin Cash Node still supports testnet3 without a notice: deprecating
-  `bchTest` is a choice of this library, to keep the two chains alike. They
-  stay in `allNets` and `netByName` still finds them, and a later major
-  version will remove them.
+- **Bitcoin testnet3, `btcTest`.** Using it gives a deprecation warning; use
+  `btcTest4`. Bitcoin Core has deprecated testnet3 and says it will remove it
+  in an upcoming release. It stays in `allNets` and `netByName` still finds
+  it, and a later major version will remove it. `bchTest` is not deprecated:
+  Bitcoin Cash Node still supports testnet3 without a notice.
 
 ### Changed
+
+- **The constants of the networks match the reference nodes,** Bitcoin Core
+  32.1 and Bitcoin Cash Node 29.2.0:
+  - `btc` and `btcTest` have no checkpoints, as Bitcoin Core has none. The
+    minimum chain work still protects a header sync.
+  - The checkpoints of `bch`, `bchTest` and `bchTest4` are those of Bitcoin
+    Cash Node: 39, 19 and 19 of them. Two checkpoints were not in Bitcoin
+    Cash Node: block 504031 of `bch` and block 1188697 of `bchTest`, the
+    blocks before the DAA. It checkpoints 504032 and 1188698, the first
+    blocks of the DAA.
+  - `bchRegTest` has `edaHeight` and `daaHeight` of `Just 1`, from the
+    heights of 0 in Bitcoin Cash Node. Regtest does not retarget, so no
+    difficulty changes.
+  - The regtest seeds are those of the nodes: none on `bchRegTest`, and the
+    placeholder `dummySeed.invalid` on `btcRegTest`, in place of `localhost`.
 
 - **Outputs that hold tokens have an address on Bitcoin Cash.**
   `scriptToAddressBS` and `scriptToAddress` take the token prefix off before

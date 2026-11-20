@@ -92,6 +92,22 @@ library
       Haskoin.Network.Constants
       Haskoin.Network.Data
       Haskoin.Network.Message
+      Haskoin.Network.Protocol
+      Haskoin.Network.Protocol.BitcoinCashNode
+      Haskoin.Network.Protocol.BitcoinCashNode.Blocks
+      Haskoin.Network.Protocol.BitcoinCashNode.Constants
+      Haskoin.Network.Protocol.BitcoinCashNode.Handshake
+      Haskoin.Network.Protocol.BitcoinCashNode.Options
+      Haskoin.Network.Protocol.BitcoinCashNode.Relay
+      Haskoin.Network.Protocol.BitcoinCashNode.State
+      Haskoin.Network.Protocol.BitcoinCore
+      Haskoin.Network.Protocol.BitcoinCore.Blocks
+      Haskoin.Network.Protocol.BitcoinCore.Constants
+      Haskoin.Network.Protocol.BitcoinCore.Handshake
+      Haskoin.Network.Protocol.BitcoinCore.Machine
+      Haskoin.Network.Protocol.BitcoinCore.Relay
+      Haskoin.Network.Protocol.BitcoinCore.State
+      Haskoin.Network.Protocol.Types
       Haskoin.Script
       Haskoin.Script.CashToken
       Haskoin.Script.Common
@@ -175,6 +191,8 @@ test-suite spec
       Haskoin.Crypto.Keys.Slip39Spec
       Haskoin.Crypto.KeysSpec
       Haskoin.Crypto.SignatureSpec
+      Haskoin.Network.Protocol.BitcoinCashNodeSpec
+      Haskoin.Network.Protocol.BitcoinCoreSpec
       Haskoin.NetworkSpec
       Haskoin.Script.CashTokenSpec
       Haskoin.ScriptSpec
