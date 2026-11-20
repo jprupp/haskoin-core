@@ -19,15 +19,15 @@ packages:
   original:
     hackage: secp256k1-haskell-3.0.0
 - completed:
-    commit: ed0d53a2f54c431f648690f287d36ae269c70de6
+    commit: 607ddbe2c503b67a25581ed9e167f94fdf27c785
     git: https://github.com/jprupp/podman-test.git
     name: podman-test
     pantry-tree:
-      sha256: aeba1e3831db21e2fe0684412d8aa3bffd25b127b91386fdb6b3b0e29fd6730a
+      sha256: 8cd08bcc7317035b4068d075bc669ede1b2fc20a351cc7c4c158ca64b03cc613
       size: 960
     version: 0.1.0
   original:
-    commit: ed0d53a2f54c431f648690f287d36ae269c70de6
+    commit: 607ddbe2c503b67a25581ed9e167f94fdf27c785
     git: https://github.com/jprupp/podman-test.git
 snapshots:
 - completed:
