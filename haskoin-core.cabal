@@ -164,6 +164,7 @@ test-suite spec
   type: exitcode-stdio-1.0
   main-is: Spec.hs
   other-modules:
+      BitcoinCore
       Haskoin.Address.Bech32Spec
       Haskoin.Address.CashAddrSpec
       Haskoin.AddressSpec
@@ -212,6 +213,7 @@ test-suite spec
     , mtl >=2.2.2
     , murmur3 >=1.0.3
     , network >=3.1.1.1
+    , podman-test >=0.1
     , ram >=0.22.0
     , safe >=0.3.18
     , scientific >=0.3.6.2

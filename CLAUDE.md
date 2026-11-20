@@ -171,6 +171,10 @@ Read a file before any work on what its line names.
   `src/Haskoin/Util/Arbitrary/` holds the generators, and its `Util.hs` holds
   `testIdentity`, `testSerial` and `testJson`. A change there is a change of
   the public API. The helpers of one spec are at the top of its file.
+- `test/BitcoinCore.hs` is the one helper module of the test suite: it needs
+  podman-test, which the library must not. It runs Bitcoin Core for `PsbtSpec`.
+- Calls to Bitcoin Core in the tests are positional: check the order in the
+  RPC `help METHOD`. `walletcreatefundedpsbt` takes a lock time before options.
 - A new module: `stack build --dry-run` writes `haskoin-core.cabal` again in
   under a second, without a build. The file is tracked, so it is part of the
   change.

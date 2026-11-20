@@ -99,6 +99,20 @@ The testnet3 networks are deprecated and still work.
   `haskell-dev`, from jprupp/tools, replaces it, with the same three
   commands, `build`, `test` and `docs`. What it needs to know about this
   package, the slow spec modules, is in the new `haskell-dev.toml`.
+- The PSBT scripts under `scripts/` are tests of the suite now, written in
+  Haskell, and `scripts/` is gone. They run against Bitcoin Core 32.1 on
+  regtest, in a rootless Podman container that
+  [podman-test](https://github.com/jprupp/podman-test) starts for each group
+  of tests, and they need no Bitcoin Core, `bitcoin-cli` or `jq` on the
+  machine. `psbt_sign_test.sh` became the group "Bitcoin Core 32.1 accepts
+  the transactions of its PSBTs that the library signs", which also checks
+  that the library finalizes each PSBT into the transaction Bitcoin Core
+  gives. `create_complex_psbt_data.sh` became the group "The PSBT of nine
+  coins of every kind, which twelve wallets of Bitcoin Core 32.1 sign as the
+  tests run", with the checks of the files of `data/`; set
+  `HASKOIN_COMPLEX_PSBT` to a path to keep its PSBTs in a file of the same
+  form. Without Podman these tests are pending, and say why. The test suite
+  depends on podman-test, which must be on Hackage before this release.
 
 ## [2.0.1] - 2026-11-18
 

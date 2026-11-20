@@ -1,6 +1,8 @@
 {-# OPTIONS_GHC -Wno-deprecations #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE ImportQualifiedPost #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 
@@ -10,14 +12,17 @@
 -- and extracting, and the inputs and outputs a PSBT of version 2 takes.
 module Haskoin.Transaction.PsbtSpec (spec) where
 
-import Control.Monad (foldM, forM_)
+import BitcoinCore
+import Control.Monad (foldM, forM, forM_)
 import Crypto.Hash (Digest, SHA256, digestFromByteString)
-import Data.Aeson ((.:), (.:?))
+import Data.Aeson ((.:), (.:?), (.=))
+import Data.Aeson.Key qualified as Key
 import Data.Aeson qualified as Json
 import Data.Bits (xor)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as B
 import Data.Bytes.Put (runPutS)
+import Data.ByteString.Lazy qualified as BL
 import Data.Bytes.Serial (serialize)
 import Data.List (isPrefixOf, isSuffixOf)
 import Data.Map.Strict qualified as Map
@@ -25,7 +30,7 @@ import Data.Maybe (fromJust, fromMaybe, isJust, listToMaybe, mapMaybe)
 import Data.Serialize qualified as S
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Text.Encoding (encodeUtf8)
+import Data.Text.Encoding (decodeUtf8, encodeUtf8)
 import Data.Word (Word32, Word64, Word8)
 import Haskoin.Address
 import Haskoin.Crypto
@@ -35,6 +40,7 @@ import Haskoin.Script
 import Haskoin.Transaction
 import Haskoin.Util
 import Haskoin.Util.Arbitrary
+import System.Environment (lookupEnv)
 import Test.Hspec
 import Test.Hspec.QuickCheck (prop)
 import Test.QuickCheck
@@ -145,6 +151,8 @@ spec = do
     taprootSpec vectors371
     complexSpec
     core32Spec
+    coreSigningSpec
+    coreComplexSpec
     propertiesSpec
 
 {- The vectors of BIP 370 -}
@@ -923,10 +931,11 @@ signingSpec =
 
 {- A PSBT of every kind of coin -}
 
--- | The PSBTs of a file that scripts/create_complex_psbt_data.sh wrote: a
--- transaction of nine coins of every kind, signed by twelve wallets of
--- Bitcoin Core one at a time, their combination, its finalization and the
--- transaction it gives
+-- | The PSBTs of a transaction of nine coins of every kind, signed by
+-- twelve wallets of Bitcoin Core one at a time, their combination, its
+-- finalization and the transaction it gives: read from a file of the
+-- repository, or made by a node of Bitcoin Core as the tests run
+-- ('coreComplexSpec')
 data Complex = Complex
   { initialPsbt :: Psbt,
     signedPsbts :: [Psbt],
@@ -952,38 +961,295 @@ complexSpec = do
   -- version 0. Each wallet finalized the coins it could complete alone.
   describe "The PSBT of nine coins of every kind, which twelve wallets of Bitcoin Core signed one at a time" $ do
     complex <- runIO (readTestFile "complex_psbt.json" :: IO Complex)
-    complexChecks complex
+    before (return complex) complexChecks
 
   -- data/psbt_complex_core32.json is the file of Bitcoin Core 32.1, in
   -- version 2. The wallets signed with finalize=false, so that the
   -- combination holds partial signatures only.
   describe "The PSBT of nine coins of every kind, which twelve wallets of Bitcoin Core 32.1 signed without finalizing" $ do
     complex <- runIO (readTestFile "psbt_complex_core32.json" :: IO Complex)
-    it "is a version 2 PSBT whose combination has no final input" $ do
-      complex.combinedPsbt.version `shouldBe` Version2
-      length complex.combinedPsbt.inputs `shouldBe` 9
-      -- Types 0x07 and 0x08 are the final script and the final witness
-      length [key | input <- complex.combinedPsbt.inputs, key <- Map.keys input, key.keyType `elem` [0x07, 0x08]] `shouldBe` 0
-    complexChecks complex
+    before (return complex) $ do
+      version2Combination
+      complexChecks
 
--- | What holds for both files: the library combines, finalizes and
--- extracts what Bitcoin Core combined, finalized and extracted
-complexChecks :: Complex -> Spec
-complexChecks complex = do
+-- | The combination of PSBTs that Bitcoin Core 32.1 signed without
+-- finalizing them
+version2Combination :: SpecWith Complex
+version2Combination =
+  it "is a version 2 PSBT whose combination has no final input" $ \complex -> do
+    complex.combinedPsbt.version `shouldBe` Version2
+    length complex.combinedPsbt.inputs `shouldBe` 9
+    -- Types 0x07 and 0x08 are the final script and the final witness
+    length [key | input <- complex.combinedPsbt.inputs, key <- Map.keys input, key.keyType `elem` [0x07, 0x08]]
+      `shouldBe` 0
+
+-- | What holds for both files, and for what a node makes as the tests run:
+-- the library combines, finalizes and extracts what Bitcoin Core combined,
+-- finalized and extracted
+complexChecks :: SpecWith Complex
+complexChecks = do
   -- The PSBT Core created has no entry that a signed one lacks
-  it "adds nothing to a signed PSBT when the PSBT Core created is combined with it" $
+  it "adds nothing to a signed PSBT when the PSBT Core created is combined with it" $ \complex ->
     mapM (combinePsbt complex.initialPsbt) complex.signedPsbts `shouldBe` Right complex.signedPsbts
 
-  it "combines into the PSBT Core combined" $
+  it "combines into the PSBT Core combined" $ \complex ->
     case complex.signedPsbts of
       first' : rest -> foldM combinePsbt first' rest `shouldBe` Right complex.combinedPsbt
       [] -> expectationFailure "No signed PSBT"
 
-  it "finalizes into the PSBT Core finalized" $
+  it "finalizes into the PSBT Core finalized" $ \complex ->
     finalizePsbt btc complex.combinedPsbt `shouldBe` Right complex.completePsbt
 
-  it "gives the transaction Core extracted" $
+  it "gives the transaction Core extracted" $ \complex ->
     psbtTransaction complex.completePsbt `shouldBe` Right complex.finalTx
+
+{- Against a node of Bitcoin Core -}
+
+-- | A key of the tests against Bitcoin Core, made from a label, with its
+-- public key in hexadecimal and its private key in the wallet import format
+-- of regtest, as descriptors write them
+data TestKey = TestKey
+  { private :: PrivateKey,
+    publicHex :: Text,
+    wif :: Text
+  }
+
+testKey :: ByteString -> TestKey
+testKey label =
+  TestKey
+    { private = private,
+      publicHex = encodeHex (encodeSerial (derivePublicKey private)),
+      wif = toWif btcRegTest private
+    }
+  where
+    -- A seed has 16 bytes at least
+    private = wrapSecKey True (makeXPrvKey ("Key of the tests against Bitcoin Core: " <> label)).key
+
+-- | The library signs the PSBTs that Bitcoin Core makes for coins of every
+-- kind that both sign, and Bitcoin Core finalizes them and accepts their
+-- transactions into its mempool. The library finalizes each into the same
+-- transaction. Two of the three keys of a multisig coin sign apart, and
+-- Bitcoin Core combines what they signed.
+coreSigningSpec :: Spec
+coreSigningSpec =
+  describe ("Bitcoin Core " <> coreVersion <> " accepts the transactions of its PSBTs that the library signs") $
+    aroundNode withMiner $
+      forM_ kinds $ \(name, descriptor, signers) ->
+        it ("for a coin of " <> T.unpack name) $ \node -> signedByLibrary node name descriptor signers
+  where
+    k1 = testKey "PSBT key 1"
+    k2 = testKey "PSBT key 2"
+    k3 = testKey "PSBT key 3"
+    single = k1.publicHex
+    multi = "sortedmulti(2," <> T.intercalate "," [k1.publicHex, k2.publicHex, k3.publicHex] <> ")"
+    kinds =
+      [ ("p2pkh", "pkh(" <> single <> ")", [k1]),
+        ("p2sh-pk", "sh(pk(" <> single <> "))", [k1]),
+        ("p2sh-ms", "sh(" <> multi <> ")", [k1, k2]),
+        ("p2sh-wpkh", "sh(wpkh(" <> single <> "))", [k1]),
+        ("p2sh-wsh-ms", "sh(wsh(" <> multi <> "))", [k1, k2]),
+        ("p2wpkh", "wpkh(" <> single <> ")", [k1]),
+        ("p2wsh-ms", "wsh(" <> multi <> ")", [k1, k2])
+      ]
+    -- The miner has the coinbases of a hundred blocks to spend
+    withMiner node = do
+      _ <- rpc node "createwallet" [Json.String "miner"]
+      mine node 200
+      return node
+
+-- | The miner pays a coin to a descriptor. A wallet that watches the
+-- descriptor, without its keys, makes a PSBT that spends the coin. The
+-- library signs it with each key, and Bitcoin Core combines and finalizes
+-- the result, and accepts its transaction.
+signedByLibrary :: Node -> Text -> Text -> [TestKey] -> Expectation
+signedByLibrary node name descriptor keys = do
+  -- walletcreatefundedpsbt takes the lock time before the options
+  let lockTime = Json.toJSON (0 :: Int)
+  public <- textAt "descriptor" =<< rpc node "getdescriptorinfo" [Json.String descriptor]
+  address <- firstText =<< rpc node "deriveaddresses" [Json.String public]
+  -- The coin is output 0 of the funding transaction
+  funding <-
+    textAt "psbt"
+      =<< walletRpc
+        node
+        "miner"
+        "walletcreatefundedpsbt"
+        [ emptyArray,
+          Json.object [Key.fromText address .= (1 :: Int)],
+          lockTime,
+          Json.object ["changePosition" .= (1 :: Int)]
+        ]
+  fundingSigned <- textAt "psbt" =<< walletRpc node "miner" "walletprocesspsbt" [Json.String funding]
+  fundingTx <- textAt "hex" =<< rpc node "finalizepsbt" [Json.String fundingSigned]
+  fundingTxid <- rpc node "sendrawtransaction" [Json.String fundingTx]
+
+  let watcher = "watch-" <> name
+  _ <- rpc node "createwallet" [Json.String watcher, Json.Bool True]
+  importDescriptor node watcher public
+  mine node 10
+  payee <- text =<< walletRpc node "miner" "getnewaddress" []
+  change <- walletRpc node "miner" "getnewaddress" []
+  -- The watcher has no address of its own, so the miner gets the change
+  unsigned <-
+    textAt "psbt"
+      =<< walletRpc
+        node
+        watcher
+        "walletcreatefundedpsbt"
+        [ Json.toJSON [Json.object ["txid" .= fundingTxid, "vout" .= (0 :: Int)]],
+          Json.object [Key.fromText payee .= (0.8 :: Double)],
+          lockTime,
+          Json.object ["changeAddress" .= change]
+        ]
+
+  psbt <- fromBase64 unsigned
+  signed <- mapM (\k -> either fail return (signPsbt btcRegTest (keySigner k.private.key) psbt)) keys
+  combined <- case signed of
+    [one] -> return one
+    _ -> fromBase64 =<< text =<< rpc node "combinepsbt" [Json.toJSON (map toBase64 signed)]
+  finalized <- rpc node "finalizepsbt" [Json.String (toBase64 combined)]
+  at "complete" finalized `shouldReturn` Json.Bool True
+  tx <- either fail return . S.decode . hexBytes =<< textAt "hex" finalized
+  (psbtTransaction =<< finalizePsbt btcRegTest combined) `shouldBe` Right tx
+  rpc node "sendrawtransaction" [Json.String (encodeHex (S.encode tx))]
+    `shouldReturn` Json.String (txHashToHex (txHash tx))
+
+-- | 'complexChecks' on PSBTs that a node of Bitcoin Core makes and signs as
+-- the tests run, as it made data/psbt_complex_core32.json. Set the variable
+-- @HASKOIN_COMPLEX_PSBT@ to the path of a file to keep them there, in the
+-- form of that file.
+coreComplexSpec :: Spec
+coreComplexSpec =
+  describe
+    ( "The PSBT of nine coins of every kind, which twelve wallets of Bitcoin Core "
+        <> coreVersion
+        <> " sign as the tests run"
+    )
+    $ aroundNode complexOfNode
+    $ do
+      version2Combination
+      complexChecks
+
+-- | Eight coins, one of each kind and each in wallets of its own, and the
+-- change of the miner that paid them: a PSBT spends all nine, each wallet
+-- signs it without finalizing, and Bitcoin Core combines, finalizes and
+-- extracts. The transaction pays almost all of the change in fees, which
+-- does not matter, since it is never sent.
+complexOfNode :: Node -> IO Complex
+complexOfNode node = do
+  _ <- rpc node "createwallet" [Json.String "miner"]
+  miner <- text =<< walletRpc node "miner" "getnewaddress" []
+  mine node 101
+  singles <-
+    mapM
+      single
+      [ ("p2pkh", \k -> "pkh(" <> k <> ")"),
+        ("p2sh_pk", \k -> "sh(pk(" <> k <> "))"),
+        ("p2sh_wsh_pk", \k -> "sh(wsh(pk(" <> k <> ")))"),
+        ("p2wpkh", \k -> "wpkh(" <> k <> ")"),
+        ("p2wsh_pk", \k -> "wsh(pk(" <> k <> "))")
+      ]
+  multis <-
+    mapM
+      multi
+      [ ("p2sh_ms", \m -> "sh(" <> m <> ")"),
+        ("p2sh_wsh_ms", \m -> "sh(wsh(" <> m <> "))"),
+        ("p2wsh_ms", \m -> "wsh(" <> m <> ")")
+      ]
+  let coins = singles <> multis
+  let amounts = Json.object [Key.fromText a .= (0.5 :: Double) | (a, _) <- coins]
+  funding <- text =<< walletRpc node "miner" "sendmany" [Json.String "", amounts]
+  outputs <- list =<< at "vout" =<< rpc node "getrawtransaction" [Json.String funding, Json.Bool True]
+  initial <-
+    text
+      =<< rpc
+        node
+        "createpsbt"
+        [ Json.toJSON [Json.object ["txid" .= funding, "vout" .= i] | i <- [0 .. length outputs - 1]],
+          Json.toJSON [Json.object [Key.fromText miner .= (3.99 :: Double)]]
+        ]
+  -- Each wallet leaves its signatures as partial signatures. Without
+  -- finalize=false, Core would finalize the inputs it can complete alone.
+  let signers = "miner" : concatMap snd coins
+  -- The arguments: the PSBT, sign, the sighash type, bip32derivs, finalize
+  let unfinalized = [Json.String initial, Json.Bool True, "ALL", Json.Bool True, Json.Bool False]
+  signed <- forM signers $ \w -> textAt "psbt" =<< walletRpc node w "walletprocesspsbt" unfinalized
+  combined <- text =<< rpc node "combinepsbt" [Json.toJSON signed]
+  complete <- textAt "psbt" =<< rpc node "finalizepsbt" [Json.String combined, Json.Bool False]
+  final <- textAt "hex" =<< rpc node "finalizepsbt" [Json.String combined, Json.Bool True]
+  let file =
+        Json.object $
+          ["initial_psbt" .= initial]
+            <> [Key.fromText (w <> "_psbt") .= s | (w, s) <- zip signers signed]
+            <> ["combined_psbt" .= combined, "complete_psbt" .= complete, "final_tx" .= final]
+  lookupEnv "HASKOIN_COMPLEX_PSBT" >>= mapM_ (\path -> BL.writeFile path (Json.encode file))
+  case Json.fromJSON file of
+    Json.Success complex -> return complex
+    Json.Error e -> fail ("The PSBTs of the node do not read: " <> e)
+  where
+    -- A wallet holds the private key of the coin
+    single (name, wrap) = do
+      let k = testKey (encodeUtf8 ("complex " <> name))
+      _ <- rpc node "createwallet" [Json.String name]
+      importDescriptor node name =<< withChecksum (wrap k.wif)
+      (,[name]) <$> addressOf (wrap k.publicHex)
+    -- Three wallets each hold one of the private keys of the coin, and the
+    -- first two sign
+    multi (name, wrap) = do
+      let ks = [testKey (encodeUtf8 ("complex " <> name <> " " <> T.pack (show i))) | i <- [1 .. 3 :: Int]]
+          keysOf i = [if j == i then k.wif else k.publicHex | (j, k) <- zip [1 ..] ks]
+          sorted i = "sortedmulti(2," <> T.intercalate "," (keysOf i) <> ")"
+          wallets = [name <> "_" <> T.pack (show i) | i <- [1 .. 3 :: Int]]
+      forM_ (zip [1 ..] wallets) $ \(i, w) -> do
+        _ <- rpc node "createwallet" [Json.String w]
+        importDescriptor node w =<< withChecksum (wrap (sorted i))
+      (,take 2 wallets) <$> addressOf (wrap (sorted (0 :: Int)))
+    withChecksum d = (\c -> d <> "#" <> c) <$> (textAt "checksum" =<< rpc node "getdescriptorinfo" [Json.String d])
+    addressOf d = do
+      public <- textAt "descriptor" =<< rpc node "getdescriptorinfo" [Json.String d]
+      firstText =<< rpc node "deriveaddresses" [Json.String public]
+
+-- | Mine blocks that pay the wallet of the miner
+mine :: Node -> Int -> IO ()
+mine node n = do
+  address <- walletRpc node "miner" "getnewaddress" []
+  _ <- rpc node "generatetoaddress" [Json.toJSON n, address]
+  return ()
+
+-- | Import a descriptor into a wallet, or fail with the reason the wallet
+-- gives
+importDescriptor :: Node -> Text -> Text -> IO ()
+importDescriptor node wallet descriptor = do
+  let request = Json.object ["desc" .= descriptor, "timestamp" .= ("now" :: Text)]
+  results <- list =<< walletRpc node wallet "importdescriptors" [Json.toJSON [request]]
+  forM_ results $ \r ->
+    at "success" r >>= \case
+      Json.Bool True -> return ()
+      _ -> fail ("The wallet " <> T.unpack wallet <> " refused " <> T.unpack descriptor <> ": " <> show r)
+
+emptyArray :: Json.Value
+emptyArray = Json.toJSON ([] :: [Json.Value])
+
+text :: Json.Value -> IO Text
+text (Json.String t) = return t
+text v = fail ("Not text: " <> show v)
+
+list :: Json.Value -> IO [Json.Value]
+list v = case Json.fromJSON v of
+  Json.Success l -> return l
+  Json.Error _ -> fail ("Not a list: " <> show v)
+
+firstText :: Json.Value -> IO Text
+firstText v =
+  list v >>= \case
+    first' : _ -> text first'
+    [] -> fail "An empty list"
+
+fromBase64 :: Text -> IO Psbt
+fromBase64 = either fail return . decodePsbtBase64 . encodeUtf8
+
+toBase64 :: Psbt -> Text
+toBase64 = decodeUtf8 . encodePsbtBase64
 
 {- The files of Bitcoin Core 32.1 -}
 

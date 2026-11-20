@@ -73,6 +73,7 @@ tests:
       - QuickCheck >= 2.13.2
       - lens-aeson >= 1.1
       - lens >= 4.18.1
+      - podman-test >= 0.1
 benchmarks:
   bench:
     main: Bench.hs
