@@ -920,9 +920,9 @@ releases before 2.0.0 take.
 
 Pull requests are welcome.
 
-- Format the code with [Ormolu](https://github.com/tweag/ormolu). The script
-  [scripts/format](https://github.com/jprupp/haskoin-core/blob/master/scripts/format)
-  does this for all the sources.
+- Format the code with [Ormolu](https://github.com/tweag/ormolu).
+  `haskell-format`, from [jprupp/tools](https://github.com/jprupp/tools),
+  does this for every Haskell file in the repository.
 - Add tests for the behaviour you change.
 - Describe the change under `[Unreleased]` in `CHANGELOG.md`. The file follows
   [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and versions follow
