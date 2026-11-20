@@ -16,6 +16,7 @@ import Data.Bytes.Put (runPutS)
 import Data.Bytes.Serial (deserialize, serialize)
 import Data.Default (def)
 import Data.Either (isLeft)
+import Data.List (isInfixOf)
 import Data.Maybe (fromJust, isJust)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -416,7 +417,7 @@ spec = do
       -- outputs of every kind, of any network, read on any network
       forAll ((,) <$> arbitraryNetwork <*> (arbitraryNetwork >>= \other -> arbitraryScriptOutput other)) $ \(net, out) ->
         let bytes = encodeSerial out
-         in scriptToAddressBS net bytes `shouldBe` parsedField net bytes
+         in scriptToAddressBS net bytes `shouldBe` parsed net bytes
     prop "reads bytes that are nearly of a standard kind as the parser reads them" $
       -- a standard script with one byte changed, or one too many or too few
       forAll ((,,) <$> arbitraryNetwork <*> elements standardShapes <*> arbitrary) $ \(net, hex, (i, w, cut)) -> do
@@ -427,7 +428,11 @@ spec = do
               0 -> changed
               1 -> changed <> "\x00"
               _ -> B.take (B.length changed - 1) changed
-        scriptToAddressBS net bytes `shouldBe` parsedField net bytes
+        if isJust net.cashAddrPrefix && B.take 1 bytes == "\xef"
+          then -- A token prefix takes at least 34 bytes, and these have at
+          -- most 35, which leaves no room for a script that has an address.
+            scriptToAddressBS net bytes `shouldSatisfy` isLeft
+          else scriptToAddressBS net bytes `shouldBe` parsed net bytes
     it "recovers the address of every standard locking script on a network that has its kind" $
       forM_ scriptTable $ \(net, a, hex) ->
         assertEqual (T.unpack hex) (Right a) (scriptToAddressBS net (fromJust (decodeHex hex)))
@@ -505,10 +510,12 @@ spec = do
       forM_ tokenOutputs $ \(field, _, _) ->
         forM_ [btc, btcTest, btcTest4, btcRegTest] $ \net ->
           scriptToAddressBS net (fromJust (decodeHex field)) `shouldSatisfy` isLeft
-    it "have no address with a prefix that is not valid" $
-      -- no token flag set, then a P2PKH script
-      scriptToAddressBS bch (fromJust (decodeHex (T.take 66 tokenField4 <> "00" <> T.drop 76 tokenField4)))
-        `shouldSatisfy` isLeft
+    it "have no address with a prefix that is not valid" $ do
+      -- the prefix byte and the category, no token flag set, then a P2PKH script
+      let field = T.take 66 tokenField4 <> "00" <> T.drop 78 tokenField4
+      T.drop 66 field `shouldBe` "0076a9146e0810ceea13412b73feb41566a3d2d0ce54e10188ac"
+      scriptToAddressBS bch (fromJust (decodeHex field))
+        `shouldSatisfy` either ("must encode at least one token" `isInfixOf`) (const False)
     prop "have the address of the script after any valid prefix" $
       forAll ((,,) <$> arbitraryTokenData <*> arbitraryScriptOutput bch <*> elements [bch, bchTest]) $
         \(t, out, net) -> do
@@ -941,13 +948,6 @@ slowBase58 bs = T.replicate (B.length zeros) "1" <> T.pack (map (T.index alphabe
 -- 'scriptToAddressBS' did for every script until haskoin-core 1.6.2.
 parsed :: Network -> ByteString -> Either String Address
 parsed net bytes = maybeToEither "Could not decode address" . outputAddress net =<< decodeSerial bytes
-
--- | 'parsed' for the script field of an output, after its token prefix on a
--- network that has CashTokens.
-parsedField :: Network -> ByteString -> Either String Address
-parsedField net bytes
-  | isJust net.cashAddrPrefix, hasTokenPrefix bytes = parsed net . snd =<< splitTokenData bytes
-  | otherwise = parsed net bytes
 
 -- | Outputs of BCH transaction
 -- e3abdbdc093c08cab3d6c23c320ca61f23c6e2cf4d8b3058398dcf0e78f5a809, in block

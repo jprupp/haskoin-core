@@ -3,6 +3,8 @@
 
 module Haskoin.Script.CashTokenSpec (spec) where
 
+import Control.DeepSeq (force)
+import Control.Exception (evaluate)
 import Control.Monad (forM_)
 import Data.Aeson (Value, eitherDecode, parseJSON, toJSON, (.:))
 import Data.Aeson.Types (Parser, parseEither, withObject)
@@ -18,6 +20,7 @@ import Haskoin.Script
 import Haskoin.Transaction.Common (TxHash, hexToTxHash)
 import Haskoin.Util
 import Haskoin.Util.Arbitrary
+import System.Timeout (timeout)
 import Test.Hspec
 import Test.Hspec.QuickCheck (prop)
 import Test.QuickCheck (forAll)
@@ -63,6 +66,20 @@ spec = do
       (eitherDecode (tokenJson "\"0\"") :: Either String TokenData) `shouldSatisfy` isLeft
     it "refuses a negative amount" $
       (eitherDecode (tokenJson "-1") :: Either String TokenData) `shouldSatisfy` isLeft
+    it "refuses an amount above the maximum, as a string or a number" $ do
+      (eitherDecode (tokenJson "\"9223372036854775808\"") :: Either String TokenData) `shouldSatisfy` isLeft
+      (eitherDecode (tokenJson "9223372036854775808") :: Either String TokenData) `shouldSatisfy` isLeft
+      eitherDecode (tokenJson "\"9223372036854775807\"")
+        `shouldBe` Right (TokenData category maxTokenAmount Nothing)
+    it "takes only decimal digits in a string amount" $
+      forM_ ["0x10", "0o20", "0b1", " 16", "16 ", "(16)", "016", "+16", "1e1", "", "\x0661"] $ \a ->
+        (eitherDecode (tokenJson ("\"" <> a <> "\"")) :: Either String TokenData) `shouldSatisfy` isLeft
+    it "refuses a number with a huge exponent at once" $ do
+      -- Building this number would take seconds and hundreds of megabytes.
+      result <- timeout 1000000 (evaluate (force (eitherDecode (tokenJson "1e100000000") :: Either String TokenData)))
+      fmap isLeft result `shouldBe` Just True
+    it "refuses a number that is not whole" $
+      (eitherDecode (tokenJson "1.5") :: Either String TokenData) `shouldSatisfy` isLeft
   describe "CashTokens test vectors" $ do
     it "reads and writes every valid token prefix" $ do
       vectors <- readTestFile "cashtokens_prefix_valid.json" :: IO [Value]

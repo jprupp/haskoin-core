@@ -18,8 +18,10 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
   `encodeTokenPrefix` writes a prefix. `TokenData` has `Serial`, `Binary`,
   `Serialize`, `Read`, `Show` and JSON instances; the JSON is that of the
   CashTokens test vectors and of the RPC of Bitcoin Cash Node, with the
-  amount as a string. The official test vectors of the token prefix, 62 valid
-  and 55 invalid, are in `data/` and pass.
+  amount as a string. The parser reads the amount strictly: a string of
+  decimal digits without a leading zero, or a whole number whose exponent is
+  checked before the number is built. The official test vectors of the token
+  prefix, 62 valid and 55 invalid, are in `data/` and pass.
 - `tokenAwareAddress` gives the token-aware CashAddr of a P2PKH, P2SH or
   P2SH32 address (type 2 or 3), and `plainAddress` turns a token-aware
   address back into its plain form.
@@ -35,6 +37,18 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
   or 1, as for an output without tokens and as Bitcoin Cash Node shows it, so
   that the coins of one script stay under one address. A script field with a
   prefix that is not valid still has no address. On Bitcoin nothing changed.
+
+  **Upgrading an index of addresses.** An index built with an earlier version
+  left these outputs out of the balances of their addresses. With 3.1.0 the
+  same stored scripts have addresses, so when such an output is spent, its
+  value is taken from a balance it was never added to. Rebuild the index, or
+  add the outputs that hold tokens to it, before running it with 3.1.0.
+  haskoin-store does the second in its migration to database version 24.
+
+  Nothing in the address says that an output holds tokens. A server that
+  lists the unspent outputs of an address must give their tokens too, from
+  `splitTokenData`, or a wallet may spend them as plain coins and burn the
+  tokens.
 - `splitTokenPrefix` is written on top of `splitTokenData`. It accepts and
   refuses the same prefixes as before.
 

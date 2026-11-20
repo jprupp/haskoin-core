@@ -760,6 +760,18 @@ too, with the tokens beside it. Use `tokenAwareAddress` to show or hand out the
 token-aware form, and `plainAddress` to turn a token-aware address that a user
 gives back into the address that `scriptToAddressBS` returns.
 
+The other side of that choice: nothing in the address says that an output
+holds tokens. A server that lists the unspent outputs of an address must give
+the tokens of each one too, from `splitTokenData`, so that a wallet can leave
+them out. A wallet that spends such an output as a plain coin burns its tokens,
+or signs without the token prefix and has the transaction refused. Nothing in
+this library signs these outputs.
+
+Before 3.1.0 these outputs had no address. An index of addresses built with an
+older version left them out, and must be rebuilt, or have them added, before it
+runs with 3.1.0. Otherwise spending one of them takes from a balance an amount
+that was never added to it.
+
 What is not checked: the rules that need the whole transaction, such as the
 category being an input of it and the amounts adding up, and the limit on the
 length of a commitment, which is a validation rule that has changed between

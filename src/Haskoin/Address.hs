@@ -777,7 +777,7 @@ addressToScriptBS addr = (runPutS . serialize) <$> addressToScript addr
 -- On the Bitcoin Cash networks, a script that starts with the token prefix
 -- byte 0xef, which parses as @OP_INVALIDOPCODE 0xef@, is the script field of
 -- an output that holds tokens. It is handled as 'scriptToAddressBS' handles
--- it. Most such fields do not parse as a 'Script' at all: give their bytes to
+-- it. Most such fields do not parse as a t'Script' at all: give their bytes to
 -- 'scriptToAddressBS'.
 scriptToAddress :: Network -> Script -> Either String Address
 scriptToAddress net script
@@ -828,6 +828,19 @@ scriptToAddress net script
 -- token-aware form would split its history and its balance in two. Read the
 -- tokens with 'splitTokenData', and show the token-aware form with
 -- 'tokenAwareAddress' where a user wants it.
+--
+-- So nothing in the address says that an output holds tokens. A program that
+-- serves the unspent outputs of an address must also give the tokens of each
+-- one, from 'splitTokenData'. A wallet that spent such an output as a plain
+-- coin would burn its tokens, or sign a digest without the token prefix and
+-- see the transaction refused: see 'Haskoin.Script.SigHash.txSigHashCashToken'.
+-- This is the mistake that token-aware addresses exist to prevent, and the
+-- server has to prevent it by other means.
+--
+-- Before version 3.1.0 these outputs had no address. An index of addresses
+-- built with an older version left them out, and must be built again, or have
+-- them added, before it runs with this one: otherwise it takes away from a
+-- balance an output that it never added when that output is spent.
 scriptToAddressBS :: Network -> ByteString -> Either String Address
 scriptToAddressBS net bytes
   | isJust net.cashAddrPrefix,

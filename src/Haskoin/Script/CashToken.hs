@@ -100,9 +100,10 @@ import Data.ByteString qualified as B
 import Data.Bytes.Get (MonadGet (getByteString, getWord8, remaining))
 import Data.Bytes.Put (MonadPut (putByteString, putWord8), runPutS)
 import Data.Bytes.Serial (Serial (..))
+import Data.Char (isDigit, ord)
 import Data.Hashable (Hashable)
 import Data.Maybe (isJust)
-import Data.Scientific (floatingOrInteger)
+import Data.Scientific (toBoundedInteger)
 import Data.Serialize (Serialize (..))
 import Data.Serialize qualified as S
 import Data.Text qualified as T
@@ -111,7 +112,6 @@ import GHC.Generics (Generic)
 import Haskoin.Network.Common (VarInt (VarInt), putVarInt)
 import Haskoin.Transaction.Common (TxHash, txHashToHex)
 import Haskoin.Util.Helpers (decodeHex, encodeHex)
-import Text.Read (readMaybe)
 
 -- | What a non-fungible token allows its holder to do, besides spending it.
 data TokenCapability
@@ -181,7 +181,7 @@ hasTokenPrefix bytes = case B.uncons bytes of
 --
 -- The locking script is returned as bytes, not parsed, since it may be any
 -- bytes at all, and so it can go to
--- 'Haskoin.Address.scriptToAddressBS' or 'Haskoin.Util.decodeSerial'.
+-- 'Haskoin.Address.scriptToAddressBS' or 'Haskoin.Util.Marshal.decodeSerial'.
 splitTokenData :: ByteString -> Either String (Maybe TokenData, ByteString)
 splitTokenData bytes
   | hasTokenPrefix bytes = do
@@ -312,9 +312,16 @@ instance FromJSON NFToken where
 -- @
 --
 -- The amount is a string, since it may be larger than a JavaScript number
--- can hold exactly. The parser also takes a number. @nft@ is absent when
--- there is no non-fungible token. The parser refuses a value that
--- 'validTokenData' refuses.
+-- can hold exactly. @nft@ is absent when there is no non-fungible token. The
+-- parser refuses a value that 'validTokenData' refuses.
+--
+-- The parser reads an amount strictly, so that two programs reading the same
+-- JSON cannot disagree on it. A string must be decimal digits only, with no
+-- sign, space or leading zero, as the test vectors and Bitcoin Cash Node
+-- write it. 'read' would also take @0x10@, @(16)@ or @ 16@. A number must be
+-- a whole number in range. Its exponent is checked before the number is
+-- built, so a short text such as @1e100000000@ is refused at once, where
+-- building it would take seconds and hundreds of megabytes.
 instance ToJSON TokenData where
   toJSON t =
     object $
@@ -339,10 +346,22 @@ instance FromJSON TokenData where
     where
       parseAmount :: Value -> Parser Word64
       parseAmount = \case
-        String s | Just n <- readMaybe (T.unpack s) -> integral n
-        Number n | Right i <- (floatingOrInteger n :: Either Double Integer) -> integral i
-        _ -> fail "Token amount is not an integer"
-      integral :: Integer -> Parser Word64
-      integral n
-        | n < 0 || n > fromIntegral maxTokenAmount = fail "Token amount out of range"
-        | otherwise = return (fromIntegral n)
+        String s
+          | decimal s -> inRange (T.foldl' digit 0 s)
+          | otherwise -> fail "Token amount is not a string of decimal digits"
+        Number n
+          | Just i <- toBoundedInteger n -> inRange i
+          | otherwise -> fail "Token amount is not an integer in range"
+        _ -> fail "Token amount is not a string or a number"
+      -- At most 19 digits, which always fit in a 'Word64'. The largest
+      -- amount has 19.
+      decimal s =
+        not (T.null s)
+          && T.length s <= 19
+          && T.all isDigit s
+          && (s == "0" || T.head s /= '0')
+      digit acc c = acc * 10 + fromIntegral (ord c - ord '0')
+      inRange :: Word64 -> Parser Word64
+      inRange n
+        | n > maxTokenAmount = fail "Token amount out of range"
+        | otherwise = return n
