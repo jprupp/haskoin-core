@@ -934,8 +934,12 @@ haskell-dev docs           # build the documentation and check its comments
 
 `haskell-dev.toml` tells it which spec modules are slow, so that it shares
 them between the test processes. Do not mix the two kinds of build in one
-folder: the flags differ, so each switch compiles everything again. Never
-time the library with `haskell-dev`: see [Benchmarks](#benchmarks).
+folder. When no source has changed, Stack does not see that the flags have,
+and keeps the objects of the other build: a plain `stack build` right after
+`haskell-dev build` gives a library without optimisation. Only what runs from
+this folder uses it, such as the tests: a package that depends on haskoin-core
+builds its own copy. After the next change to a source, everything compiles
+again. Never time the library with `haskell-dev`: see [Benchmarks](#benchmarks).
 
 `package.yaml` is the source of the package description. Change it rather than
 `haskoin-core.cabal`, which [hpack](https://github.com/sol/hpack) generates. Stack

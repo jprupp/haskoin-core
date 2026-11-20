@@ -67,8 +67,9 @@ The notes save the next session the research this session paid for.
   be on the `PATH`. Its settings for this package are in `haskell-dev.toml`.
   A change to the script itself is a change to jprupp/tools.
 - `stack build`, `stack test`, `stack haddock` and `stack bench` are the
-  release build. Do not mix them with `haskell-dev` in one session: each
-  switch compiles everything again.
+  release build. Do not mix them with `haskell-dev` in one session. With no
+  source changed, a switch builds nothing and keeps the objects of the other
+  flags; after a change, it compiles everything again.
 - `haskell-dev` builds without optimisation. Never time the library with it:
   the benchmarks run with `stack bench`, as the README says.
 
