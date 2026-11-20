@@ -7,13 +7,38 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 
 ## [3.0.0] - 2026-11-20
 
-This release breaks backwards compatibility in one place: the `Network` record
-has a new field, `asertAnchorBlock`, so code that builds a `Network` field by
-field, or uses its constructor positionally, must change. Code that only reads
-networks, or updates a copy of one, compiles as before. The testnet3 networks
-are deprecated and still work.
+This release breaks backwards compatibility in two places:
+
+- The `Network` record has a new field, `asertAnchorBlock`, so code that
+  builds a `Network` field by field, or uses its constructor positionally,
+  must change. Code that only reads networks, or updates a copy of one,
+  compiles as before.
+- On Bitcoin Cash, outputs that hold CashTokens now have an address. An index
+  of addresses built with an earlier version must be rebuilt, or have these
+  outputs added, before it runs with 3.0.0: see "Upgrading an index of
+  addresses" below.
+
+The testnet3 networks are deprecated and still work.
 
 ### Added
+
+- **CashTokens (CHIP-2022-02).** The new module `Haskoin.Script.CashToken`,
+  exported by `Haskoin.Script` and `Haskoin`, reads and writes the token
+  prefix that Bitcoin Cash puts at the front of the script field of an
+  output that holds tokens. `splitTokenData` splits a script field into a
+  `TokenData` (category, fungible amount, and an `NFToken` with its
+  `TokenCapability` and commitment) and the locking script after it.
+  `encodeTokenPrefix` writes a prefix. `TokenData` has `Serial`, `Binary`,
+  `Serialize`, `Read`, `Show` and JSON instances; the JSON is that of the
+  CashTokens test vectors and of the RPC of Bitcoin Cash Node, with the
+  amount as a string. The parser reads the amount strictly: a string of
+  decimal digits without a leading zero, or a whole number whose exponent is
+  checked before the number is built. The official test vectors of the token
+  prefix, 62 valid and 55 invalid, are in `data/` and pass.
+- `tokenAwareAddress` gives the token-aware CashAddr of a P2PKH, P2SH or
+  P2SH32 address (type 2 or 3), and `plainAddress` turns a token-aware
+  address back into its plain form.
+- `arbitraryTokenData` and `arbitraryNFToken` in `Haskoin.Util.Arbitrary`.
 - **The `Network` record holds the aserti3-2d anchor block where it is known**,
   in the new field `asertAnchorBlock`: block 661647 on Bitcoin Cash mainnet
   and block 16844 on testnet4, the constants of Bitcoin Cash Node.
@@ -27,6 +52,7 @@ are deprecated and still work.
   builds a `Network` record field by field must now set this field.
 
 ### Deprecated
+
 - **The testnet3 networks, `btcTest` and `bchTest`.** Using them gives a
   deprecation warning; use `btcTest4` and `bchTest4`. Bitcoin Core has
   deprecated testnet3 and says it will remove it in an upcoming release.
@@ -36,6 +62,29 @@ are deprecated and still work.
   version will remove them.
 
 ### Changed
+
+- **Outputs that hold tokens have an address on Bitcoin Cash.**
+  `scriptToAddressBS` and `scriptToAddress` take the token prefix off before
+  they match the templates, on the Bitcoin Cash networks only. Before, such an
+  output had no address: transaction e3abdbdc…f5a809 of block 978089 had none
+  for four of its five outputs. The address is the plain form, CashAddr type 0
+  or 1, as for an output without tokens and as Bitcoin Cash Node shows it, so
+  that the coins of one script stay under one address. A script field with a
+  prefix that is not valid still has no address. On Bitcoin nothing changed.
+
+  **Upgrading an index of addresses.** An index built with an earlier version
+  left these outputs out of the balances of their addresses. With 3.0.0 the
+  same stored scripts have addresses, so when such an output is spent, its
+  value is taken from a balance it was never added to. Rebuild the index, or
+  add the outputs that hold tokens to it, before running it with 3.0.0.
+  haskoin-store does the second in its migration to database version 24.
+
+  Nothing in the address says that an output holds tokens. A server that
+  lists the unspent outputs of an address must give their tokens too, from
+  `splitTokenData`, or a wallet may spend them as plain coins and burn the
+  tokens.
+- `splitTokenPrefix` is written on top of `splitTokenData`. It accepts and
+  refuses the same prefixes as before.
 - The benchmark `headers` checks before it times that its 2,000 headers
   connect, so a change that made them fail cannot look fast. It also times
   `connectBlock` of one header with and without a known anchor.

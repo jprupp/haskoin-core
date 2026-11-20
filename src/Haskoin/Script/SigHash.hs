@@ -69,6 +69,7 @@ import Haskoin.Crypto.Hash
 import Haskoin.Crypto.Signature
 import Haskoin.Network.Common
 import Haskoin.Network.Data
+import Haskoin.Script.CashToken (splitTokenData)
 import Haskoin.Script.Common
 import Haskoin.Transaction.Common
 import Haskoin.Util
@@ -362,7 +363,7 @@ buildOutputs txos i sh
 --   token data, and their output script starts with the prefix byte 0xef,
 --   which 'Haskoin.Script.Standard.decodeOutput' does not read. Their
 --   digest is 'txSigHashCashToken', with the prefix that 'splitTokenPrefix'
---   takes off the script.
+--   takes off the script. "Haskoin.Script.CashToken" reads the prefix.
 --
 -- * Schnorr signatures as a 'TxSignature'. They are verified by
 --   'Haskoin.Crypto.Signature.verifyCashSchnorr', and by
@@ -453,58 +454,14 @@ txSigHashCashToken net tx prefix out v i sh
 -- prefix and the output script after it. An output without tokens has an
 -- empty prefix. 'Nothing' for a prefix that is not well formed.
 --
--- Since May 2023 an output may hold tokens (CashTokens). They are written
--- at the front of its script field: the byte @0xef@, the 32 bytes of the
--- token category, a byte of flags, and after it a commitment with its
--- length and an amount, each when its flag is set. What follows is the
--- output script that locks the coin.
+-- This gives the prefix as bytes, which is what 'txSigHashCashToken' needs.
+-- 'Haskoin.Script.CashToken.splitTokenData' reads the same prefix into a
+-- t'Haskoin.Script.CashToken.TokenData', and says what is wrong with one that
+-- is not well formed.
 splitTokenPrefix :: ByteString -> Maybe (ByteString, ByteString)
-splitTokenPrefix bytes
-  | B.null bytes || B.head bytes /= 0xef = Just (B.empty, bytes)
-  | B.length bytes < 34 = Nothing
-  | flags .&. 0x80 /= 0 = Nothing
-  -- tokens of some kind, a commitment only with a non-fungible one, and
-  -- a capability of none, mutable or minting, only with one too
-  | not hasNft && not hasAmount = Nothing
-  | not hasNft && (hasCommitment || capability /= 0) = Nothing
-  | capability > 2 = Nothing
-  | otherwise = do
-      afterCommitment <-
-        if hasCommitment
-          then do
-            (n, rest) <- compact afterFlags
-            if n == 0 || fromIntegral (B.length rest) < n then Nothing else Just (B.drop (fromIntegral n) rest)
-          else Just afterFlags
-      afterAmount <-
-        if hasAmount
-          then do
-            (n, rest) <- compact afterCommitment
-            if n == 0 || n > 0x7fffffffffffffff then Nothing else Just rest
-          else Just afterCommitment
-      Just (B.splitAt (B.length bytes - B.length afterAmount) bytes)
-  where
-    flags = B.index bytes 33
-    afterFlags = B.drop 34 bytes
-    hasCommitment = flags .&. 0x40 /= 0
-    hasNft = flags .&. 0x20 /= 0
-    hasAmount = flags .&. 0x10 /= 0
-    capability = flags .&. 0x0f
-    -- a number in the compact form of the protocol, in its shortest
-    -- encoding only
-    compact :: ByteString -> Maybe (Word64, ByteString)
-    compact b = case B.uncons b of
-      Nothing -> Nothing
-      Just (w, rest)
-        | w < 0xfd -> Just (fromIntegral w, rest)
-        | w == 0xfd -> sized 2 0xfd rest
-        | w == 0xfe -> sized 4 0x10000 rest
-        | otherwise -> sized 8 0x100000000 rest
-    sized k least rest
-      | B.length rest < k = Nothing
-      | n < least = Nothing
-      | otherwise = Just (n, B.drop k rest)
-      where
-        n = B.foldr (\w acc -> acc `shiftL` 8 .|. fromIntegral w) 0 (B.take k rest)
+splitTokenPrefix bytes = case splitTokenData bytes of
+  Left _ -> Nothing
+  Right (_, rest) -> Just (B.splitAt (B.length bytes - B.length rest) bytes)
 
 -- | Data type representing a signature together with a 'SigHash'. The 'SigHash'
 -- is serialized as one byte at the end of an ECDSA 'Sig'. All signatures in

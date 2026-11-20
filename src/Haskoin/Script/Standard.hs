@@ -233,8 +233,11 @@ maxWitnessScriptSize = 10000
 --   Bitcoin Core counts as a push.
 --
 -- On Bitcoin Cash, an output that holds tokens starts with the token prefix
--- byte 0xef and is not decoded. See 'Haskoin.Script.SigHash.txSigHashForkId'
--- for what is not supported on that network.
+-- byte 0xef and is not decoded: the prefix is not a script. Take it off with
+-- 'Haskoin.Script.CashToken.splitTokenData' and decode the rest, or call
+-- 'Haskoin.Address.scriptToAddressBS', which does both on that network. See
+-- 'Haskoin.Script.SigHash.txSigHashForkId' for what else is not supported
+-- there.
 decodeOutput :: Script -> Either String ScriptOutput
 decodeOutput s = case s.ops of
   -- Pay to PubKey

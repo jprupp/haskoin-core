@@ -523,3 +523,29 @@ arbitraryMulSigSHInputFullC net =
       sigs <- map lst3 <$> vectorOf m (arbitraryTxSignature net)
       return $ ScriptHashInput (SpendMulSig sigs) rdm
     _ -> undefined
+
+-- | Arbitrary valid t'TokenData'. The amounts cover every size of compact
+-- number up to 'maxTokenAmount', and the commitments every length up to 300
+-- bytes, so that both the short and the three-byte length are written.
+arbitraryTokenData :: Gen TokenData
+arbitraryTokenData = do
+  category <- TxHash <$> arbitraryHash256
+  nft <- arbitraryMaybe arbitraryNFToken
+  let amounts =
+        [ choose (1, 0xfc),
+          choose (0xfd, 0xffff),
+          choose (0x10000, 0xffffffff),
+          choose (0x100000000, maxTokenAmount)
+        ]
+  amount <- case nft of
+    Nothing -> oneof amounts
+    Just _ -> oneof (return 0 : amounts)
+  return TokenData {category = category, amount = amount, nft = nft}
+
+-- | Arbitrary t'NFToken', with or without a commitment.
+arbitraryNFToken :: Gen NFToken
+arbitraryNFToken = do
+  capability <- arbitraryBoundedEnum
+  len <- frequency [(1, return 0), (4, choose (1, 40)), (1, choose (41, 300))]
+  commitment <- B.pack <$> vectorOf len arbitrary
+  return NFToken {capability = capability, commitment = commitment}

@@ -36,8 +36,8 @@ storage.
 | Networks     | Bitcoin and Bitcoin Cash: mainnet, testnet4 and regtest; testnet3, deprecated                                        |
 | Keys         | secp256k1 keys, WIF, BIP-32 extended keys and paths, BIP-39 mnemonics, SLIP-39 Shamir shares                         |
 | Signatures   | Deterministic ECDSA (RFC 6979) and BIP-340 Schnorr                                                                   |
-| Addresses    | Base58, Bech32, Bech32m and CashAddr, including token-aware CashAddr types                                           |
-| Scripts      | Script parsing and serialization, standard input and output templates, BIP-67 sorted multisig                        |
+| Addresses    | Base58, Bech32, Bech32m and CashAddr, including P2SH32 and the token-aware CashAddr types                            |
+| Scripts      | Script parsing and serialization, standard templates, BIP-67 sorted multisig, the CashTokens prefix                  |
 | Transactions | Building, signing and verifying P2PK, P2PKH, P2SH, multisig, P2WPKH, P2WSH, nested SegWit and Taproot key path spends |
 | Wallet tools | Coin selection, and weight, size and fee estimates                                                                   |
 | PSBT         | Versions 0 and 2, with the Taproot fields (BIP-174, BIP-370, BIP-371)                                                |
@@ -58,8 +58,8 @@ storage.
 - **Signing with Schnorr signatures, `SIGHASH_UTXOS` and token outputs of
   Bitcoin Cash.** `judgeInputs` verifies a Schnorr signature, of one key
   or in a multisig, and the spend of a coin that holds tokens.
-  Nothing here signs them, `verifyStdTx` does not read them, and an
-  output with tokens has no address.
+  Nothing here signs them, and `verifyStdTx` does not read them. The tokens
+  of an output and its address are read: see [Bitcoin Cash](#bitcoin-cash).
 - **BIP-324 encrypted transport.**
 - **BIP-39 word lists other than English.**
 
@@ -715,6 +715,68 @@ print (addrToText bch (xPubWitnessAddr (deriveXPubKey key)))
 `signTx` sets the fork id flag of the signature hash when the network needs it.
 Pass `sigHashAll` as usual.
 
+#### CashTokens
+
+An output of Bitcoin Cash can hold tokens (CHIP-2022-02). They are written at
+the front of the script field of the output, before the locking script, as a
+token prefix that starts with the byte `0xef`. `splitTokenData` reads the
+prefix into a `TokenData`, with the category, the fungible amount and the
+non-fungible token, and gives back the locking script after it.
+`encodeTokenPrefix` writes the prefix. `scriptToAddressBS` takes the prefix off
+by itself on the Bitcoin Cash networks; on Bitcoin `0xef` is no prefix, and
+such a script has no address.
+
+```haskell
+-- Output 4 of transaction e3abdbdc…f5a809 holds 110,830 tokens on a P2PKH script.
+field <-
+  maybe (fail "bad hex") pure . decodeHex $
+    "ef2c06f3b2565d0818a8e41f58beff5918d5dbdc64b11ee8ad474e499751cde07f10feeeb00100\
+    \76a9146e0810ceea13412b73feb41566a3d2d0ce54e10188ac"
+
+-- The address is that of the locking script, in its plain form.
+let address = either error id (scriptToAddressBS bch field)
+print (addrToText bch address)
+-- => Just "bitcoincash:qphqsyxwagf5z2mnl66p2e4r6tgvu48pqyhmvay0uy"
+
+-- The token-aware form of the same address, for a wallet that handles tokens.
+print (addrToText bch =<< tokenAwareAddress address)
+-- => Just "bitcoincash:zphqsyxwagf5z2mnl66p2e4r6tgvu48pqys3lr2frh"
+
+-- The tokens.
+let tokens = either error fst (splitTokenData field)
+print (fmap (.amount) tokens)
+-- => Just 110830
+print (fmap (.category) tokens)
+-- => Just "7fe0cd5197494e47ade81eb164dcdbd51859ffbe581fe4a818085d56b2f3062c"
+```
+
+Why the plain form: a token-aware CashAddr (type 2 for P2PKH, 3 for P2SH and
+P2SH32) locks coins with the same script as the plain one. It only tells a
+sender that the receiver will not burn tokens by spending them as plain coins.
+A wallet receives coins with and without tokens at the same script, so an index
+that used the token-aware form for outputs with tokens would split the history
+and the balance of one address in two. Bitcoin Cash Node shows the plain form
+too, with the tokens beside it. Use `tokenAwareAddress` to show or hand out the
+token-aware form, and `plainAddress` to turn a token-aware address that a user
+gives back into the address that `scriptToAddressBS` returns.
+
+The other side of that choice: nothing in the address says that an output
+holds tokens. A server that lists the unspent outputs of an address must give
+the tokens of each one too, from `splitTokenData`, so that a wallet can leave
+them out. A wallet that spends such an output as a plain coin burns its tokens,
+or signs without the token prefix and has the transaction refused. Nothing in
+this library signs these outputs.
+
+Before 3.0.0 these outputs had no address. An index of addresses built with an
+older version left them out, and must be rebuilt, or have them added, before it
+runs with 3.0.0. Otherwise spending one of them takes from a balance an amount
+that was never added to it.
+
+What is not checked: the rules that need the whole transaction, such as the
+category being an input of it and the amounts adding up, and the limit on the
+length of a commitment, which is a validation rule that has changed between
+network upgrades.
+
 ### Blocks and headers
 
 ```haskell
@@ -809,7 +871,7 @@ modules you need, or to import it qualified.
 | `Haskoin.Crypto`              | Hashes, keys, signatures and the `Crypto.Secp256k1` API              |
 | `Haskoin.Crypto.Keys.Slip39`  | SLIP-39 secret sharing (separate import)                             |
 | `Haskoin.Network`             | Network constants, P2P messages, Bloom filters                       |
-| `Haskoin.Script`              | Scripts, standard templates and signature hashes                     |
+| `Haskoin.Script`              | Scripts, standard templates, signature hashes and CashTokens         |
 | `Haskoin.Transaction`         | Transaction types, builder, signing, SegWit, Taproot and PSBT        |
 | `Haskoin.Util`                | Hexadecimal helpers, `Marshal` and small utilities                   |
 | `Haskoin.Util.Direct`         | Serializers run straight on a buffer (separate import)               |
