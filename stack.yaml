@@ -2,6 +2,9 @@ resolver: nightly-2026-10-28
 extra-deps:
   - base16-2.0
   - secp256k1-haskell-3.0.0
+  # Not on Hackage yet: it must be before haskoin-core is released
+  - git: https://github.com/jprupp/podman-test.git
+    commit: ed0d53a2f54c431f648690f287d36ae269c70de6
 nix:
   packages:
     - secp256k1

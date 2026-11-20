@@ -968,6 +968,27 @@ regenerates the file whenever it builds.
 The tests are in `test/` and use [hspec](https://hspec.github.io/). The test
 vectors from the BIPs, Bitcoin Core and other implementations are in `data/`.
 
+Some tests check the library against a node of Bitcoin Core 32.1 on regtest:
+the library signs the PSBTs that Bitcoin Core makes, for every kind of coin,
+and Bitcoin Core accepts the transactions; twelve wallets sign a PSBT of nine
+coins, and the library must combine, finalize and extract it as Bitcoin Core
+does. They need rootless [Podman](https://podman.io/) on Linux: each group of
+these tests starts a node of its own in a container, through
+[podman-test](https://github.com/jprupp/podman-test), so test processes that
+run at once share nothing. The first run builds the image of the node, which
+downloads Ubuntu and Bitcoin Core and takes a minute or two; after that a node
+starts in a few seconds. Without Podman these tests are pending, and say why;
+set `PODMAN_TEST_SKIP` to leave them out on purpose. The image and the RPC
+client are in `test/BitcoinCore.hs`.
+
+`data/psbt_complex_core32.json` comes from such a node. To make a new one, run
+the tests with the path of the file in `HASKOIN_COMPLEX_PSBT`, and format it
+with `jq .` as the other files of `data/` are:
+
+```sh
+HASKOIN_COMPLEX_PSBT=/tmp/complex.json haskell-dev test --match "sign as the tests run"
+```
+
 ### Benchmarks
 
 The benchmarks are in `bench/Bench.hs` and use
