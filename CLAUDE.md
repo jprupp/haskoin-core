@@ -57,15 +57,19 @@ The notes save the next session the research this session paid for.
 
 ## Build and test
 
-- Build: `scripts/dev build`
-- All tests: `scripts/dev test`
-- One spec: `scripts/dev test Psbt` (a word of the module name;
+- Build: `haskell-dev build`
+- All tests: `haskell-dev test`
+- One spec: `haskell-dev test Psbt` (a word of the module name;
   `--match "/Haskoin.Block/asert/"` narrows it)
-- Documentation: `scripts/dev docs`
+- Documentation: `haskell-dev docs`
+- `haskell-dev` is a script of [jprupp/tools](https://github.com/jprupp/tools),
+  shared with the other packages, and not a file of this repository. It must
+  be on the `PATH`. Its settings for this package are in `haskell-dev.toml`.
+  A change to the script itself is a change to jprupp/tools.
 - `stack build`, `stack test`, `stack haddock` and `stack bench` are the
-  release build. Do not mix them with `scripts/dev` in one session: each
+  release build. Do not mix them with `haskell-dev` in one session: each
   switch compiles everything again.
-- `scripts/dev` builds without optimisation. Never time the library with it:
+- `haskell-dev` builds without optimisation. Never time the library with it:
   the benchmarks run with `stack bench`, as the README says.
 
 ## Keep the documentation up to date with every change
@@ -141,7 +145,7 @@ obvious, and no long chains of commands joined with `&&` or `;` on one line.
 
 ## Checks
 
-Build the documentation with `scripts/dev docs` and make sure it has no
+Build the documentation with `haskell-dev docs` and make sure it has no
 warnings about broken markup. The command ends with a check of the comments:
 a change must add nothing to what that check reports. CI builds the
 documentation too, with `stack haddock`, both with the OS libraries and with
@@ -172,11 +176,11 @@ Read a file before any work on what its line names.
 
 ### Running the checks
 
-- The check of `scripts/dev docs` reports 146 problems at 2.0.1, all older
+- The check of `haskell-dev docs` reports 146 problems at 2.0.1, all older
   than the script: 94 ambiguous names, 27 names out of scope, 19 slashes and
   6 links. Keep the lines after `Documentation check` in a file before the
   change, and compare with `diff` after it. The count is the same on each run.
-- A run under a memory limit: a clean `scripts/dev build` needs 1.2 GB for
+- A run under a memory limit: a clean `haskell-dev build` needs 1.2 GB for
   GHC, and each of the eight test processes about 100 MB.
 - The long-line check prints 978 lines at 2.0.1, most of them test vectors
   and `CHANGELOG.md`. With `grep -c` in place of `grep -n` it counts them for
