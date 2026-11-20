@@ -216,7 +216,9 @@ maxWitnessScriptSize = 10000
 -- (@multisig@ and @nulldata@). So never hash or sign the result of
 -- @encodeOutput@ in place of a script that came from somewhere else. Hash
 -- and sign the bytes of that script. 'decodeInput' refuses a redeem script
--- that would not come back as the same bytes.
+-- that would not come back as the same bytes, and
+-- 'Haskoin.Transaction.Segwit.decodeWitnessInput' refuses such a witness
+-- script.
 --
 -- Three kinds of script that the @Solver@ of Bitcoin Core classifies are not
 -- decoded here, because a 'PublicKey' holds a point of the curve:

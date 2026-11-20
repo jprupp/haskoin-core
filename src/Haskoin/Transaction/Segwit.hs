@@ -30,6 +30,7 @@ module Haskoin.Transaction.Segwit
   )
 where
 
+import Control.Monad (unless)
 import Crypto.Secp256k1
 import Data.ByteString (ByteString)
 import Data.Bytes.Get (runGetS)
@@ -111,7 +112,28 @@ viewWitnessProgram net so witness = case so of
     | null witness -> return EmptyWitnessProgram
     | otherwise -> Left "viewWitnessProgram: Invalid witness program"
 
--- | Analyze the witness, trying to match it with standard input structures
+-- | Match a witness program with the standard inputs. For a
+-- pay-to-witness-public-key-hash coin the answer is the signature and the
+-- key. For a pay-to-witness-script-hash coin it is the witness script as a
+-- 'ScriptOutput', and the input that such a script takes.
+--
+-- A 'ScriptOutput' does not keep the bytes of a script: see 'decodeOutput'.
+-- The caller only has 'encodeOutput' of the value returned here to hash
+-- and to sign, as 'Haskoin.Transaction.Builder.verifyStdInput' does. So a
+-- witness script that 'encodeOutput' would write back as other bytes is
+-- refused, as 'decodeInput' refuses such a redeem script. That is a
+-- multisig whose keys are not direct pushes.
+--
+-- Without this refusal, a spend verifies although its witness script is
+-- not the one the coin commits to: the hash and the digest are taken on
+-- the script written back, which is the one of the coin. By consensus the
+-- hash of the bytes in the witness must be the witness program (BIP 141),
+-- so no block holds that spend.
+--
+-- The cost: the spend of a coin that does commit to such a script is not
+-- read here, although a block may hold it. Nodes do not relay that spend
+-- (the @MINIMALDATA@ rule of the relay policy), and the signer of this
+-- library cannot make it.
 --
 -- @since 0.11.0.0
 decodeWitnessInput ::
@@ -122,6 +144,10 @@ decodeWitnessInput net = \case
   P2WPKH (WitnessProgramPKH sig key) -> return (Nothing, SpendPKHash sig key)
   P2WSH (WitnessProgramSH st scr) -> do
     so <- decodeOutput scr
+    -- A 'Script' is written as the bytes it was read from, so equal
+    -- scripts are equal bytes.
+    unless (encodeOutput so == Right scr) $
+      Left "decodeWitnessInput: the witness script is not in the form that encodeOutput writes"
     fmap (Just so,) $ case (so, st) of
       (PayPK _, [sigBS]) ->
         SpendPK <$> decodeTxSig net sigBS

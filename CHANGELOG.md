@@ -201,6 +201,25 @@ Bitcoin testnet3 is deprecated and still works.
   exceeded"). Whoever makes the coin chooses the leaf, so anyone could
   make such a transaction. The answers are now `False`, `False` and
   `InputUndecided`. A leaf of 999 keys or fewer is verified as before.
+- **`verifyStdInput`, `verifyStdTx` and `judgeInputs` no longer verify a
+  pay-to-witness-script-hash multisig input whose witness script is not the
+  script the coin commits to.** A multisig script can be written with each
+  key after `OP_PUSHDATA1`, `2` or `4`: the same keys, other bytes, another
+  hash. BIP 141 wants the hash of the witness script to be the witness
+  program, so no block holds a spend with such a copy of the script.
+  `decodeWitnessInput` read the copy as the same `PayMulSig`, and the
+  verifiers then took the hash and the digest on what `encodeOutput` writes
+  for that value, which is the script of the coin. So they answered `True`,
+  `True` and `InputVerified`, for the native form and for the form nested
+  in a script hash, where Bitcoin Core 32.1 refuses the spend in its mempool
+  and in a block ("Witness program hash mismatch"). Anyone can make such a
+  copy of a spend, without a key: the witness is not part of the
+  transaction id, and the signatures stay as they are. `decodeWitnessInput`
+  now refuses a witness script that `encodeOutput` would write back as other
+  bytes, as `decodeInput` does for a redeem script since 1.6.0, and the
+  three answers are `False`, `False` and `InputUndecided`. A coin that does
+  commit to such a script was not verified before and is not now: a block
+  may hold its spend, and nodes do not relay it.
 
 ## [2.0.1] - 2026-11-18
 

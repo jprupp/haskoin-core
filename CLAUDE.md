@@ -188,7 +188,8 @@ Read a file before any work on what its line names.
 - The check of `haskell-dev docs` reports 146 problems at 2.0.1, all older
   than the script: 94 ambiguous names, 27 names out of scope, 19 slashes and
   6 links. Keep the lines after `Documentation check` in a file before the
-  change, and compare with `diff` after it. The count is the same on each run.
+  change, and `diff` after it without the line numbers, which an edit
+  moves. The count is the same on each run.
 - A run under a memory limit: a clean `haskell-dev build` needs 1.2 GB for
   GHC, and each of the eight test processes about 100 MB.
 - The long-line check prints 978 lines at 2.0.1, most of them test vectors

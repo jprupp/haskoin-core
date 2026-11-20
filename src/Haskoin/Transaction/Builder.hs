@@ -792,6 +792,10 @@ spentCoins tx given =
 --   makes the operation fail.
 -- * The input script of a SegWit program nested in pay-to-script-hash is
 --   the push of the program and nothing else (BIP 141).
+-- * The witness script of a pay-to-witness-script-hash input is, byte for
+--   byte, the script whose hash the coin holds (BIP 141). A multisig
+--   script with the same keys pushed another way is another script:
+--   'decodeWitnessInput' refuses it.
 -- * A redeem script is at most 'maxRedeemScriptSize' bytes, and a witness
 --   script at most 'maxWitnessScriptSize'.
 -- * A multisig of Taproot has at most 999 keys, the limit of @multi_a@ in
@@ -808,6 +812,10 @@ spentCoins tx given =
 -- * A legacy multisig input with an empty item before its signatures
 --   leaves that item on the stack. Consensus allows it outside a witness,
 --   and the @CLEANSTACK@ rule of the relay policy does not.
+-- * A coin that commits to a multisig script whose keys are not direct
+--   pushes, as a redeem script or as a witness script. Its spend breaks
+--   the @MINIMALDATA@ rule of the relay policy. 'decodeInput' and
+--   'decodeWitnessInput' do not read such a script.
 --
 -- An uncompressed key in a SegWit input is accepted, since a block may
 -- hold it, although nodes do not relay it.

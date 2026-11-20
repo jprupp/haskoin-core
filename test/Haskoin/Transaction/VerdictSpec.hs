@@ -190,6 +190,86 @@ spec = do
       judgeInputs btc spend [locked] `shouldBe` [InputUndecided]
       judgeInputs btc (tampered spend) [locked] `shouldBe` [InputForged]
 
+  -- BIP 141: the last item of the witness is the witness script, and
+  -- "SHA256 of the witnessScript must match the 32-byte witness program" of
+  -- the coin. A multisig script has other spellings with the same keys:
+  -- each key after OP_PUSHDATA1 and its length. They are other bytes, with
+  -- another hash. The witness is not part of the transaction id, so anyone
+  -- can make that copy of a spend seen on the network, without a key. The
+  -- signatures stay as they are. The four spends below went to
+  -- Bitcoin Core 32.1 on regtest. It mined the two with the script of the
+  -- coin. It refused the two others, in a block too: "Witness program hash
+  -- mismatch".
+  describe "verifyStdTx and judgeInputs on the witness script of a multisig" $ do
+    let -- two signatures of three keys, each key after the push of its 0x21 = 33 bytes
+        committed =
+          hex
+            "5221031b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5\
+            \dd078f21024d4b6cd1361032ca9bd2aeb9d900aa4d45d9ead80ac9423374c451\
+            \a7254d07662102531fe6068134503d2723133227c867ac8fa6c83c537e9a44c3\
+            \c5bdbdcb1fe33753ae"
+        -- the same script with OP_PUSHDATA1 before the length of each key: 0x4c 0x21
+        respelled =
+          hex
+            "524c21031b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9\
+            \d5dd078f4c21024d4b6cd1361032ca9bd2aeb9d900aa4d45d9ead80ac9423374\
+            \c451a7254d07664c2102531fe6068134503d2723133227c867ac8fa6c83c537e\
+            \9a44c3c5bdbdcb1fe33753ae"
+        -- the script of a coin locked to the committed script: version 0 and its SHA-256
+        native = hex "002063ae81f48889f3ebcce92fc39fbb9fe63e409780e0855ec83a4fd3fbabdb1d97"
+        -- the script of a coin locked to the hash of those 34 bytes, which its spend pushes
+        nested = hex "a914564d22ea4f58d584581a583a1c166b3bac576c9387"
+        nativeSigs =
+          [ hex
+              "3045022100ed7967e9c66f5d5a564fbcc29f50665bcbd32ce570e60745fdad78\
+              \4624f4fe280220162ab62660b642ff8eba5ab63d35b2364c5a231bb86323c01e\
+              \f1c72649bbebf601",
+            hex
+              "304402200f50fde78f7e99ed7e3e62e8daeaba614906874e97badc436611e9bb\
+              \e36b968302205091d9399745a5bc6c195521bab9db4176dc629589e914310946\
+              \871a363fac3d01"
+          ]
+        nestedSigs =
+          [ hex
+              "3045022100f89c908335723920c0a73d9a64f15d84870b2b210c08d17932eb76\
+              \08838a49fc02205942d6ddb90f463c0a14f02ba50fb54722d88f54163e05289c\
+              \bcfd9fd8162e9101",
+            hex
+              "3045022100b2968abc569b51be887d7232a39809c7fc89ff85217b5a4fb51f25\
+              \7328f03a2202201866428e3a11412b028f344aa31aa529c50749c25357213ddd\
+              \4041db6409530001"
+          ]
+        funding = "718e60722e5e95b5d5e8b51c7b127d7a4abe13c7d3b3dc39a3329f6dd2e025ec"
+        -- The spend of an output of the funding transaction, a coin of
+        -- 1,000,000: it pays 998,000, and its witness is the empty item of
+        -- a multisig, the signatures and the witness script.
+        spend n inputScript sigs witnessScript =
+          Tx
+            { version = 2,
+              inputs = [TxIn (OutPoint funding n) inputScript maxBound],
+              outputs = [TxOut 998000 (hex "001479b000887626b294a914501a4cd226b58b235983")],
+              witness = [[""] <> sigs <> [witnessScript]],
+              locktime = 0
+            }
+        spendNative = spend 0 "" nativeSigs
+        spendNested = spend 1 (pushing [native]) nestedSigs
+        -- the answers of 'verifyStdTx' and of 'judgeInputs' for the spend of a coin
+        verdicts locked tx =
+          ( verifyStdTx btc tx [(either error id (decodeSerial locked), 1000000, (head tx.inputs).outpoint)],
+            judgeInputs btc tx [Just (TxOut 1000000 locked)]
+          )
+    it "verify the spend whose witness script is the one the coin commits to, native and nested" $ do
+      verdicts native (spendNative committed) `shouldBe` (True, [InputVerified])
+      verdicts nested (spendNested committed) `shouldBe` (True, [InputVerified])
+    it "do not verify the spend whose witness script has the same keys in other bytes" $ do
+      verdicts native (spendNative respelled) `shouldBe` (False, [InputUndecided])
+      verdicts nested (spendNested respelled) `shouldBe` (False, [InputUndecided])
+    it "the transaction id is the same with either witness script" $ do
+      txHash (spendNative committed) `shouldBe` "839c20e76404a63c13f52ba1d0315a021da94d2bf1db35b6cdd87e0a0c184849"
+      txHash (spendNative respelled) `shouldBe` "839c20e76404a63c13f52ba1d0315a021da94d2bf1db35b6cdd87e0a0c184849"
+      txHash (spendNested committed) `shouldBe` "ef83742b3c751f249a87c7bd3c1b67b4c31178f0717ce34db4267822e68ed530"
+      txHash (spendNested respelled) `shouldBe` "ef83742b3c751f249a87c7bd3c1b67b4c31178f0717ce34db4267822e68ed530"
+
   describe "judgeInputs on Bitcoin Cash" $ do
     let unsigned = spending "" []
         digest prefix = txSigHashCashToken bch unsigned prefix pkhScript value 0 (setForkIdFlag sigHashAll)

@@ -1110,6 +1110,15 @@ segwitSpec =
       decodeWitnessInput btc (P2WSH (WitnessProgramSH [sigBytes] multisigScript)) `shouldBe` Left "decodeWitnessInput: Non-standard script output"
       decodeWitnessInput btc EmptyWitnessProgram `shouldBe` Left "decodeWitnessInput: Empty witness program"
 
+    -- A 'ScriptOutput' does not keep the form of a push, so the multisig
+    -- below would be written back with the key after a direct push: other
+    -- bytes, which the coin does not commit to.
+    it "a witness script that would be written back as other bytes is refused" $ do
+      let keyAfterPushData1 = Script [OP_1, OP_PUSHDATA keyBytes OPDATA1, OP_1, OP_CHECKMULTISIG]
+      decodeOutput keyAfterPushData1 `shouldBe` Right multisig
+      decodeWitnessInput btc (P2WSH (WitnessProgramSH ["", sigBytes] keyAfterPushData1))
+        `shouldBe` Left "decodeWitnessInput: the witness script is not in the form that encodeOutput writes"
+
     it "a witness program is computed from a standard input, native or nested" $ do
       calcWitnessProgram btc (PayWitnessPKHash h) (RegularInput (SpendPKHash sig p)) `shouldBe` Right (P2WPKH (WitnessProgramPKH sig p))
       calcWitnessProgram btc (either error id (toP2SH =<< encodeOutput (PayWitnessPKHash h))) (RegularInput (SpendPKHash sig p)) `shouldBe` Right (P2WPKH (WitnessProgramPKH sig p))
