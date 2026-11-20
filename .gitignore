@@ -16,6 +16,8 @@ cabal.sandbox.config
 *.hp
 *.eventlog
 .stack-work/
+# The work folder of the documentation (scripts/dev docs)
+.stack-work-docs/
 cabal.project.local
 cabal.project.local~
 .HTF/

@@ -55,6 +55,19 @@ The notes save the next session the research this session paid for.
   two, by the parts of its feature.
 - **Report.** Name each change to the notes in one line of your report.
 
+## Build and test
+
+- Build: `scripts/dev build`
+- All tests: `scripts/dev test`
+- One spec: `scripts/dev test Psbt` (a word of the module name;
+  `--match "/Haskoin.Block/asert/"` narrows it)
+- Documentation: `scripts/dev docs`
+- `stack build`, `stack test`, `stack haddock` and `stack bench` are the
+  release build. Do not mix them with `scripts/dev` in one session: each
+  switch compiles everything again.
+- `scripts/dev` builds without optimisation. Never time the library with it:
+  the benchmarks run with `stack bench`, as the README says.
+
 ## Keep the documentation up to date with every change
 
 Every change to this repository must update all the documentation it affects,
@@ -128,9 +141,11 @@ obvious, and no long chains of commands joined with `&&` or `;` on one line.
 
 ## Checks
 
-Build the documentation with `stack haddock --no-haddock-deps` and make sure it
-has no warnings about broken markup. CI builds it too, both with the OS
-libraries and with `stack --nix`.
+Build the documentation with `scripts/dev docs` and make sure it has no
+warnings about broken markup. The command ends with a check of the comments:
+a change must add nothing to what that check reports. CI builds the
+documentation too, with `stack haddock`, both with the OS libraries and with
+`stack --nix`.
 
 List the lines of 120 columns or more with
 `git ls-files '*.hs' '*.yaml' '*.cabal' '*.md' | xargs grep -n '.\{120,\}'`,
@@ -157,12 +172,12 @@ Read a file before any work on what its line names.
 
 ### Running the checks
 
-- `stack haddock --no-haddock-deps` on a tree that Stack already built prints
-  six lines and no warning, because it ran nothing. `touch` on a source file
-  does not change that. Add `--force-dirty`: 14 seconds for the 52 modules.
-- That run prints 204 lines that start with `Warning` at 2.0.1. None is about
-  markup: names that are ambiguous or out of scope, and links to packages with
-  no documentation. Keep the log in a file and compare with `grep -c '^Warning'`.
+- The check of `scripts/dev docs` reports 146 problems at 2.0.1, all older
+  than the script: 94 ambiguous names, 27 names out of scope, 19 slashes and
+  6 links. Keep the lines after `Documentation check` in a file before the
+  change, and compare with `diff` after it. The count is the same on each run.
+- A run under a memory limit: a clean `scripts/dev build` needs 1.2 GB for
+  GHC, and each of the eight test processes about 100 MB.
 - The long-line check prints 978 lines at 2.0.1, most of them test vectors
   and `CHANGELOG.md`. With `grep -c` in place of `grep -n` it counts them for
   each file: compare the counts before and after the change.
