@@ -923,17 +923,37 @@ stack haddock --no-haddock-deps                     # build the API documentatio
 
 These commands build the library as it is released, with optimisation, which
 takes minutes. For the time between two commits there is a faster loop:
-`haskell-dev`, from [jprupp/tools](https://github.com/jprupp/tools), on your
-`PATH`.
+`haskell-dev`, a script of [jprupp/tools](https://github.com/jprupp/tools).
+Clone that repository once and put its folder on your `PATH`, for example in
+`~/.bashrc`; a terminal opened before the change needs `source ~/.bashrc`.
 
 ```sh
-haskell-dev build          # build without optimisation: seconds, not minutes
-haskell-dev test Slip39    # run the tests in several processes at once
-haskell-dev docs           # build the documentation and check its comments
+git clone https://github.com/jprupp/tools.git ~/Source/tools
+echo 'export PATH="$HOME/Source/tools:$PATH"' >> ~/.bashrc
 ```
 
-`haskell-dev.toml` tells it which spec modules are slow, so that it shares
-them between the test processes. Do not mix the two kinds of build in one
+Then run it from the top folder of haskoin-core:
+
+```sh
+haskell-dev test                                # build, then run all the tests
+haskell-dev test Psbt                           # the specs with Psbt in their module name
+haskell-dev test Psbt Block                     # the specs of several modules
+haskell-dev test --match "/Haskoin.Block/asert/"  # one path, in one process
+haskell-dev test --seed 12345                   # run a failure again
+haskell-dev test --jobs 4                       # fewer processes, to save memory
+haskell-dev build                               # build without optimisation
+haskell-dev docs                                # build the documentation and check its comments
+```
+
+`test` builds first, so a separate `build` is not needed. A clean build takes
+about 30 seconds, and a run of all the tests 5 to 10, against minutes for
+`stack test`. The tests run in several processes at once, and
+`haskell-dev.toml` tells the script which spec modules are slow, so that it
+shares them between the processes. When a test fails, the output gives the
+seed: run the test again alone with `--seed` and `--match` on its path, which
+prints the usual output of hspec.
+
+Do not mix the two kinds of build in one
 folder. When no source has changed, Stack does not see that the flags have,
 and keeps the objects of the other build: a plain `stack build` right after
 `haskell-dev build` gives a library without optimisation. Only what runs from
