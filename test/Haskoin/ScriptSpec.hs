@@ -228,10 +228,86 @@ namedOpcodes =
     (0xbb, OP_CHECKDATASIGVERIFY),
     (0xbc, OP_REVERSEBYTES),
     (0xbd, OP_INVALIDOPCODE 0xbd),
+    (0xc0, OP_INPUTINDEX),
+    (0xc1, OP_ACTIVEBYTECODE),
+    (0xc2, OP_TXVERSION),
+    (0xc3, OP_TXINPUTCOUNT),
+    (0xc4, OP_TXOUTPUTCOUNT),
+    (0xc5, OP_TXLOCKTIME),
+    (0xc6, OP_UTXOVALUE),
+    (0xc7, OP_UTXOBYTECODE),
+    (0xc8, OP_OUTPOINTTXHASH),
+    (0xc9, OP_OUTPOINTINDEX),
+    (0xca, OP_INPUTBYTECODE),
+    (0xcb, OP_INPUTSEQUENCENUMBER),
+    (0xcc, OP_OUTPUTVALUE),
+    (0xcd, OP_OUTPUTBYTECODE),
+    (0xce, OP_UTXOTOKENCATEGORY),
+    (0xcf, OP_UTXOTOKENCOMMITMENT),
+    (0xd0, OP_UTXOTOKENAMOUNT),
+    (0xd1, OP_OUTPUTTOKENCATEGORY),
+    (0xd2, OP_OUTPUTTOKENCOMMITMENT),
+    (0xd3, OP_OUTPUTTOKENAMOUNT),
+    (0xd4, OP_RESERVED3),
+    (0xd5, OP_RESERVED4),
+    (0xd6, OP_INVALIDOPCODE 0xd6),
     (0xfc, OP_INVALIDOPCODE 0xfc),
     (0xfd, OP_PUBKEYHASH),
     (0xfe, OP_PUBKEY),
     (0xff, OP_INVALIDOPCODE 0xff)
+  ]
+
+-- | The bytes that Bitcoin Cash names differently, with the constructor and
+-- the pattern synonym of the Bitcoin Cash name.
+bitcoinCashNames :: [(Word8, ScriptOp, ScriptOp)]
+bitcoinCashNames =
+  [ (0x65, OP_VERIF, OP_BEGIN),
+    (0x66, OP_VERNOTIF, OP_UNTIL),
+    (0x7f, OP_SUBSTR, OP_SPLIT),
+    (0x80, OP_LEFT, OP_NUM2BIN),
+    (0x81, OP_RIGHT, OP_BIN2NUM),
+    (0x89, OP_RESERVED1, OP_DEFINE),
+    (0x8a, OP_RESERVED2, OP_INVOKE),
+    (0x8d, OP_2MUL, OP_LSHIFTNUM),
+    (0x8e, OP_2DIV, OP_RSHIFTNUM),
+    (0x98, OP_LSHIFT, OP_LSHIFTBIN),
+    (0x99, OP_RSHIFT, OP_RSHIFTBIN),
+    (0xba, OP_CHECKDATASIG, OP_CHECKSIGADD)
+  ]
+
+-- | Opcodes with the names that @GetOpName@ gives them in Bitcoin Core 32.1
+-- and in Bitcoin Cash Node 29.2.0.
+opNames :: [(ScriptOp, Text, Text)]
+opNames =
+  [ (OP_0, "0", "0"),
+    (OP_1NEGATE, "-1", "-1"),
+    (OP_16, "16", "16"),
+    (OP_PUSHDATA "a" OPCODE, "OP_UNKNOWN", "OP_UNKNOWN"),
+    (OP_PUSHDATA "a" OPDATA1, "OP_PUSHDATA1", "OP_PUSHDATA1"),
+    (OP_PUSHDATA "a" OPDATA4, "OP_PUSHDATA4", "OP_PUSHDATA4"),
+    (OP_DUP, "OP_DUP", "OP_DUP"),
+    (OP_CHECKSIG, "OP_CHECKSIG", "OP_CHECKSIG"),
+    (OP_VERIF, "OP_VERIF", "OP_BEGIN"),
+    (OP_VERNOTIF, "OP_VERNOTIF", "OP_UNTIL"),
+    (OP_SUBSTR, "OP_SUBSTR", "OP_SPLIT"),
+    (OP_LEFT, "OP_LEFT", "OP_NUM2BIN"),
+    (OP_RIGHT, "OP_RIGHT", "OP_BIN2NUM"),
+    (OP_RESERVED1, "OP_RESERVED1", "OP_DEFINE"),
+    (OP_RESERVED2, "OP_RESERVED2", "OP_INVOKE"),
+    (OP_2MUL, "OP_2MUL", "OP_LSHIFTNUM"),
+    (OP_2DIV, "OP_2DIV", "OP_RSHIFTNUM"),
+    (OP_LSHIFT, "OP_LSHIFT", "OP_LSHIFTBIN"),
+    (OP_RSHIFT, "OP_RSHIFT", "OP_RSHIFTBIN"),
+    (OP_CHECKDATASIG, "OP_CHECKSIGADD", "OP_CHECKDATASIG"),
+    (OP_CHECKDATASIGVERIFY, "OP_UNKNOWN", "OP_CHECKDATASIGVERIFY"),
+    (OP_REVERSEBYTES, "OP_UNKNOWN", "OP_REVERSEBYTES"),
+    (OP_INPUTINDEX, "OP_UNKNOWN", "OP_INPUTINDEX"),
+    (OP_OUTPUTTOKENAMOUNT, "OP_UNKNOWN", "OP_OUTPUTTOKENAMOUNT"),
+    (OP_RESERVED4, "OP_UNKNOWN", "OP_RESERVED4"),
+    (OP_PUBKEYHASH, "OP_UNKNOWN", "OP_UNKNOWN"),
+    (OP_INVALIDOPCODE 0xef, "OP_UNKNOWN", "SPECIAL_TOKEN_PREFIX"),
+    (OP_INVALIDOPCODE 0xff, "OP_INVALIDOPCODE", "OP_UNKNOWN"),
+    (OP_INVALIDOPCODE 0xac, "OP_CHECKSIG", "OP_CHECKSIG")
   ]
 
 {- Opcodes and pushes -}
@@ -252,6 +328,16 @@ opcodeSpec = do
     OP_CHECKSIGADD `shouldBe` OP_CHECKDATASIG
     runPutS (serialize OP_CHECKSIGADD) `shouldBe` B.singleton 0xba
     (case OP_CHECKDATASIG of OP_CHECKSIGADD -> True; _ -> False) `shouldBe` True
+  it "calls the twelve bytes that Bitcoin Cash renamed by both names" $
+    forM_ bitcoinCashNames $ \(b, op, alias) -> do
+      (b, alias) `shouldBe` (b, op)
+      (b, runPutS (serialize alias)) `shouldBe` (b, B.singleton b)
+  it "names opcodes as the reference node of each network does" $
+    forM_ opNames $ \(op, core, bchn) -> do
+      -- Every network of a chain, its testnets included, names them alike.
+      forM_ allNets $ \net -> do
+        let name = if isJust net.sigHashForkId then bchn else core
+        (op, net.name, opName net op) `shouldBe` (op, net.name, name)
   it "shows and reads opcode names" $ do
     show OP_CHECKLOCKTIMEVERIFY `shouldBe` "OP_CHECKLOCKTIMEVERIFY"
     readMaybe "OP_DUP" `shouldBe` Just OP_DUP

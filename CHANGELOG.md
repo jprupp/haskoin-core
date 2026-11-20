@@ -22,6 +22,23 @@ The testnet3 networks are deprecated and still work.
 
 ### Added
 
+- **The opcodes of Bitcoin Cash.** `ScriptOp` has constructors for the
+  introspection opcodes of May 2022, `OP_INPUTINDEX` (0xc0) to
+  `OP_OUTPUTBYTECODE` (0xcd), the token opcodes of May 2023,
+  `OP_UTXOTOKENCATEGORY` (0xce) to `OP_OUTPUTTOKENAMOUNT` (0xd3), and
+  `OP_RESERVED3` and `OP_RESERVED4` (0xd4, 0xd5). These bytes used to parse as
+  `OP_INVALIDOPCODE`. Code that matches every constructor of `ScriptOp` must
+  handle them.
+- **Bitcoin Cash names of renamed opcodes,** as pattern synonyms: `OP_BEGIN`,
+  `OP_UNTIL`, `OP_SPLIT`, `OP_NUM2BIN`, `OP_BIN2NUM`, `OP_DEFINE`, `OP_INVOKE`,
+  `OP_LSHIFTNUM`, `OP_RSHIFTNUM`, `OP_LSHIFTBIN` and `OP_RSHIFTBIN` are the
+  same values as `OP_VERIF`, `OP_VERNOTIF`, `OP_SUBSTR`, `OP_LEFT`,
+  `OP_RIGHT`, `OP_RESERVED1`, `OP_RESERVED2`, `OP_2MUL`, `OP_2DIV`,
+  `OP_LSHIFT` and `OP_RSHIFT`, as `OP_CHECKSIGADD` already was for
+  `OP_CHECKDATASIG`.
+- `opName` gives the name of an opcode on a network, as `GetOpName` of
+  Bitcoin Core 32.1 or of Bitcoin Cash Node 29.2.0 gives it. A network and its
+  testnets share their names.
 - **CashTokens (CHIP-2022-02).** The new module `Haskoin.Script.CashToken`,
   exported by `Haskoin.Script` and `Haskoin`, reads and writes the token
   prefix that Bitcoin Cash puts at the front of the script field of an

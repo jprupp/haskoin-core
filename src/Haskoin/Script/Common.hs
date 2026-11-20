@@ -3,6 +3,7 @@
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE NoFieldSelectors #-}
@@ -20,6 +21,18 @@ module Haskoin.Script.Common
   ( -- * Scripts
     ScriptOp (..),
     pattern OP_CHECKSIGADD,
+    pattern OP_BEGIN,
+    pattern OP_UNTIL,
+    pattern OP_SPLIT,
+    pattern OP_NUM2BIN,
+    pattern OP_BIN2NUM,
+    pattern OP_DEFINE,
+    pattern OP_INVOKE,
+    pattern OP_LSHIFTNUM,
+    pattern OP_RSHIFTNUM,
+    pattern OP_LSHIFTBIN,
+    pattern OP_RSHIFTBIN,
+    opName,
     Script (..),
     PushDataType (..),
     isPushOp,
@@ -43,10 +56,13 @@ import Data.Bytes.Get
 import Data.Bytes.Put
 import Data.Bytes.Serial
 import Data.Hashable
-import Data.Maybe (isJust)
+import Data.Maybe (fromMaybe, isJust)
+import Data.Text (Text)
+import qualified Data.Text as T
 import Data.Serialize (Serialize (..))
 import Data.Word (Word8)
 import GHC.Generics (Generic)
+import Haskoin.Network.Data (Network (..))
 import Haskoin.Util (hexBuilder)
 import Haskoin.Util.Helpers (decodeHex, encodeHex, hexEncoding)
 
@@ -110,6 +126,28 @@ data PushDataType
   deriving (Show, Read, Eq, Generic, Hashable, NFData)
 
 -- | Data type representing an operator allowed inside a 'Script'.
+--
+-- One type serves both chains, with one constructor for each byte. Bitcoin
+-- and Bitcoin Cash split a script into opcodes in the same way: the same
+-- bytes, the same pushes, the same lengths. They differ in the names of
+-- twelve bytes and in what some bytes do when a script runs, which matters
+-- to an interpreter and not to a parser. So a script parses and serializes
+-- without a network, and the chains share every type built on it:
+-- addresses, PSBTs, signature hashes.
+--
+-- * The constructors of those twelve bytes carry the Bitcoin name, but for
+--   0xba, which carries the Bitcoin Cash name 'OP_CHECKDATASIG'. Each has a
+--   pattern synonym for the name of the other chain, such as 'OP_SPLIT' for
+--   'OP_SUBSTR' and 'OP_CHECKSIGADD' for 'OP_CHECKDATASIG': both names build
+--   and match the same value.
+-- * The opcodes that only Bitcoin Cash defines, from 0xbb to 0xd5, have
+--   constructors of their own: their bytes have no name on Bitcoin.
+-- * 'opName' gives the name that the reference node of a network prints.
+--
+-- Separate types for each chain were rejected: they would add a network to
+-- every parse of a script, for names alone. Which opcodes a chain enables, at
+-- which height, and the bytes that make a Tapscript succeed at once belong to
+-- an interpreter, which this library does not have.
 --
 -- An 'OP_PUSHDATA' must carry a payload that fits its 'PushDataType': at most
 -- 75 bytes for 'OPCODE', 255 for 'OPDATA1', 65535 for 'OPDATA2'. Serializing
@@ -250,6 +288,31 @@ data ScriptOp
   | OP_CHECKDATASIGVERIFY
   | -- Bitcoin Cash May 2020 hard fork
     OP_REVERSEBYTES
+  | -- Bitcoin Cash May 2022 hard fork: native introspection, 0xc0 to 0xcd
+    OP_INPUTINDEX
+  | OP_ACTIVEBYTECODE
+  | OP_TXVERSION
+  | OP_TXINPUTCOUNT
+  | OP_TXOUTPUTCOUNT
+  | OP_TXLOCKTIME
+  | OP_UTXOVALUE
+  | OP_UTXOBYTECODE
+  | OP_OUTPOINTTXHASH
+  | OP_OUTPOINTINDEX
+  | OP_INPUTBYTECODE
+  | OP_INPUTSEQUENCENUMBER
+  | OP_OUTPUTVALUE
+  | OP_OUTPUTBYTECODE
+  | -- Bitcoin Cash May 2023 hard fork: introspection of tokens, 0xce to 0xd3
+    OP_UTXOTOKENCATEGORY
+  | OP_UTXOTOKENCOMMITMENT
+  | OP_UTXOTOKENAMOUNT
+  | OP_OUTPUTTOKENCATEGORY
+  | OP_OUTPUTTOKENCOMMITMENT
+  | OP_OUTPUTTOKENAMOUNT
+  | -- Reserved by Bitcoin Cash Node, 0xd4 and 0xd5
+    OP_RESERVED3
+  | OP_RESERVED4
   | -- Other
     OP_PUBKEYHASH
   | OP_PUBKEY
@@ -262,6 +325,131 @@ data ScriptOp
 -- Bitcoin Cash name.
 pattern OP_CHECKSIGADD :: ScriptOp
 pattern OP_CHECKSIGADD = OP_CHECKDATASIG
+
+-- | Opcode 0x65 as Bitcoin Cash names it: starts a loop (May 2026). It is
+-- 'OP_VERIF' of Bitcoin, the same value.
+pattern OP_BEGIN :: ScriptOp
+pattern OP_BEGIN = OP_VERIF
+
+-- | Opcode 0x66 as Bitcoin Cash names it: ends a loop (May 2026). It is
+-- 'OP_VERNOTIF' of Bitcoin, the same value.
+pattern OP_UNTIL :: ScriptOp
+pattern OP_UNTIL = OP_VERNOTIF
+
+-- | Opcode 0x7f as Bitcoin Cash names it: splits a byte string in two (May 2018). It is
+-- 'OP_SUBSTR' of Bitcoin, the same value.
+pattern OP_SPLIT :: ScriptOp
+pattern OP_SPLIT = OP_SUBSTR
+
+-- | Opcode 0x80 as Bitcoin Cash names it: pads a number to a size (May 2018). It is
+-- 'OP_LEFT' of Bitcoin, the same value.
+pattern OP_NUM2BIN :: ScriptOp
+pattern OP_NUM2BIN = OP_LEFT
+
+-- | Opcode 0x81 as Bitcoin Cash names it: reads a byte string as a minimal number (May 2018). It is
+-- 'OP_RIGHT' of Bitcoin, the same value.
+pattern OP_BIN2NUM :: ScriptOp
+pattern OP_BIN2NUM = OP_RIGHT
+
+-- | Opcode 0x89 as Bitcoin Cash names it: defines a function (May 2026). It is
+-- 'OP_RESERVED1' of Bitcoin, the same value.
+pattern OP_DEFINE :: ScriptOp
+pattern OP_DEFINE = OP_RESERVED1
+
+-- | Opcode 0x8a as Bitcoin Cash names it: calls a function (May 2026). It is
+-- 'OP_RESERVED2' of Bitcoin, the same value.
+pattern OP_INVOKE :: ScriptOp
+pattern OP_INVOKE = OP_RESERVED2
+
+-- | Opcode 0x8d as Bitcoin Cash names it: shifts a number left (May 2026). It is
+-- 'OP_2MUL' of Bitcoin, the same value.
+pattern OP_LSHIFTNUM :: ScriptOp
+pattern OP_LSHIFTNUM = OP_2MUL
+
+-- | Opcode 0x8e as Bitcoin Cash names it: shifts a number right (May 2026). It is
+-- 'OP_2DIV' of Bitcoin, the same value.
+pattern OP_RSHIFTNUM :: ScriptOp
+pattern OP_RSHIFTNUM = OP_2DIV
+
+-- | Opcode 0x98 as Bitcoin Cash names it: shifts a byte string left (May 2026). It is
+-- 'OP_LSHIFT' of Bitcoin, the same value.
+pattern OP_LSHIFTBIN :: ScriptOp
+pattern OP_LSHIFTBIN = OP_LSHIFT
+
+-- | Opcode 0x99 as Bitcoin Cash names it: shifts a byte string right (May 2026). It is
+-- 'OP_RSHIFT' of Bitcoin, the same value.
+pattern OP_RSHIFTBIN :: ScriptOp
+pattern OP_RSHIFTBIN = OP_RSHIFT
+
+-- | The name that the reference node of a network gives an opcode, as its
+-- @GetOpName@ does in @src\/script\/script.cpp@: Bitcoin Core 32.1 on the
+-- Bitcoin networks, Bitcoin Cash Node 29.2.0 on the Bitcoin Cash networks. A
+-- network and its testnets share their names. These are the names that the
+-- @asm@ of a decoded script shows in the RPC of each node, so a program that
+-- prints scripts for one chain prints them as that chain does.
+--
+-- The twelve bytes that the chains name differently get the name of the
+-- chain: 0x7f is @OP_SUBSTR@ on Bitcoin and @OP_SPLIT@ on Bitcoin Cash, and
+-- 0xba is @OP_CHECKSIGADD@ on Bitcoin and @OP_CHECKDATASIG@ on Bitcoin Cash.
+-- A byte that the node does not name is @OP_UNKNOWN@: on Bitcoin, the
+-- opcodes that only Bitcoin Cash defines, and on both chains a direct push
+-- of 1 to 75 bytes and the template bytes 'OP_PUBKEYHASH' and 'OP_PUBKEY'.
+-- As upstream does, 'OP_0', 'OP_1NEGATE' and 'OP_1' to 'OP_16' are named by
+-- their numbers, @0@, @-1@ and @1@ to @16@; 0xff is @OP_INVALIDOPCODE@ on
+-- Bitcoin, and 0xef, the prefix of tokens, is @SPECIAL_TOKEN_PREFIX@ on
+-- Bitcoin Cash.
+--
+-- 'Show' cannot depend on the network, so it prints the name of the
+-- constructor, which is the Bitcoin name for the twelve bytes but 0xba. Use
+-- this function to show an opcode to a user.
+opName :: Network -> ScriptOp -> Text
+opName net op = case op of
+  OP_PUSHDATA _ OPCODE -> "OP_UNKNOWN"
+  OP_PUSHDATA _ OPDATA1 -> "OP_PUSHDATA1"
+  OP_PUSHDATA _ OPDATA2 -> "OP_PUSHDATA2"
+  OP_PUSHDATA _ OPDATA4 -> "OP_PUSHDATA4"
+  OP_0 -> "0"
+  OP_1NEGATE -> "-1"
+  OP_PUBKEYHASH -> "OP_UNKNOWN"
+  OP_PUBKEY -> "OP_UNKNOWN"
+  OP_INVALIDOPCODE b -> invalid b
+  _
+    | Right n <- scriptOpToInt op -> T.pack (show n)
+    | bitcoinCash -> fromMaybe (T.pack (show op)) (lookup op bitcoinCashNames)
+    | op == OP_CHECKDATASIG -> "OP_CHECKSIGADD"
+    | bitcoinCashOnly -> "OP_UNKNOWN"
+    | otherwise -> T.pack (show op)
+  where
+    bitcoinCash = isJust net.sigHashForkId
+    bitcoinCashNames =
+      [ (OP_BEGIN, "OP_BEGIN"),
+        (OP_UNTIL, "OP_UNTIL"),
+        (OP_SPLIT, "OP_SPLIT"),
+        (OP_NUM2BIN, "OP_NUM2BIN"),
+        (OP_BIN2NUM, "OP_BIN2NUM"),
+        (OP_DEFINE, "OP_DEFINE"),
+        (OP_INVOKE, "OP_INVOKE"),
+        (OP_LSHIFTNUM, "OP_LSHIFTNUM"),
+        (OP_RSHIFTNUM, "OP_RSHIFTNUM"),
+        (OP_LSHIFTBIN, "OP_LSHIFTBIN"),
+        (OP_RSHIFTBIN, "OP_RSHIFTBIN")
+      ]
+    -- The opcodes from 0xbb on, which Bitcoin Core does not define.
+    bitcoinCashOnly = B.head (runPutS (serialize op)) >= 0xbb
+    -- A byte without a constructor. One built by hand for a byte that has
+    -- a constructor is named as that constructor.
+    invalid b
+      | b == 0x00 = "0"
+      | b <= 0x4b = "OP_UNKNOWN"
+      | b == 0x4c = "OP_PUSHDATA1"
+      | b == 0x4d = "OP_PUSHDATA2"
+      | b == 0x4e = "OP_PUSHDATA4"
+      | b == 0xff, not bitcoinCash = "OP_INVALIDOPCODE"
+      | b == 0xef, bitcoinCash = "SPECIAL_TOKEN_PREFIX"
+      | Right named <- runGetS deserialize (B.singleton b),
+        named /= OP_INVALIDOPCODE b =
+          opName net named
+      | otherwise = "OP_UNKNOWN"
 
 instance Serial ScriptOp where
   {-# INLINEABLE serialize #-}
@@ -404,6 +592,29 @@ instance Serial ScriptOp where
         | op == 0xbb = return OP_CHECKDATASIGVERIFY
         -- Bitcoin Cash May 2020 hard fork
         | op == 0xbc = return OP_REVERSEBYTES
+        -- Bitcoin Cash May 2022 and May 2023 hard forks
+        | op == 0xc0 = return OP_INPUTINDEX
+        | op == 0xc1 = return OP_ACTIVEBYTECODE
+        | op == 0xc2 = return OP_TXVERSION
+        | op == 0xc3 = return OP_TXINPUTCOUNT
+        | op == 0xc4 = return OP_TXOUTPUTCOUNT
+        | op == 0xc5 = return OP_TXLOCKTIME
+        | op == 0xc6 = return OP_UTXOVALUE
+        | op == 0xc7 = return OP_UTXOBYTECODE
+        | op == 0xc8 = return OP_OUTPOINTTXHASH
+        | op == 0xc9 = return OP_OUTPOINTINDEX
+        | op == 0xca = return OP_INPUTBYTECODE
+        | op == 0xcb = return OP_INPUTSEQUENCENUMBER
+        | op == 0xcc = return OP_OUTPUTVALUE
+        | op == 0xcd = return OP_OUTPUTBYTECODE
+        | op == 0xce = return OP_UTXOTOKENCATEGORY
+        | op == 0xcf = return OP_UTXOTOKENCOMMITMENT
+        | op == 0xd0 = return OP_UTXOTOKENAMOUNT
+        | op == 0xd1 = return OP_OUTPUTTOKENCATEGORY
+        | op == 0xd2 = return OP_OUTPUTTOKENCOMMITMENT
+        | op == 0xd3 = return OP_OUTPUTTOKENAMOUNT
+        | op == 0xd4 = return OP_RESERVED3
+        | op == 0xd5 = return OP_RESERVED4
         -- Constants
         | op == 0xfd = return OP_PUBKEYHASH
         | op == 0xfe = return OP_PUBKEY
@@ -560,6 +771,29 @@ instance Serial ScriptOp where
     OP_CHECKDATASIGVERIFY -> putWord8 0xbb
     -- Bitcoin Cash May 2020 hard fork
     OP_REVERSEBYTES -> putWord8 0xbc
+    -- Bitcoin Cash May 2022 and May 2023 hard forks
+    OP_INPUTINDEX -> putWord8 0xc0
+    OP_ACTIVEBYTECODE -> putWord8 0xc1
+    OP_TXVERSION -> putWord8 0xc2
+    OP_TXINPUTCOUNT -> putWord8 0xc3
+    OP_TXOUTPUTCOUNT -> putWord8 0xc4
+    OP_TXLOCKTIME -> putWord8 0xc5
+    OP_UTXOVALUE -> putWord8 0xc6
+    OP_UTXOBYTECODE -> putWord8 0xc7
+    OP_OUTPOINTTXHASH -> putWord8 0xc8
+    OP_OUTPOINTINDEX -> putWord8 0xc9
+    OP_INPUTBYTECODE -> putWord8 0xca
+    OP_INPUTSEQUENCENUMBER -> putWord8 0xcb
+    OP_OUTPUTVALUE -> putWord8 0xcc
+    OP_OUTPUTBYTECODE -> putWord8 0xcd
+    OP_UTXOTOKENCATEGORY -> putWord8 0xce
+    OP_UTXOTOKENCOMMITMENT -> putWord8 0xcf
+    OP_UTXOTOKENAMOUNT -> putWord8 0xd0
+    OP_OUTPUTTOKENCATEGORY -> putWord8 0xd1
+    OP_OUTPUTTOKENCOMMITMENT -> putWord8 0xd2
+    OP_OUTPUTTOKENAMOUNT -> putWord8 0xd3
+    OP_RESERVED3 -> putWord8 0xd4
+    OP_RESERVED4 -> putWord8 0xd5
 
 instance Binary ScriptOp where
   put = serialize
