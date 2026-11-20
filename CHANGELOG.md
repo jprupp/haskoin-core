@@ -114,6 +114,30 @@ The testnet3 networks are deprecated and still work.
   form. Without Podman these tests are pending, and say why. The test suite
   depends on podman-test, which must be on Hackage before this release.
 
+### Fixed
+
+- **`judgeInputs` no longer says `InputVerified` for a witness key hash
+  nested in a script hash whose program is pushed by `OP_PUSHDATA1`, `2` or
+  `4`.** BIP 141 wants the input script to be exactly the push of the
+  program, Bitcoin Core takes the shortest push only, and no block holds
+  another form. `verifyStdInput` refused the three forms already.
+  `judgeInputs` reads an input that `verifyStdInput` refuses a second time,
+  to tell a forged input from one it cannot judge, and that reading took a
+  push of any form. The signature then verified, because the BIP 143 digest
+  does not cover the input script. Anyone can make such a copy of a valid
+  spend, without a key. The answer is now `InputUndecided`, also when the
+  signature does not verify.
+- **On a network without a fork id, `judgeInputs` says `InputVerified` only
+  where `verifyStdInput` says `True`.** The second reading takes more than a
+  node does, so there it now only tells `InputForged` from `InputUndecided`.
+  This changes the answer for an input that a block may hold and that nodes
+  do not relay, when its signature verifies: a signature with a high S and a
+  hybrid key were `InputVerified` and are `InputUndecided`. A caller that
+  sends a transaction to its peers only when every input is `InputVerified`
+  no longer sends those. On Bitcoin Cash nothing changed: the second reading
+  still verifies what `verifyStdInput` does not read there, Schnorr
+  signatures and coins that hold tokens.
+
 ## [2.0.1] - 2026-11-18
 
 ### Fixed
