@@ -726,8 +726,12 @@ own instance to keep headers in a database.
 
 Give `connectBlocks` all the headers of a `headers` message at once rather than
 one by one with `connectBlock`. On Bitcoin Cash the difficulty depends on an
-anchor block far down the chain, and finding it takes some hundreds of reads
-from the store. `connectBlocks` finds it once for the whole run.
+anchor block far down the chain. On mainnet and testnet4 the `Network` record
+holds that block (`asertAnchorBlock`), as Bitcoin Cash Node does, and finding
+it is a walk down the chain of 84 reads at height 100,000. On other networks,
+such as regtest, it is a binary search of 1,424 reads.
+`connectBlocks` finds it once for the whole run, so either way it pays this
+cost once rather than for each header.
 
 Once the best block has the `minimumChainWork` of the network, a fork with less
 work is refused. Below that work nothing bounds the side chains a peer can send,

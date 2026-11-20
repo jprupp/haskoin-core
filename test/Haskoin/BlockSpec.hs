@@ -1,4 +1,5 @@
 {-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -894,6 +895,31 @@ asertSpec = describe "asert" $ do
       requiredOn net specs time = withChain net (storeChain specs >> requiredAfter net time)
   it "finds the first block whose median time past reaches the activation time" $
     anchorHeights `shouldBe` [Nothing, Just 15, Just 15, Just 15]
+  it "takes the anchor that the network knows, when the chain holds it" $
+    knownAnchor (\nodes -> Just (15, headerHash (nodes !! 14).header)) `shouldBe` Just 15
+  it "trusts the known anchor without searching" $
+    -- Block 10 has not reached the activation time; only the constant can
+    -- name it.
+    knownAnchor (\nodes -> Just (10, headerHash (nodes !! 9).header)) `shouldBe` Just 10
+  it "searches when the chain does not hold the known anchor" $ do
+    knownAnchor (const (Just (15, genesisHash))) `shouldBe` Just 15
+    knownAnchor (const (Just (100, genesisHash))) `shouldBe` Just 15
+  it "reads far less of the store with a known anchor" $ do
+    let reads net = flip evalState (initialChain net, 0) . runCounting $ do
+          nodes <- Counting (zoomChain (storeChain (evenlySpaced net 600 2000 0x1f400000)))
+          Counting (modify (fmap (const 0)))
+          a <- asertAnchor net (last nodes)
+          n <- Counting (gets snd)
+          return (fmap (.height) a, n)
+        known = withChain asertNet $ do
+          nodes <- storeChain (evenlySpaced asertNet 600 15 0x1f400000)
+          return (Just (15, headerHash (last nodes).header))
+        (searched, searchReads) = reads asertNet
+        (walked, walkReads) = reads (asertNet :: Network) {asertAnchorBlock = known}
+    (searched, walked) `shouldBe` (Just 15, Just 15)
+    -- 36 and 479 reads when this test was written
+    walkReads `shouldSatisfy` (< 50)
+    searchReads `shouldSatisfy` (> 10 * walkReads)
   it "has no anchor without an activation time" $
     withChain cashNet (storeChain steady >>= asertAnchor cashNet . last) `shouldBe` Nothing
   it "keeps the target when the chain is on schedule" $
@@ -985,10 +1011,30 @@ asertSpec = describe "asert" $ do
           let h = mineOn net par.header time bits
           _ <- either error id <$> connectBlock net myTime h
           return h
+    -- The anchor of a chain of thirty blocks on a network that knows the
+    -- anchor given for those blocks.
+    knownAnchor known = withChain asertNet $ do
+      nodes <- storeChain (evenlySpaced asertNet 600 30 0x1f400000)
+      let net = (asertNet :: Network) {asertAnchorBlock = known nodes}
+      fmap (.height) <$> asertAnchor net (last nodes)
     anchorHeights = withChain asertNet $ do
       nodes <- storeChain (evenlySpaced asertNet 600 30 0x1f400000)
       forM [nodes !! 13, nodes !! 14, nodes !! 19, last nodes] $ \n ->
         fmap (.height) <$> asertAnchor asertNet n
+
+-- | The memory store, with a count of the blocks read from it.
+newtype Counting a = Counting {runCounting :: State (HeaderMemory, Int) a}
+  deriving (Functor, Applicative, Monad)
+
+instance BlockHeaders Counting where
+  addBlockHeader n = Counting (zoomChain (addBlockHeader n))
+  getBlockHeader h = Counting (modify (fmap (+ 1)) >> zoomChain (getBlockHeader h))
+  getBestBlockHeader = Counting (zoomChain getBestBlockHeader)
+  setBestBlockHeader n = Counting (zoomChain (setBestBlockHeader n))
+
+-- | Run an action on the store alone.
+zoomChain :: State HeaderMemory a -> State (HeaderMemory, Int) a
+zoomChain act = state $ \(mem, n) -> let (a, mem') = runState act mem in (a, (mem', n))
 
 checkpointSpec :: Spec
 checkpointSpec = describe "checkpoints and versions" $ do
@@ -1614,6 +1660,14 @@ chainConstantsSpec = describe "chain parameters of the reference nodes" $ do
     -- mainnet (172800 seconds) and one hour on the test networks (3600)
     map (.asertActivationTime) [bch, bchTest, bchTest4, bchRegTest] `shouldBe` replicate 4 (Just 1605441600)
     map (.asertHalfLife) [bch, bchTest, bchTest4, bchRegTest] `shouldBe` [172800, 3600, 3600, 172800]
+  it "knows the aserti3-2d anchor of mainnet and testnet4, as Bitcoin Cash Node does" $ do
+    -- asertAnchorParams: block 661647 on mainnet and 16844 on testnet4. The
+    -- checkpoint of testnet4 at 16845 is the first block after its anchor.
+    bch.asertAnchorBlock
+      `shouldBe` Just (661647, "00000000000000000083ed4b7a780d59e3983513215518ad75654bb02deee62f")
+    bchTest4.asertAnchorBlock
+      `shouldBe` Just (16844, "00000000602570ee2b66c1d3f75d404c234f8aacdcc784da97e65838a2daf0fc")
+    map (.asertAnchorBlock) [btc, btcTest, btcTest4, btcRegTest, bchTest, bchRegTest] `shouldBe` replicate 6 Nothing
   it "halves the subsidy every 210000 blocks, and every 150 on regtest" $ do
     map (.halvingInterval) [btc, btcTest, btcTest4, bch, bchTest, bchTest4] `shouldBe` replicate 6 210000
     map (.halvingInterval) [btcRegTest, bchRegTest] `shouldBe` [150, 150]

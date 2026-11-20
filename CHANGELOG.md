@@ -7,7 +7,21 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Added
+- **The `Network` record holds the aserti3-2d anchor block where it is known**,
+  in the new field `asertAnchorBlock`: block 661647 on Bitcoin Cash mainnet
+  and block 16844 on testnet4, the constants of Bitcoin Cash Node.
+  `asertAnchor` then finds the anchor with one walk down the skip pointers,
+  84 reads at height 100,000, instead of a binary search of 1,424 reads, so
+  `connectBlock` and `nextWorkRequired` are fast on those networks too, not
+  only `connectBlocks`. The constant is checked against the chain: a chain that
+  does not hold that block at that height still gets the search. Code that
+  builds a `Network` record field by field must now set this field.
+
 ### Changed
+- The benchmark `headers` checks before it times that its 2,000 headers
+  connect, so a change that made them fail cannot look fast. It also times
+  `connectBlock` of one header with and without a known anchor.
 - CI runs through the workflow that the Haskell packages of jprupp share in
   [jprupp/tools](https://github.com/jprupp/tools), with the check of
   `stack.yaml` for local paths (`check-stack-paths`) and the cache of the
@@ -22,7 +36,8 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 
 - **`connectBlocks` is fast on Bitcoin Cash again.** It searched for the
   aserti3-2d anchor block for every header: a binary search over the whole
-  chain with a median time past at each step, some hundreds of reads. A node
+  chain with a median time past at each step, about 1,500 reads at height
+  100,000 (this entry said "some hundreds" until a review counted them). A node
   syncing Bitcoin Cash headers from a database took about 10 ms per header,
   20 seconds for each `headers` message of 2,000. The anchor of a block is
   also the anchor of all its descendants, so `connectBlocks` now finds it once

@@ -110,6 +110,19 @@ data Network = Network
     asertActivationTime :: !(Maybe Word32),
     -- | asert3-2d algorithm halflife (not used for non-BCH networks)
     asertHalfLife :: !Integer,
+    -- | height and hash of the aserti3-2d anchor block, where it is known.
+    -- The anchor is the first block whose median time past reached the
+    -- activation time, and every later difficulty depends on it. Without this
+    -- constant 'Haskoin.Block.Headers.asertAnchor' finds the anchor with a
+    -- binary search down the chain, 1,424 reads of the store at height
+    -- 100,000. With it, one walk to the ancestor at that height is enough, 84
+    -- reads, and the search is still used for a chain that does not hold this
+    -- block.
+    -- Bitcoin Cash Node keeps the same constant (@asertAnchorParams@). It is
+    -- 'Nothing' on regtest, where every chain has its own anchor, and on
+    -- testnet3, whose anchor block could not be checked against a second
+    -- source when it was added.
+    asertAnchorBlock :: !(Maybe (BlockHeight, BlockHash)),
     -- | segregated witness active
     segWit :: !Bool,
     -- | 'CashAddr' prefix (for Bitcoin Cash)
