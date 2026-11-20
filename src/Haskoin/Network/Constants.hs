@@ -158,6 +158,7 @@ btc =
       daaHeight = Nothing,
       asertActivationTime = Nothing,
       asertHalfLife = 0,
+      asertAnchorBlock = Nothing,
       segWit = True,
       cashAddrPrefix = Nothing,
       bech32Prefix = Just "bc",
@@ -165,7 +166,13 @@ btc =
       halvingInterval = 210000
     }
 
--- | Testnet for Bitcoin SegWit network.
+-- | Testnet3 for Bitcoin SegWit network. Deprecated: use 'btcTest4'.
+--
+-- Bitcoin Core has deprecated testnet3 in favour of testnet4, whose BIP94
+-- rules stop the storms of minimum-difficulty blocks that made testnet3 hard
+-- to use. This value stays, still in 'allNets' and found by 'netByName', so
+-- that code reading old testnet3 data keeps working, and will be removed in a
+-- later major version.
 btcTest :: Network
 btcTest =
   Network
@@ -222,6 +229,7 @@ btcTest =
       daaHeight = Nothing,
       asertActivationTime = Nothing,
       asertHalfLife = 0,
+      asertAnchorBlock = Nothing,
       segWit = True,
       cashAddrPrefix = Nothing,
       bech32Prefix = Just "tb",
@@ -281,6 +289,7 @@ btcTest4 =
       daaHeight = Nothing,
       asertActivationTime = Nothing,
       asertHalfLife = 0,
+      asertAnchorBlock = Nothing,
       segWit = True,
       cashAddrPrefix = Nothing,
       bech32Prefix = Just "tb",
@@ -337,6 +346,7 @@ btcRegTest =
       daaHeight = Nothing,
       asertActivationTime = Nothing,
       asertHalfLife = 0,
+      asertAnchorBlock = Nothing,
       segWit = True,
       cashAddrPrefix = Nothing,
       bech32Prefix = Just "bcrt",
@@ -459,6 +469,9 @@ bch =
       daaHeight = Just 504032,
       asertActivationTime = Just 1605441600,
       asertHalfLife = 2 * 24 * 60 * 60,
+      -- Block 661647, as asertAnchorParams of Bitcoin Cash Node.
+      asertAnchorBlock =
+        Just (661647, "00000000000000000083ed4b7a780d59e3983513215518ad75654bb02deee62f"),
       segWit = False,
       cashAddrPrefix = Just "bitcoincash",
       bech32Prefix = Nothing,
@@ -543,6 +556,9 @@ bchTest4 =
       daaHeight = Just 3001,
       asertActivationTime = Just 1605441600,
       asertHalfLife = 60 * 60,
+      -- Block 16844, as asertAnchorParams of Bitcoin Cash Node.
+      asertAnchorBlock =
+        Just (16844, "00000000602570ee2b66c1d3f75d404c234f8aacdcc784da97e65838a2daf0fc"),
       segWit = False,
       cashAddrPrefix = Just "bchtest",
       bech32Prefix = Nothing,
@@ -550,7 +566,13 @@ bchTest4 =
       halvingInterval = 210000
     }
 
--- | Testnet for Bitcoin Cash network.
+-- | Testnet3 for Bitcoin Cash network. Deprecated: use 'bchTest4'.
+--
+-- Bitcoin Cash Node still supports testnet3, without a deprecation notice.
+-- Deprecating it is a choice of this library, made with the deprecation of
+-- 'btcTest', so that both chains point to testnet4. This value stays, still
+-- in 'allNets' and found by 'netByName', and will be removed in a later major
+-- version.
 bchTest :: Network
 bchTest =
   Network
@@ -625,6 +647,7 @@ bchTest =
       daaHeight = Just 1188698,
       asertActivationTime = Just 1605441600,
       asertHalfLife = 60 * 60,
+      asertAnchorBlock = Nothing,
       segWit = False,
       cashAddrPrefix = Just "bchtest",
       bech32Prefix = Nothing,
@@ -684,6 +707,7 @@ bchRegTest =
       daaHeight = Just 0,
       asertActivationTime = Just 1605441600,
       asertHalfLife = 2 * 24 * 60 * 60,
+      asertAnchorBlock = Nothing,
       segWit = False,
       cashAddrPrefix = Just "bchreg",
       bech32Prefix = Nothing,
@@ -691,6 +715,11 @@ bchRegTest =
       halvingInterval = 150
     }
 
--- | List of all networks supported by this library.
+{-# DEPRECATED btcTest "Testnet3 is deprecated: use btcTest4" #-}
+
+{-# DEPRECATED bchTest "Testnet3 is deprecated: use bchTest4" #-}
+
+-- | List of all networks supported by this library, the deprecated testnet3
+-- ones included.
 allNets :: [Network]
 allNets = [btc, bch, btcTest, btcTest4, bchTest4, bchTest, btcRegTest, bchRegTest]

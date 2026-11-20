@@ -5,9 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/)
 and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [3.0.0] - 2026-11-20
+
+This release breaks backwards compatibility in one place: the `Network` record
+has a new field, `asertAnchorBlock`, so code that builds a `Network` field by
+field, or uses its constructor positionally, must change. Code that only reads
+networks, or updates a copy of one, compiles as before. The testnet3 networks
+are deprecated and still work.
+
+### Added
+- **The `Network` record holds the aserti3-2d anchor block where it is known**,
+  in the new field `asertAnchorBlock`: block 661647 on Bitcoin Cash mainnet
+  and block 16844 on testnet4, the constants of Bitcoin Cash Node.
+  `asertAnchor` then finds the anchor with one walk down the skip pointers,
+  about 80 reads at height 100,000, instead of a binary search of about 1,500
+  reads, so `connectBlock` and `nextWorkRequired` are fast on those networks too, not
+  only `connectBlocks`. The constant is checked against the chain: a chain that
+  does not hold that block at that height still gets the search, but the
+  block itself is trusted to be the anchor: a custom network must give the
+  first block whose median time past reaches the activation time. Code that
+  builds a `Network` record field by field must now set this field.
+
+### Deprecated
+- **The testnet3 networks, `btcTest` and `bchTest`.** Using them gives a
+  deprecation warning; use `btcTest4` and `bchTest4`. Bitcoin Core has
+  deprecated testnet3 and says it will remove it in an upcoming release.
+  Bitcoin Cash Node still supports testnet3 without a notice: deprecating
+  `bchTest` is a choice of this library, to keep the two chains alike. They
+  stay in `allNets` and `netByName` still finds them, and a later major
+  version will remove them.
 
 ### Changed
+- The benchmark `headers` checks before it times that its 2,000 headers
+  connect, so a change that made them fail cannot look fast. It also times
+  `connectBlock` of one header with and without a known anchor.
 - CI runs through the workflow that the Haskell packages of jprupp share in
   [jprupp/tools](https://github.com/jprupp/tools), with the check of
   `stack.yaml` for local paths (`check-stack-paths`) and the cache of the
@@ -22,7 +53,8 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 
 - **`connectBlocks` is fast on Bitcoin Cash again.** It searched for the
   aserti3-2d anchor block for every header: a binary search over the whole
-  chain with a median time past at each step, some hundreds of reads. A node
+  chain with a median time past at each step, about 1,500 reads at height
+  100,000 (this entry said "some hundreds" until a review counted them). A node
   syncing Bitcoin Cash headers from a database took about 10 ms per header,
   20 seconds for each `headers` message of 2,000. The anchor of a block is
   also the anchor of all its descendants, so `connectBlocks` now finds it once

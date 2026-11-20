@@ -33,7 +33,7 @@ storage.
 
 | Area         | What you get                                                                                                         |
 | ------------ | -------------------------------------------------------------------------------------------------------------------- |
-| Networks     | Bitcoin and Bitcoin Cash: mainnet, testnet3, testnet4 and regtest                                                    |
+| Networks     | Bitcoin and Bitcoin Cash: mainnet, testnet4 and regtest; testnet3, deprecated                                        |
 | Keys         | secp256k1 keys, WIF, BIP-32 extended keys and paths, BIP-39 mnemonics, SLIP-39 Shamir shares                         |
 | Signatures   | Deterministic ECDSA (RFC 6979) and BIP-340 Schnorr                                                                   |
 | Addresses    | Base58, Bech32, Bech32m and CashAddr, including token-aware CashAddr types                                           |
@@ -115,7 +115,7 @@ dependency. Use the [latest version from Hackage](https://hackage.haskell.org/pa
 ```yaml
 resolver: nightly-2026-10-28
 extra-deps:
-  - haskoin-core-2.0.0
+  - haskoin-core-3.0.0
   - base16-2.0
   - secp256k1-haskell-3.0.0
 ```
@@ -183,6 +183,15 @@ the chain take one as their first argument.
 | `bchTest`    | Bitcoin Cash testnet3 | `bchtest`            |
 | `bchTest4`   | Bitcoin Cash testnet4 | `bchtest4`           |
 | `bchRegTest` | Bitcoin Cash regtest  | `bchreg`             |
+
+`btcTest` and `bchTest`, the testnet3 networks, are deprecated: using them
+gives a warning when you compile. Bitcoin Core has deprecated testnet3 in
+favour of testnet4, whose BIP94 rules stop the storms of minimum-difficulty
+blocks that made testnet3 hard to use, and will remove it. Bitcoin Cash Node
+still supports testnet3: deprecating `bchTest` is a choice of this library, so
+that both chains point to testnet4. Use `btcTest4` and `bchTest4` instead. The testnet3
+values are still in `allNets` and `netByName` still finds them, so that code
+reading old testnet3 data keeps working; a later major version will remove them.
 
 ### Record fields
 
@@ -726,8 +735,13 @@ own instance to keep headers in a database.
 
 Give `connectBlocks` all the headers of a `headers` message at once rather than
 one by one with `connectBlock`. On Bitcoin Cash the difficulty depends on an
-anchor block far down the chain, and finding it takes some hundreds of reads
-from the store. `connectBlocks` finds it once for the whole run.
+anchor block far down the chain. On mainnet and testnet4 the `Network` record
+holds that block (`asertAnchorBlock`), as Bitcoin Cash Node does, and finding
+it is a walk down the chain: about 80 reads at height 100,000, and about 75 on
+mainnet today. On other networks, such as regtest, it is a binary search of
+about 1,500 reads at height 100,000.
+`connectBlocks` finds it once for the whole run, so either way it pays this
+cost once rather than for each header.
 
 Once the best block has the `minimumChainWork` of the network, a fork with less
 work is refused. Below that work nothing bounds the side chains a peer can send,

@@ -46,7 +46,7 @@ module Main (main) where
 
 import Control.DeepSeq (NFData)
 import Control.Monad (unless, (<=<))
-import Control.Monad.State.Strict (runState)
+import Control.Monad.State.Strict (State, runState)
 import Data.Aeson (ToJSON (toEncoding))
 import Data.Aeson.Encoding (Encoding, encodingToLazyByteString, unsafeToEncoding)
 import Data.Base16.Types (extractBase16)
@@ -490,15 +490,32 @@ blockTransactions = map transaction [1 .. fromIntegral blockSize]
 -- target of a test network, so that the chain can be built in a moment, and
 -- kept in the memory store of the library, so that the figure is the cost of
 -- the validation and not of a database.
+--
+-- The network is regtest, which has no 'asertAnchorBlock', so 'connectBlocks'
+-- searches for the anchor once. 'connectBlock' of a single header is timed
+-- twice: on that network, where it searches, and with the anchor set as on
+-- mainnet, where it walks to it.
+--
+-- Each case is run once before it is timed, and the suite stops if its headers
+-- do not connect: a failure that came early would otherwise look fast.
 headerBenchmarks :: [Benchmark]
 headerBenchmarks =
-  [ env (return (chain, batch)) $ \ ~(mem, hs) ->
+  [ env (checked (connectBlocks net now batch) (length batch)) $ \ ~(mem, hs) ->
       bench "connectBlocks 2000 at 100000" $
-        nf (\hs' -> fst (runState (connectBlocks net now hs') mem)) hs
+        nf (\hs' -> fst (runState (connectBlocks net now hs') mem)) hs,
+    env (checked (fmap pure <$> connectBlock net now next) 1) $ \ ~(mem, _) ->
+      bench "connectBlock 1 at 100000, anchor searched" $
+        nf (\h -> fst (runState (connectBlock net now h) mem)) next,
+    env (checked (fmap pure <$> connectBlock anchorNet now next) 1) $ \ ~(mem, _) ->
+      bench "connectBlock 1 at 100000, anchor known" $
+        nf (\h -> fst (runState (connectBlock anchorNet now h) mem)) next
   ]
   where
     base = 100000
     (old, batch) = splitAt base (appendBlocks net 0 net.genesisHeader (base + 2000))
+    next = case batch of
+      h : _ -> h
+      [] -> error "Bench: no header to connect"
     now = net.genesisHeader.timestamp + 600 * fromIntegral (base + 3000)
     net =
       bchRegTest
@@ -509,6 +526,17 @@ headerBenchmarks =
           asertActivationTime = Just (net.genesisHeader.timestamp + 600 * 20),
           checkpoints = []
         }
+    -- The same network with the anchor of this chain set, as on mainnet.
+    anchorNet = (net :: Network) {asertAnchorBlock = Just (anchor.height, headerHash anchor.header)}
+    anchor = fromMaybe (error "Bench: no anchor") (fst (runState (asertAnchor net chain.best) chain))
+    -- The store and the batch, once the given connection gave the number of
+    -- headers expected.
+    checked :: State HeaderMemory (Either String [BlockNode]) -> Int -> IO (HeaderMemory, [BlockHeader])
+    checked run n = case fst (runState run chain) of
+      Right nodes
+        | length nodes == n -> return (chain, batch)
+        | otherwise -> fail ("Bench: connected " <> show (length nodes) <> " headers instead of " <> show n)
+      Left err -> fail ("Bench: the headers do not connect: " <> err)
     -- The store holding the first headers, built directly, without
     -- validation, so that building it is quick.
     chain = foldl' add (initialChain net) old

@@ -361,6 +361,11 @@ parentBlock = getBlockHeader . (.prev)
 
 -- | Validate and connect single block header to the block chain. Return 'Left'
 -- if fails to be validated.
+--
+-- Prefer 'connectBlocks' for the headers of a @headers@ message. On a Bitcoin
+-- Cash network without 'asertAnchorBlock', such as regtest, each call searches
+-- the chain for the aserti3-2d anchor again; 'connectBlocks' does it once for
+-- the whole run.
 connectBlock ::
   (BlockHeaders m) =>
   Network ->
@@ -382,7 +387,9 @@ connectBlock net t bh =
 -- when each one searched again. The anchor of a block is also the anchor of
 -- all of its descendants, since the median time past never decreases along a
 -- chain, so one search serves a whole run of headers. The cache holds the
--- hash of the block that the anchor was found for, and the anchor.
+-- hash of the block that the anchor was found for, and the anchor. On a
+-- network that knows its anchor ('asertAnchorBlock') the search is already
+-- short, and the cache saves only the walk to that block.
 type AnchorCache = Maybe (BlockHash, BlockNode)
 
 -- | The anchor for the chain that ends at the given block, from the cache when
@@ -843,16 +850,37 @@ middleOf a b = a + ((b - a) `div` 2)
 -- difficulty came from the previous algorithm. Returns 'Nothing' when the
 -- block's own median time past is still below the activation time, in which
 -- case the previous algorithm applies to its children.
+--
+-- Where the network knows its anchor ('asertAnchorBlock'), and the chain holds
+-- that block at that height, the anchor is that block, found with one walk
+-- down the skip pointers. Otherwise it is found with a binary search over the
+-- heights, with a median time past at each step: about 1,500 reads of the
+-- store at height 100,000, against about 80 for the walk. The constant is checked against
+-- the chain rather than trusted, so a fork from below the anchor still gets
+-- the anchor of its own chain.
 asertAnchor :: (BlockHeaders m) => Network -> BlockNode -> m (Maybe BlockNode)
 asertAnchor net tip =
   case net.asertActivationTime of
     Nothing -> return Nothing
-    Just activation -> do
-      tipMtp <- mtp tip
-      if tipMtp < activation
-        then return Nothing
-        else Just <$> search activation 0 tip.height
+    Just activation ->
+      known >>= \case
+        Just anchor -> return (Just anchor)
+        Nothing -> do
+          tipMtp <- mtp tip
+          if tipMtp < activation
+            then return Nothing
+            else Just <$> search activation 0 tip.height
   where
+    -- The constant anchor, when the chain of the tip holds it. Every block
+    -- above the anchor has a median time past at least as late, so the
+    -- activation time is reached.
+    known = case net.asertAnchorBlock of
+      Just (h, hash)
+        | h <= tip.height ->
+            getAncestor h tip >>= \case
+              Just a | headerHash a.header == hash -> return (Just a)
+              _ -> return Nothing
+      _ -> return Nothing
     -- The median time past never decreases along a chain, so a binary search
     -- over the heights finds the first block that reaches the activation
     -- time. The upper bound always satisfies it.
