@@ -5,7 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/)
 and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [3.0.0] - 2026-11-20
+
+This release breaks backwards compatibility in one place: the `Network` record
+has a new field, `asertAnchorBlock`, so code that builds a `Network` field by
+field, or uses its constructor positionally, must change. Code that only reads
+networks, or updates a copy of one, compiles as before. The testnet3 networks
+are deprecated and still work.
 
 ### Added
 - **The `Network` record holds the aserti3-2d anchor block where it is known**,
