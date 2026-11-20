@@ -15,7 +15,7 @@ import Data.Bytes.Serial (deserialize, serialize)
 import Data.Either (rights)
 import Data.Maybe (fromJust, mapMaybe)
 import Data.Text (Text)
-import Data.Word (Word64, Word8)
+import Data.Word (Word16, Word64, Word8)
 import Haskoin.Address
 import Haskoin.Crypto
 import Haskoin.Network.Constants
@@ -31,8 +31,8 @@ import Test.QuickCheck
 hex :: Text -> ByteString
 hex = fromJust . decodeHex
 
-secret :: Word8 -> SecKey
-secret n = fromJust (secKey (B.replicate 31 0 <> B.singleton n))
+secret :: Word16 -> SecKey
+secret n = fromJust (secKey (B.replicate 30 0 <> B.pack [fromIntegral (n `div` 256), fromIntegral n]))
 
 -- | The compressed bytes of the public key of a secret.
 pubBytes :: SecKey -> ByteString
@@ -276,35 +276,52 @@ spec = do
       verdict (spendWith OP_5 [ecdsaSig, sign (secrets !! 2)]) `shouldBe` [InputUndecided]
 
   describe "verifyStdInput on a multisig of Taproot" $ do
-    let secrets = map secret [11, 12, 13]
-        xOnly = B.drop 1 . pubBytes
-        leaf =
-          Script $
-            [opPushData (xOnly (head secrets)), OP_CHECKSIG]
-              <> concat [[opPushData (xOnly s), OP_CHECKSIGADD] | s <- drop 1 secrets]
-              <> [OP_2, OP_NUMEQUAL]
+    let xOnly = B.drop 1 . pubBytes
         internal = derivePubKey (secret 14)
-        tree = TaprootOutput {internalKey = internal, mast = Just (MASTLeaf tapscriptLeafVersion leaf)}
-        out = TxOut value (encodeSerial (taprootScriptOutput tree))
         unsigned = spending "" []
-        leafOf = Just (leafHash tapscriptLeafVersion leaf, 0xffffffff)
-        digest = either error id (taprootSigHash unsigned [out] 0 sigHashDefault Nothing leafOf)
-        sign s = (signSchnorr s (hashToMsg digest)).get
-        spendWith items =
-          let path =
-                ScriptPathSpend
-                  ScriptPathData
-                    { annex = Nothing,
-                      stack = items,
-                      script = leaf,
-                      extIsOdd = odd (keyParity (taprootOutputKey tree)),
-                      leafVersion = tapscriptLeafVersion,
-                      internalKey = internal,
-                      control = [],
-                      opaqueScript = Nothing
-                    }
-           in unsigned {witness = [either error id (encodeTaprootWitness path)]} :: Tx
+        -- A coin of one leaf, the multisig of the keys of these secrets
+        -- that asks for this number of signatures: its tree, its output,
+        -- the signature of a secret over the spend of the leaf, and that
+        -- spend with these witness items.
+        multisigCoin asked keys = (tree, out, sign, spendWith)
+          where
+            leaf =
+              Script $
+                [opPushData (xOnly (head keys)), OP_CHECKSIG]
+                  <> concat [[opPushData (xOnly s), OP_CHECKSIGADD] | s <- drop 1 keys]
+                  <> [asked, OP_NUMEQUAL]
+            tree = TaprootOutput {internalKey = internal, mast = Just (MASTLeaf tapscriptLeafVersion leaf)}
+            out = TxOut value (encodeSerial (taprootScriptOutput tree))
+            leafOf = Just (leafHash tapscriptLeafVersion leaf, 0xffffffff)
+            digest = either error id (taprootSigHash unsigned [out] 0 sigHashDefault Nothing leafOf)
+            sign s = (signSchnorr s (hashToMsg digest)).get
+            spendWith items =
+              let path =
+                    ScriptPathSpend
+                      ScriptPathData
+                        { annex = Nothing,
+                          stack = items,
+                          script = leaf,
+                          extIsOdd = odd (keyParity (taprootOutputKey tree)),
+                          leafVersion = tapscriptLeafVersion,
+                          internalKey = internal,
+                          control = [],
+                          opaqueScript = Nothing
+                        }
+               in unsigned {witness = [either error id (encodeTaprootWitness path)]} :: Tx
+        secrets = map secret [11, 12, 13]
+        (tree, out, sign, spendWith) = multisigCoin OP_2 secrets
         verdict tx = judgeInputs btc tx [Just out]
+        -- The spend of a leaf that asks for one signature of this many
+        -- keys, signed by the first key: an empty item for each other key,
+        -- then the signature. The answers of 'verifyStdInput' and of
+        -- 'judgeInputs' for it.
+        oneOf count = (verifyStdInput btc spend [(taprootScriptOutput bigTree, value, coin)] 0, verdictOf)
+          where
+            keys = map secret [1001 .. 1000 + count]
+            (bigTree, bigOut, bigSign, bigSpend) = multisigCoin OP_1 keys
+            spend = bigSpend (replicate (fromIntegral count - 1) "" <> [bigSign (secret 1001)])
+            verdictOf = judgeInputs btc spend [Just bigOut]
     it "verifies two signatures of three keys, with an item for each key, the last first" $ do
       verdict (spendWith [sign (secrets !! 2), "", sign (head secrets)]) `shouldBe` [InputVerified]
       verdict (spendWith ["", sign (secrets !! 1), sign (head secrets)]) `shouldBe` [InputVerified]
@@ -318,6 +335,15 @@ spec = do
       verdict (tampered (spendWith [sign (secrets !! 2), "", sign (head secrets)])) `shouldBe` [InputUndecided]
       -- an item for a key is missing
       verdict (spendWith [sign (secrets !! 1), sign (head secrets)]) `shouldBe` [InputUndecided]
+    -- The stack holds at most 1000 items after each opcode (BIP 342). The
+    -- witness puts an item there for each key, and the script first pushes
+    -- a key on top of them: 999 + 1 = 1000.
+    it "verifies a leaf of 999 keys, the most that a block can hold" $
+      oneOf 999 `shouldBe` (True, [InputVerified])
+    -- 1000 + 1 = 1001 items. Bitcoin Core 32.1 refuses the spend in a
+    -- block: "Stack size limit exceeded".
+    it "does not verify a leaf of 1000 keys, whose signature is good: no block can hold its spend" $
+      oneOf 1000 `shouldBe` (False, [InputUndecided])
 
   describe "splitTokenPrefix" $ do
     let category = B.replicate 32 0xaa

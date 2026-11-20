@@ -137,6 +137,18 @@ The testnet3 networks are deprecated and still work.
   no longer sends those. On Bitcoin Cash nothing changed: the second reading
   still verifies what `verifyStdInput` does not read there, Schnorr
   signatures and coins that hold tokens.
+- **`verifyStdInput`, `verifyStdTx` and `judgeInputs` no longer verify the
+  spend of a Taproot multisig leaf of more than 999 keys.** No block holds
+  such a spend. The stack holds at most 1000 items after each opcode (BIP
+  342): the witness puts an item there for each key, and the script starts
+  with the push of a key on top of them. So 999 keys is the most, the limit
+  of `multi_a` in BIP 387 and `MAX_PUBKEYS_PER_MULTI_A` of Bitcoin Core. The
+  three functions answered `True`, `True` and `InputVerified` for a leaf of
+  1000 keys or more when its signatures verified, and Bitcoin Core 32.1
+  refuses that spend in its mempool and in a block ("Stack size limit
+  exceeded"). Whoever makes the coin chooses the leaf, so anyone could
+  make such a transaction. The answers are now `False`, `False` and
+  `InputUndecided`. A leaf of 999 keys or fewer is verified as before.
 
 ## [2.0.1] - 2026-11-18
 
