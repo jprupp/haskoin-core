@@ -185,9 +185,11 @@ the chain take one as their first argument.
 | `bchRegTest` | Bitcoin Cash regtest  | `bchreg`             |
 
 `btcTest` and `bchTest`, the testnet3 networks, are deprecated: using them
-gives a warning when you compile. Bitcoin Core has replaced testnet3 with
-testnet4, whose BIP94 rules stop the storms of minimum-difficulty blocks that
-made testnet3 hard to use. Use `btcTest4` and `bchTest4` instead. The testnet3
+gives a warning when you compile. Bitcoin Core has deprecated testnet3 in
+favour of testnet4, whose BIP94 rules stop the storms of minimum-difficulty
+blocks that made testnet3 hard to use, and will remove it. Bitcoin Cash Node
+still supports testnet3: deprecating `bchTest` is a choice of this library, so
+that both chains point to testnet4. Use `btcTest4` and `bchTest4` instead. The testnet3
 values are still in `allNets` and `netByName` still finds them, so that code
 reading old testnet3 data keeps working; a later major version will remove them.
 
@@ -735,8 +737,9 @@ Give `connectBlocks` all the headers of a `headers` message at once rather than
 one by one with `connectBlock`. On Bitcoin Cash the difficulty depends on an
 anchor block far down the chain. On mainnet and testnet4 the `Network` record
 holds that block (`asertAnchorBlock`), as Bitcoin Cash Node does, and finding
-it is a walk down the chain of 84 reads at height 100,000. On other networks,
-such as regtest, it is a binary search of 1,424 reads.
+it is a walk down the chain: about 80 reads at height 100,000, and about 75 on
+mainnet today. On other networks, such as regtest, it is a binary search of
+about 1,500 reads at height 100,000.
 `connectBlocks` finds it once for the whole run, so either way it pays this
 cost once rather than for each header.
 

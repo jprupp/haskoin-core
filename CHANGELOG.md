@@ -18,17 +18,22 @@ are deprecated and still work.
   in the new field `asertAnchorBlock`: block 661647 on Bitcoin Cash mainnet
   and block 16844 on testnet4, the constants of Bitcoin Cash Node.
   `asertAnchor` then finds the anchor with one walk down the skip pointers,
-  84 reads at height 100,000, instead of a binary search of 1,424 reads, so
-  `connectBlock` and `nextWorkRequired` are fast on those networks too, not
+  about 80 reads at height 100,000, instead of a binary search of about 1,500
+  reads, so `connectBlock` and `nextWorkRequired` are fast on those networks too, not
   only `connectBlocks`. The constant is checked against the chain: a chain that
-  does not hold that block at that height still gets the search. Code that
+  does not hold that block at that height still gets the search, but the
+  block itself is trusted to be the anchor: a custom network must give the
+  first block whose median time past reaches the activation time. Code that
   builds a `Network` record field by field must now set this field.
 
 ### Deprecated
 - **The testnet3 networks, `btcTest` and `bchTest`.** Using them gives a
   deprecation warning; use `btcTest4` and `bchTest4`. Bitcoin Core has
-  replaced testnet3 with testnet4. They stay in `allNets` and `netByName`
-  still finds them, and a later major version will remove them.
+  deprecated testnet3 and says it will remove it in an upcoming release.
+  Bitcoin Cash Node still supports testnet3 without a notice: deprecating
+  `bchTest` is a choice of this library, to keep the two chains alike. They
+  stay in `allNets` and `netByName` still finds them, and a later major
+  version will remove them.
 
 ### Changed
 - The benchmark `headers` checks before it times that its 2,000 headers

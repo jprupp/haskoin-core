@@ -854,8 +854,8 @@ middleOf a b = a + ((b - a) `div` 2)
 -- Where the network knows its anchor ('asertAnchorBlock'), and the chain holds
 -- that block at that height, the anchor is that block, found with one walk
 -- down the skip pointers. Otherwise it is found with a binary search over the
--- heights, with a median time past at each step: 1,424 reads of the store at
--- height 100,000, against 84 for the walk. The constant is checked against
+-- heights, with a median time past at each step: about 1,500 reads of the
+-- store at height 100,000, against about 80 for the walk. The constant is checked against
 -- the chain rather than trusted, so a fork from below the anchor still gets
 -- the anchor of its own chain.
 asertAnchor :: (BlockHeaders m) => Network -> BlockNode -> m (Maybe BlockNode)

@@ -568,9 +568,10 @@ bchTest4 =
 
 -- | Testnet3 for Bitcoin Cash network. Deprecated: use 'bchTest4'.
 --
--- Testnet4 is the test network that Bitcoin Cash tooling uses; testnet3 is
--- deprecated together with the Bitcoin one. This value stays, still in
--- 'allNets' and found by 'netByName', and will be removed in a later major
+-- Bitcoin Cash Node still supports testnet3, without a deprecation notice.
+-- Deprecating it is a choice of this library, made with the deprecation of
+-- 'btcTest', so that both chains point to testnet4. This value stays, still
+-- in 'allNets' and found by 'netByName', and will be removed in a later major
 -- version.
 bchTest :: Network
 bchTest =

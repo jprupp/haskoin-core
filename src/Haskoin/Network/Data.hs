@@ -114,10 +114,16 @@ data Network = Network
     -- The anchor is the first block whose median time past reached the
     -- activation time, and every later difficulty depends on it. Without this
     -- constant 'Haskoin.Block.Headers.asertAnchor' finds the anchor with a
-    -- binary search down the chain, 1,424 reads of the store at height
-    -- 100,000. With it, one walk to the ancestor at that height is enough, 84
-    -- reads, and the search is still used for a chain that does not hold this
-    -- block.
+    -- binary search down the chain, about 1,500 reads of the store at height
+    -- 100,000. With it, one walk to the ancestor at that height is enough,
+    -- about 80 reads, and the search is still used for a chain that does not
+    -- hold this block.
+    --
+    -- The block must be the first whose median time past reaches the
+    -- activation time. When the chain holds it, it is taken as the anchor
+    -- without looking at its median time past, so a wrong block gives every
+    -- block above it another difficulty, with no error. Set it only from a
+    -- trusted source, such as the constants of the reference node.
     -- Bitcoin Cash Node keeps the same constant (@asertAnchorParams@). It is
     -- 'Nothing' on regtest, where every chain has its own anchor, and on
     -- testnet3, whose anchor block could not be checked against a second

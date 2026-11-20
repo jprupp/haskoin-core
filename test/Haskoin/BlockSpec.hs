@@ -905,6 +905,8 @@ asertSpec = describe "asert" $ do
   it "searches when the chain does not hold the known anchor" $ do
     knownAnchor (const (Just (15, genesisHash))) `shouldBe` Just 15
     knownAnchor (const (Just (100, genesisHash))) `shouldBe` Just 15
+    -- Block 10 is not the anchor: only the check of the hash stops it.
+    knownAnchor (const (Just (10, genesisHash))) `shouldBe` Just 15
   it "reads far less of the store with a known anchor" $ do
     let reads net = flip evalState (initialChain net, 0) . runCounting $ do
           nodes <- Counting (zoomChain (storeChain (evenlySpaced net 600 2000 0x1f400000)))
