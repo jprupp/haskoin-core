@@ -14,6 +14,7 @@ import Data.Bytes.Put (runPutS)
 import Data.Bytes.Serial (deserialize, serialize)
 import Data.Either (rights)
 import Data.Maybe (fromJust, mapMaybe)
+import Data.Text (Text)
 import Data.Word (Word64, Word8)
 import Haskoin.Address
 import Haskoin.Crypto
@@ -26,6 +27,9 @@ import Haskoin.Util.Arbitrary
 import Test.Hspec
 import Test.Hspec.QuickCheck
 import Test.QuickCheck
+
+hex :: Text -> ByteString
+hex = fromJust . decodeHex
 
 secret :: Word8 -> SecKey
 secret n = fromJust (secKey (B.replicate 31 0 <> B.singleton n))
@@ -123,6 +127,68 @@ spec = do
         `shouldBe` [InputVerified]
       judgeInputs btc (spending (pushing ["anything"]) []) [prev (PayScriptHash h160)]
         `shouldBe` [InputUndecided]
+
+    -- BIP 141: the input script of a witness program nested in a script
+    -- hash "must be exactly a push of the BIP16 redeemScript". Bitcoin Core
+    -- takes the shortest push only, in a block too. The digest does not
+    -- cover the input script, so the signature is as good with any push.
+    it "leaves a nested witness key hash to a node when its program is not pushed by its length" $ do
+      let -- version 0 and the hash of the key, and the coin locked to the hash of those 22 bytes
+          program = hex "00145dedfbf9ea599dd4e3ca6a80b333c472fd0b3f69"
+          locked = Just (TxOut value (hex "a9146ba336543ab7de40a61b3b192cbc51449f9700b087"))
+          sig =
+            hex
+              "304402203e31df15158bff1249b9d8cf8606b9e8ecafc487afbc1c1b1a5d490d\
+              \882756260220368907754469222876fb2914f4dae1f697b30f7c1a2d1115ae16\
+              \122e61ab444601"
+          spend push = spending (hex push <> program) [sig, pub]
+          verdict tx = judgeInputs btc tx [locked]
+      -- the push of 0x16 = 22 bytes
+      verdict (spend "16") `shouldBe` [InputVerified]
+      -- OP_PUSHDATA1, OP_PUSHDATA2 and OP_PUSHDATA4, with a length of 22
+      verdict (spend "4c16") `shouldBe` [InputUndecided]
+      verdict (spend "4d1600") `shouldBe` [InputUndecided]
+      verdict (spend "4e16000000") `shouldBe` [InputUndecided]
+      -- not the form of such an input: not called forged either
+      verdict (tampered (spend "4c16")) `shouldBe` [InputUndecided]
+
+  -- On Bitcoin a block may hold these inputs, and nodes do not relay them.
+  -- 'verifyStdInput' refuses them, and nothing else says verified there.
+  describe "judgeInputs on what Bitcoin does not relay" $ do
+    it "leaves a signature with a high S to a node" $ do
+      let locked = Just (TxOut value (hex "76a9145dedfbf9ea599dd4e3ca6a80b333c472fd0b3f6988ac"))
+          lowS =
+            hex
+              "3044022053d92d1e62bcca206dd7c77d38678770a59da63dcac8cb937fb29f2d\
+              \17e7578c022019a9519939d9302a8d5af75a9d8b8c69852044e1669d2faa3d70\
+              \c1df8dea332301"
+          -- the same signature with n - S for S, n being the order of the
+          -- curve: n - 19a95199...8dea3323 = e656ae66...424c0e1e
+          highS =
+            hex
+              "3045022053d92d1e62bcca206dd7c77d38678770a59da63dcac8cb937fb29f2d\
+              \17e7578c022100e656ae66c626cfd572a508a562747395358e980548ab709182\
+              \619cad424c0e1e01"
+          verdict sig = judgeInputs btc (spending (pushing [sig, pub]) []) [locked]
+      verdict lowS `shouldBe` [InputVerified]
+      verdict highS `shouldBe` [InputUndecided]
+    it "leaves a hybrid key to a node" $ do
+      let -- the key with both coordinates, after 0x06 for an even y
+          hybrid =
+            hex
+              "065cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9\
+              \bc6aebca40ba255960a3178d6d861a54dba813d0b813fde7b5a5082628087264\
+              \da"
+          -- a coin locked to the hash of those 65 bytes, and the signature that spends it
+          locked = Just (TxOut value (hex "76a914db71dd1ddf9d451854b7ec1bdba7ba5e317da0ba88ac"))
+          sig =
+            hex
+              "3044022048cf36bd41def24e245932e5546cb6b379875b7bdf50001bbd7aef3a\
+              \95296c8b022014cc18d596e34a5832971472930ecd76a7b10457ddda46d474f6\
+              \c6a9f305c7a501"
+          spend = spending (pushing [sig, hybrid]) []
+      judgeInputs btc spend [locked] `shouldBe` [InputUndecided]
+      judgeInputs btc (tampered spend) [locked] `shouldBe` [InputForged]
 
   describe "judgeInputs on Bitcoin Cash" $ do
     let unsigned = spending "" []

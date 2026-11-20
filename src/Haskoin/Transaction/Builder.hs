@@ -984,7 +984,9 @@ data InputVerdict
     -- the transaction
     InputForged
   | -- | neither: a script that is not run here, a coin that was not
-    -- given, a hash type other than all, an encoding that is not read
+    -- given, a hash type other than all, an encoding that is not read,
+    -- and without a fork id an input that 'verifyStdInput' refuses
+    -- although its signature verifies
     InputUndecided
   deriving (Eq, Show)
 
@@ -1005,6 +1007,18 @@ data InputVerdict
 -- * with exactly the items such an input has, and a hash type of all;
 -- * whose key is not the one the coin names, or whose signature does not
 --   verify over the digest.
+--
+-- To find a forged input, an input that 'verifyStdInput' refuses is read a
+-- second time, and that reading takes more than a node does: any form of
+-- push, a signature with a high S, a hybrid key. So it is not trusted to
+-- say that an input is good. On a network without a fork id,
+-- 'InputVerified' is the answer of 'verifyStdInput' and of nothing else.
+-- An input whose signature verifies and that 'verifyStdInput' refuses is
+-- 'InputUndecided' there: one that a block may hold and that nodes do not
+-- relay, such as a high S, and one that no block holds, such as a witness
+-- program nested in a script hash that is not pushed by its length (BIP
+-- 141). The other way, a guard in the second reading for each such form,
+-- lets a form that was forgotten pass as verified.
 --
 -- On Bitcoin Cash it reads what 'verifyStdInput' does not: a Schnorr
 -- signature ('verifyCashSchnorr'), of one key or in a multisig, bare or in
@@ -1030,11 +1044,19 @@ judgeInputs net tx given = zipWith judge [0 ..] decoded
         { coins = [d >>= \(prefix, so, v) -> if B.null prefix then Just (so, v) else Nothing | d <- decoded],
           outputs = sequence prevs
         }
+    -- What the second reading of an input may answer. Without a fork id
+    -- it does not say verified: 'verifyInput' reads every kind of input
+    -- that is verified there, and the second reading only looks for a
+    -- forged one. It takes forms that 'verifyInput' refuses, and among
+    -- them some that no block holds.
+    secondReading :: InputVerdict -> InputVerdict
+    secondReading InputVerified | not forked = InputUndecided
+    secondReading answer = answer
     judge :: Int -> Maybe (B.ByteString, ScriptOutput, Word64) -> InputVerdict
     judge _ Nothing = InputUndecided
     judge i (Just (prefix, so, val))
       | B.null prefix && verifyInput net tx spent i = InputVerified
-      | otherwise = case so of
+      | otherwise = secondReading $ case so of
           PayPKHash h
             | null ws, Just [sig, pub] <- pushes -> keyed (addressHash pub == h) sig pub legacy
           PayPK pub
@@ -1043,7 +1065,7 @@ judgeInputs net tx given = zipWith judge [0 ..] decoded
             | net.segWit, B.null inp, [sig, pub] <- ws -> keyed (addressHash pub == h) sig pub (segwit so)
           PayScriptHash h
             | net.segWit,
-              Just [program] <- pushes,
+              Just program <- onlyPush,
               addressHash program == h,
               Right nested@(PayWitnessPKHash kh) <- decodeSerial program,
               [sig, pub] <- ws ->
@@ -1072,6 +1094,12 @@ judgeInputs net tx given = zipWith judge [0 ..] decoded
         pushed = \case
           OP_PUSHDATA d _ -> Just d
           op -> B.singleton . fromIntegral <$> eitherToMaybe (scriptOpToInt op)
+        -- the item of an input script that is one push by its length and
+        -- nothing else: the only form that a witness program nested in a
+        -- script hash may take (BIP 141)
+        onlyPush = case runGetS deserialize inp of
+          Right (Script [OP_PUSHDATA d OPCODE]) -> Just d
+          _ -> Nothing
         legacy sh = do
           script <- encodeOutput so
           if forked then txSigHashCashToken net tx prefix script val i sh else txSigHash net tx script val i sh
