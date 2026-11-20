@@ -115,7 +115,7 @@ dependency. Use the [latest version from Hackage](https://hackage.haskell.org/pa
 ```yaml
 resolver: nightly-2026-10-28
 extra-deps:
-  - haskoin-core-3.1.0
+  - haskoin-core-3.0.0
   - base16-2.0
   - secp256k1-haskell-3.0.0
 ```
@@ -767,9 +767,9 @@ them out. A wallet that spends such an output as a plain coin burns its tokens,
 or signs without the token prefix and has the transaction refused. Nothing in
 this library signs these outputs.
 
-Before 3.1.0 these outputs had no address. An index of addresses built with an
+Before 3.0.0 these outputs had no address. An index of addresses built with an
 older version left them out, and must be rebuilt, or have them added, before it
-runs with 3.1.0. Otherwise spending one of them takes from a balance an amount
+runs with 3.0.0. Otherwise spending one of them takes from a balance an amount
 that was never added to it.
 
 What is not checked: the rules that need the whole transaction, such as the

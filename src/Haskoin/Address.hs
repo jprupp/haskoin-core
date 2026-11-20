@@ -837,7 +837,7 @@ scriptToAddress net script
 -- This is the mistake that token-aware addresses exist to prevent, and the
 -- server has to prevent it by other means.
 --
--- Before version 3.1.0 these outputs had no address. An index of addresses
+-- Before version 3.0.0 these outputs had no address. An index of addresses
 -- built with an older version left them out, and must be built again, or have
 -- them added, before it runs with this one: otherwise it takes away from a
 -- balance an output that it never added when that output is spent.
