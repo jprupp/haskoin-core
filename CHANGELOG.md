@@ -168,6 +168,44 @@ Bitcoin testnet3 is deprecated and still works.
 
 ### Fixed
 
+- **`decodeOutput` no longer reads a multisig script whose keys are pushed
+  by `OP_PUSHDATA1`, `2` or `4`, and the signers and verifiers no longer
+  sign or verify the spend of such a coin over another script.** The
+  signature of a multisig input covers the bytes of the script of its coin.
+  `decodeOutput` read such a script as the same `PayMulSig` as the script
+  with direct pushes, and a `ScriptOutput` does not keep the form of a
+  push. So `signTx`, `signPsbt`, `verifyStdInput`, `verifyStdTx` and
+  `judgeInputs` took the digest on what `encodeOutput` writes, the script
+  with direct pushes, which is not the script of the coin:
+  - `signTx` and `signPsbt` signed a bare coin of this kind with a
+    signature that does not open it, and `verifyStdTx` and `judgeInputs`
+    answered `True` and `InputVerified` for that spend. Bitcoin Core 32.1
+    refuses it in a block.
+  - On Bitcoin Cash every push must be the shortest one, in a block too,
+    so such a coin can never be spent. `judgeInputs` said `InputVerified`
+    for its spend, with ECDSA signatures or with Schnorr signatures, bare
+    or locked to the hash of the script. Bitcoin Cash Node 29.2.0 drops
+    the peer that sends that transaction. Whoever makes the coin chooses
+    its script, so anyone could make one.
+  - With one more input that spends such a coin, the Taproot signature of
+    `signTx` did not verify on a node, and `verifyStdInput` refused the
+    one that does: the Taproot digest covers the script of every coin
+    spent.
+  - `finalizePsbt` refused a whole PSBT for a signature of Bitcoin Core on
+    such a coin ("does not verify"), and `signPsbt` refused one for a coin
+    locked to the hash of such a script ("the redeem script does not hash
+    to the coin"), which was not true.
+
+  Now `decodeOutput`, and so `decodeSerial` and `parseJSON` of a
+  `ScriptOutput`, answer `Left` for such a script, as for any script that
+  is no standard output: a `PayMulSig` stands for one script, the one
+  `encodeOutput` writes. `judgeInputs` answers `InputUndecided`, and
+  `signPsbt` and `finalizePsbt` leave the input as it is. This is stricter
+  than `decodescript` of Bitcoin Core, which calls the script `multisig`,
+  and the same as Bitcoin Cash Node. A multisig with direct pushes, which
+  is what every wallet makes, is read, signed and verified as before. The
+  library cannot sign the spend of such a coin: on Bitcoin a block may
+  hold that spend, and nodes do not relay it.
 - **`judgeInputs` no longer says `InputVerified` for a witness key hash
   nested in a script hash whose program is pushed by `OP_PUSHDATA1`, `2` or
   `4`.** BIP 141 wants the input script to be exactly the push of the

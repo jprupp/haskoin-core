@@ -121,19 +121,24 @@ viewWitnessProgram net so witness = case so of
 -- The caller only has 'encodeOutput' of the value returned here to hash
 -- and to sign, as 'Haskoin.Transaction.Builder.verifyStdInput' does. So a
 -- witness script that 'encodeOutput' would write back as other bytes is
--- refused, as 'decodeInput' refuses such a redeem script. That is a
--- multisig whose keys are not direct pushes.
+-- refused, as 'decodeInput' refuses such a redeem script. If one was read,
+-- a spend would verify although its witness script is not the one the coin
+-- commits to: the hash and the digest are taken on the script written
+-- back, which is the one of the coin. By consensus the hash of the bytes
+-- in the witness must be the witness program (BIP 141), so no block holds
+-- that spend.
 --
--- Without this refusal, a spend verifies although its witness script is
--- not the one the coin commits to: the hash and the digest are taken on
--- the script written back, which is the one of the coin. By consensus the
--- hash of the bytes in the witness must be the witness program (BIP 141),
--- so no block holds that spend.
+-- The script this is about is a multisig whose keys are not direct pushes.
+-- 'decodeOutput' does not read it, so it is refused before this check. The
+-- check stays, so that a template that 'decodeOutput' learns later cannot
+-- bring the fault back. The one script it still refuses by itself is a
+-- data carrier whose data is not pushed in the shortest way, which is no
+-- witness script that is read here anyway.
 --
--- The cost: the spend of a coin that does commit to such a script is not
--- read here, although a block may hold it. Nodes do not relay that spend
--- (the @MINIMALDATA@ rule of the relay policy), and the signer of this
--- library cannot make it.
+-- The cost: the spend of a coin that does commit to such a multisig script
+-- is not read here, although a block may hold it. Nodes do not relay that
+-- spend (the @MINIMALDATA@ rule of the relay policy), and the signer of
+-- this library cannot make it.
 --
 -- @since 0.11.0.0
 decodeWitnessInput ::

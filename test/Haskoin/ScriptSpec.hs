@@ -551,6 +551,14 @@ nonStandardOutputs =
     -- Non-standard in Bitcoin Core.
     ("P2PKH with OP_PUSHDATA1", "76a94c14" <> twenty <> "88ac"),
     ("P2PK with OP_PUSHDATA1", "4c21" <> gKeyHex <> "ac"),
+    -- The same keys as a multisig of direct pushes, in other bytes: a value
+    -- of 'ScriptOutput' has no place for the form of a push. Bitcoin Core
+    -- calls these multisig, and Bitcoin Cash Node does not. 0x21 = 33, the
+    -- length of the key, in one, two and four bytes.
+    ("multisig with a key pushed with OP_PUSHDATA1", "514c21" <> gKeyHex <> "51ae"),
+    ("multisig with a key pushed with OP_PUSHDATA2", "514d2100" <> gKeyHex <> "51ae"),
+    ("multisig with a key pushed with OP_PUSHDATA4", "514e21000000" <> gKeyHex <> "51ae"),
+    ("multisig with one of two keys pushed with OP_PUSHDATA1", "5121" <> gKeyHex <> "4c21" <> gKeyHex <> "52ae"),
     -- Wrong lengths.
     ("witness v0 of 25 bytes", "0019" <> T.replicate 25 "01"),
     ("witness v1 of 41 bytes", "5129" <> T.replicate 41 "01"),
@@ -602,13 +610,6 @@ outputSpec = do
   it "rejects scripts that only look like a standard output" $
     forM_ nonStandardOutputs $ \(name, h) ->
       (name, decodeHexOutput h) `shouldSatisfy` (isLeft . snd)
-  it "accepts a multisig key pushed with OP_PUSHDATA1, as the solver of Bitcoin Core does" $
-    decodeHexOutput ("514c21" <> gKeyHex <> "51ae") `shouldBe` Right (PayMulSig [g] 1)
-  it "writes such a multisig back with direct pushes, which are other bytes" $
-    -- A ScriptOutput does not keep the form of a push. The result must not
-    -- be hashed or signed in place of the script that was read.
-    (encodeHexOutput =<< decodeHexOutput ("514c21" <> gKeyHex <> "51ae"))
-      `shouldBe` Right ("5121" <> gKeyHex <> "51ae")
   it "writes a data carrier back with the shortest pushes, which can be other bytes" $
     (encodeHexOutput =<< decodeHexOutput "6a4c0401020304") `shouldBe` Right "6a0401020304"
   it "does not decode a key that is not a point of the curve, where Bitcoin Core only checks its size" $ do

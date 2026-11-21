@@ -1898,6 +1898,50 @@ signerScopeSpec =
       map (isJust . finalScriptSig) final.inputs `shouldBe` [True, False]
       inputAt 1 final `shouldBe` inputAt 1 withScript
 
+    -- One signature of the keys 1 and 2, each key pushed by OP_PUSHDATA1
+    -- (0x4c) and its length 0x21 = 33, where a multisig of the library has
+    -- the length alone. The signature of a multisig covers the bytes of the
+    -- script, and a 'ScriptOutput' has no place for the form of a push: the
+    -- signer would sign the script with direct pushes, which is another
+    -- script. So this one is no standard template, although the signer
+    -- holds key 1.
+    let longPushes =
+          Script
+            [ OP_1,
+              OP_PUSHDATA (hexBytes "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798") OPDATA1,
+              OP_PUSHDATA (hexBytes "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5") OPDATA1,
+              OP_2,
+              OP_CHECKMULTISIG
+            ]
+
+    it "signs and finalizes its own input, and leaves alone a multisig coin whose keys are pushed by OP_PUSHDATA1" $ do
+      let both = spendingTwo ownScript (runPutS (serialize longPushes))
+          withRecord = withInputs [inputAt 0 both, recordOf public (inputAt 1 both)] both
+      signed <- expectRight (signPsbt btc signer withRecord)
+      signatureCounts signed `shouldBe` Right [1, 0]
+      inputAt 1 signed `shouldBe` inputAt 1 withRecord
+      final <- expectRight (finalizePsbt btc signed)
+      map (isJust . finalScriptSig) final.inputs `shouldBe` [True, False]
+      inputAt 1 final `shouldBe` inputAt 1 withRecord
+
+    it "adds no signature to a P2SH or P2WSH coin that commits to such a multisig, and gives no error" $ do
+      let (p2sh, _) = spendingPsbt (forceRight (toP2SH longPushes))
+          (p2wsh, _) = spendingPsbt (forceRight (toP2WSH longPushes))
+          withRedeem = withInputs (recordOf public . insertInputRedeemScript longPushes <$> p2sh.inputs) p2sh
+          withWitness = withInputs (recordOf public . insertInputWitnessScript longPushes <$> p2wsh.inputs) p2wsh
+      signPsbt btc signer withRedeem `shouldBe` Right withRedeem
+      signPsbt btc signer withWitness `shouldBe` Right withWitness
+
+    -- Bitcoin Core signs the bytes of the script, and a block may hold its
+    -- spend. The finalizer does not judge a signature of a script it does
+    -- not read.
+    it "the finalizer leaves alone such a multisig coin that holds a signature over the bytes of its script" $ do
+      let both = spendingTwo ownScript (runPutS (serialize longPushes))
+          digest = forceRight (txSigHash btc both.unsignedTx longPushes 200000000 1 sigHashAll)
+          signature = encodeTxSig btc (TxSignature (signHash secretOne digest) sigHashAll)
+          withSignature = withInputs [inputAt 0 both, insertPartialSignature public signature (inputAt 1 both)] both
+      finalizePsbt btc withSignature `shouldBe` Right withSignature
+
     -- Input 1 is a P2PKH coin of key 2, known from its output alone. The
     -- signer could not sign it anyway. Bitcoin Core leaves such an input
     -- unsigned and signs the others.

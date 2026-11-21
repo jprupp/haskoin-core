@@ -31,6 +31,43 @@ import Test.QuickCheck
 hex :: Text -> ByteString
 hex = fromJust . decodeHex
 
+-- | The transaction of these bytes.
+txOf :: Text -> Tx
+txOf = either error id . runGetS deserialize . hex
+
+-- | The answer of 'judgeInputs' for a transaction whose one input spends a
+-- coin of 1,000,000 with this script.
+judged :: Network -> ByteString -> Tx -> [InputVerdict]
+judged net locked tx = judgeInputs net tx [Just (TxOut 1000000 locked)]
+
+-- | The answers of 'verifyStdTx' and of 'judgeInputs' for such a
+-- transaction. The script of the coin must be a standard output.
+verdicts :: Network -> ByteString -> Tx -> (Bool, [InputVerdict])
+verdicts net locked tx =
+  ( verifyStdTx net tx [(either error id (decodeSerial locked), 1000000, (head tx.inputs).outpoint)],
+    judged net locked tx
+  )
+
+-- | A multisig script: two signatures of three keys, each key after the
+-- push of its 0x21 = 33 bytes.
+directPushes :: ByteString
+directPushes =
+  hex
+    "5221031b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5\
+    \dd078f21024d4b6cd1361032ca9bd2aeb9d900aa4d45d9ead80ac9423374c451\
+    \a7254d07662102531fe6068134503d2723133227c867ac8fa6c83c537e9a44c3\
+    \c5bdbdcb1fe33753ae"
+
+-- | The same script with OP_PUSHDATA1 before the length of each key: 0x4c
+-- 0x21.
+longPushes :: ByteString
+longPushes =
+  hex
+    "524c21031b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9\
+    \d5dd078f4c21024d4b6cd1361032ca9bd2aeb9d900aa4d45d9ead80ac9423374\
+    \c451a7254d07664c2102531fe6068134503d2723133227c867ac8fa6c83c537e\
+    \9a44c3c5bdbdcb1fe33753ae"
+
 secret :: Word16 -> SecKey
 secret n = fromJust (secKey (B.replicate 30 0 <> B.pack [fromIntegral (n `div` 256), fromIntegral n]))
 
@@ -201,20 +238,9 @@ spec = do
   -- coin. It refused the two others, in a block too: "Witness program hash
   -- mismatch".
   describe "verifyStdTx and judgeInputs on the witness script of a multisig" $ do
-    let -- two signatures of three keys, each key after the push of its 0x21 = 33 bytes
-        committed =
-          hex
-            "5221031b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5\
-            \dd078f21024d4b6cd1361032ca9bd2aeb9d900aa4d45d9ead80ac9423374c451\
-            \a7254d07662102531fe6068134503d2723133227c867ac8fa6c83c537e9a44c3\
-            \c5bdbdcb1fe33753ae"
-        -- the same script with OP_PUSHDATA1 before the length of each key: 0x4c 0x21
-        respelled =
-          hex
-            "524c21031b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9\
-            \d5dd078f4c21024d4b6cd1361032ca9bd2aeb9d900aa4d45d9ead80ac9423374\
-            \c451a7254d07664c2102531fe6068134503d2723133227c867ac8fa6c83c537e\
-            \9a44c3c5bdbdcb1fe33753ae"
+    let -- the script whose hash the coins hold, and its other spelling
+        committed = directPushes
+        respelled = longPushes
         -- the script of a coin locked to the committed script: version 0 and its SHA-256
         native = hex "002063ae81f48889f3ebcce92fc39fbb9fe63e409780e0855ec83a4fd3fbabdb1d97"
         -- the script of a coin locked to the hash of those 34 bytes, which its spend pushes
@@ -253,22 +279,181 @@ spec = do
             }
         spendNative = spend 0 "" nativeSigs
         spendNested = spend 1 (pushing [native]) nestedSigs
-        -- the answers of 'verifyStdTx' and of 'judgeInputs' for the spend of a coin
-        verdicts locked tx =
-          ( verifyStdTx btc tx [(either error id (decodeSerial locked), 1000000, (head tx.inputs).outpoint)],
-            judgeInputs btc tx [Just (TxOut 1000000 locked)]
-          )
     it "verify the spend whose witness script is the one the coin commits to, native and nested" $ do
-      verdicts native (spendNative committed) `shouldBe` (True, [InputVerified])
-      verdicts nested (spendNested committed) `shouldBe` (True, [InputVerified])
+      verdicts btc native (spendNative committed) `shouldBe` (True, [InputVerified])
+      verdicts btc nested (spendNested committed) `shouldBe` (True, [InputVerified])
     it "do not verify the spend whose witness script has the same keys in other bytes" $ do
-      verdicts native (spendNative respelled) `shouldBe` (False, [InputUndecided])
-      verdicts nested (spendNested respelled) `shouldBe` (False, [InputUndecided])
+      verdicts btc native (spendNative respelled) `shouldBe` (False, [InputUndecided])
+      verdicts btc nested (spendNested respelled) `shouldBe` (False, [InputUndecided])
     it "the transaction id is the same with either witness script" $ do
       txHash (spendNative committed) `shouldBe` "839c20e76404a63c13f52ba1d0315a021da94d2bf1db35b6cdd87e0a0c184849"
       txHash (spendNative respelled) `shouldBe` "839c20e76404a63c13f52ba1d0315a021da94d2bf1db35b6cdd87e0a0c184849"
       txHash (spendNested committed) `shouldBe` "ef83742b3c751f249a87c7bd3c1b67b4c31178f0717ce34db4267822e68ed530"
       txHash (spendNested respelled) `shouldBe` "ef83742b3c751f249a87c7bd3c1b67b4c31178f0717ce34db4267822e68ed530"
+
+  -- The signature of a multisig input covers the bytes of the script of its
+  -- coin. A coin can be locked to a multisig script whose keys are pushed
+  -- by OP_PUSHDATA1: a signature over the script with direct pushes does
+  -- not open it. A 'ScriptOutput' has no place for the form of a push, so
+  -- such a script is not read as a multisig, and its spend is left to a
+  -- node. The spends below went to a node on regtest. Each coin holds
+  -- 1,000,000.
+  describe "judgeInputs on a multisig coin whose keys are not direct pushes, on Bitcoin" $ do
+    -- Three spends of outputs of one transaction, each with two signatures,
+    -- as Bitcoin Core 32.1 judged them.
+    it "verifies the spend of the coin with direct pushes, which the node mined" $
+      verdicts
+        btc
+        directPushes
+        ( txOf
+            "0200000001ec25e0d26d9f32a339dcb3d3c713be4a7a7d127b1cb5e8d5b5955e\
+            \2e72608e71060000009300483045022100a5387c1620665c031ce80a104208f6\
+            \26374a0781027150f14eb64634b04ec72b022041ffaaf22514397786df9b2b68\
+            \661fdea31c817631279b08e020f8b20362346701483045022100a92973c2d2fe\
+            \b0879cbc3087b19ed14e28a30317e8a5762da9745aaa3b911a8602207d379d91\
+            \88205de7b9716dcad08808a1cf6f878e503100fd5abd265ae3a4641401ffffff\
+            \ff01703a0f000000000016001479b000887626b294a914501a4cd226b58b2359\
+            \8300000000"
+        )
+        `shouldBe` (True, [InputVerified])
+    -- The node refused it in a block: "Script evaluated without error but
+    -- finished with a false/empty top stack element".
+    it "leaves to a node a spend signed over the script with direct pushes, which no block holds" $
+      judged
+        btc
+        longPushes
+        ( txOf
+            "0200000001ec25e0d26d9f32a339dcb3d3c713be4a7a7d127b1cb5e8d5b5955e\
+            \2e72608e71020000009300483045022100e88795128ae0b9b6d40c214ec18db0\
+            \af30f8e767d56aa310a833453ffd8756eb02202824216c8d9970a0e87410a68e\
+            \16a016a399f3c96fee7ce55f1060a4bb7685ed014830450221009353260467d9\
+            \ed68eb8f410a5a20320fcfed9409720649ab1614366d929e6ad002207fa39e2c\
+            \96d486e4434f82a19bb0bcfcea387e42ea1352eef5483668319307db01ffffff\
+            \ff01703a0f000000000016001479b000887626b294a914501a4cd226b58b2359\
+            \8300000000"
+        )
+        `shouldBe` [InputUndecided]
+    -- The node took it in a block, and refused to relay it: "Data push
+    -- larger than necessary".
+    it "leaves to a node a spend signed over the script of the coin, which a block may hold" $
+      judged
+        btc
+        longPushes
+        ( txOf
+            "0200000001ec25e0d26d9f32a339dcb3d3c713be4a7a7d127b1cb5e8d5b5955e\
+            \2e72608e7102000000910047304402207470ee65b26aa2d695dd8600a1855b7b\
+            \2a7a5c9fb0aff53c30468a7ac984ae3f02207bc27899ce27a2dcd083d5206ed2\
+            \93335f6bef709c165a5cb317eba7954bdd3801473044022023a558b88ac8809c\
+            \5a33000ec7b017b6cf52878bb1bca227dec708ae8cfe6d2302200aa7dd56cf11\
+            \bd84894d140f4db2c055de9b13f01b19e7eb0ca571df11ed784801ffffffff01\
+            \703a0f000000000016001479b000887626b294a914501a4cd226b58b23598300\
+            \000000"
+        )
+        `shouldBe` [InputUndecided]
+
+  -- On Bitcoin Cash every push must be the shortest one, in a block too. A
+  -- coin whose script pushes its keys by OP_PUSHDATA1 can never be spent:
+  -- Bitcoin Cash Node 29.2.0 refused each of these spends in a block, "Data
+  -- push larger than necessary", and drops the peer that sends one.
+  describe "judgeInputs on a multisig coin whose keys are not direct pushes, on Bitcoin Cash" $ do
+    let -- two signatures of three keys, each key after the push of its 0x21 = 33 bytes
+        direct =
+          hex
+            "522103bed082a6f8b35a9ac543ddc156457e7a1fb5d7137e4c5386ec562faaff\
+            \3a35ca2102136dcd2e55f06b38331491ccc9768f0d4f77dc956b64384d431c6a\
+            \1c6986615821021d1e6f9a58d67a27fe816ce13bec19c3bdd826af44ed65cc46\
+            \e75b8314782bef53ae"
+        -- the same script with OP_PUSHDATA1 before the length of each key: 0x4c 0x21
+        long =
+          hex
+            "524c2103bed082a6f8b35a9ac543ddc156457e7a1fb5d7137e4c5386ec562faa\
+            \ff3a35ca4c2102136dcd2e55f06b38331491ccc9768f0d4f77dc956b64384d43\
+            \1c6a1c698661584c21021d1e6f9a58d67a27fe816ce13bec19c3bdd826af44ed\
+            \65cc46e75b8314782bef53ae"
+        -- the scripts of the coins locked to the hash of each of the two scripts
+        hashOfDirect = hex "a914a693c2298e10413786f327a0520cf62bf1653ab887"
+        hashOfLong = hex "a9143f449a91b806d6829814e309a919369b1446a71987"
+    it "verifies the spends of the coins with direct pushes, which the node mined" $ do
+      -- ECDSA signatures, of the bare coin
+      verdicts
+        bchRegTest
+        direct
+        ( txOf
+            "02000000012f3a23a55f10c78a8ee83e665cbdc7b3a1cf2815ff2e67a661bf4e\
+            \dc778fa63c0300000092004830450221008f7f827d134d4cb2e0205997dd838b\
+            \72f6d6fffe657fa0473c725ba9c4ce9ffa02201ae06e89fe8aa760b882904448\
+            \be6f38d2001e9f01d6ede050182a7706a8bd6941473044022049831b15326b0f\
+            \ef2e1fea8115b51d457c2bdac599fababd95f7e25136888c2702201ca9878c61\
+            \01d926d6590b776874b70bc6502220b0b072c761ee3dd1cf446d1441ffffffff\
+            \01703a0f00000000001976a91471b6ade29bcdff95817522a958176e1a10a65d\
+            \bf88ac00000000"
+        )
+        `shouldBe` (True, [InputVerified])
+      -- Schnorr signatures, of the coin locked to the hash of the script
+      judged
+        bchRegTest
+        hashOfDirect
+        ( txOf
+            "02000000012f3a23a55f10c78a8ee83e665cbdc7b3a1cf2815ff2e67a661bf4e\
+            \dc778fa63c02000000f0534184d3472649c647ab263caccefb7f5f73e2b01a81\
+            \378defc71e24aad0d0a114449b09ba4ec67cdd4615d077df229f4e30abbb5370\
+            \bdb1ac1e2a37382199aac6064141e408d335002105856d9d10e4d6715923f212\
+            \628e3aead2b576e643ab1ecd373a5cf0228c91bb6ec811f77ec0918bd6e05235\
+            \e025227fd5bb8154019acc71b9f1414c69522103bed082a6f8b35a9ac543ddc1\
+            \56457e7a1fb5d7137e4c5386ec562faaff3a35ca2102136dcd2e55f06b383314\
+            \91ccc9768f0d4f77dc956b64384d431c6a1c6986615821021d1e6f9a58d67a27\
+            \fe816ce13bec19c3bdd826af44ed65cc46e75b8314782bef53aeffffffff0170\
+            \3a0f00000000001976a91471b6ade29bcdff95817522a958176e1a10a65dbf88\
+            \ac00000000"
+        )
+        `shouldBe` [InputVerified]
+    it "leaves to a node a spend of the bare coin with ECDSA signatures over the script with direct pushes" $
+      judged
+        bchRegTest
+        long
+        ( txOf
+            "02000000012f3a23a55f10c78a8ee83e665cbdc7b3a1cf2815ff2e67a661bf4e\
+            \dc778fa63c00000000910047304402206e1f326182c3958f2431249f8b20ef02\
+            \2bdbf522543fb9250d153495deda45b1022058566b3cb6e3ea0d58031e811178\
+            \1d5f84a0287165f73122338c499800480fa94147304402205647841b5b7406a5\
+            \5e4a791ab5388608d09c3adb962ca6bd44c2c71a4262b5bc02206ebaab455b02\
+            \e3c52653cae4c43a0e5cc36a149354b3fd5f66c7b25c96ebd7d141ffffffff01\
+            \703a0f00000000001976a91471b6ade29bcdff95817522a958176e1a10a65dbf\
+            \88ac00000000"
+        )
+        `shouldBe` [InputUndecided]
+    it "leaves to a node a spend of the bare coin with Schnorr signatures over the script with direct pushes" $
+      judged
+        bchRegTest
+        long
+        ( txOf
+            "02000000012f3a23a55f10c78a8ee83e665cbdc7b3a1cf2815ff2e67a661bf4e\
+            \dc778fa63c00000000855341507484b8ba32cb475c439383248cb9b5e911454e\
+            \bc9f009675dcec9a76f12e2ffd034897bd7b45adc70a49f455abfa05d46e5e0f\
+            \602a950e4b8419edd4708c154141277f382eeca3e93a8ef0ca54ead15ea2d351\
+            \34cb2c0466df1993f328b1933d40c3a548d4efb9b3ed840b2fdfb58240ef9cda\
+            \982baebc9d3764ac6606ec08409d41ffffffff01703a0f00000000001976a914\
+            \71b6ade29bcdff95817522a958176e1a10a65dbf88ac00000000"
+        )
+        `shouldBe` [InputUndecided]
+    it "leaves to a node such a spend of the coin locked to the hash of the script" $
+      judged
+        bchRegTest
+        hashOfLong
+        ( txOf
+            "02000000012f3a23a55f10c78a8ee83e665cbdc7b3a1cf2815ff2e67a661bf4e\
+            \dc778fa63c01000000f35341c867eaec03b91941010cda272a0745f944e9d7f8\
+            \7904232eacd59012db39b35be264e5bfedc52e802cb3ce39620ec1d28500b68f\
+            \1b8235210c0c8cf985ba9d414141b089c593e1b3152a04a280ea50402523017e\
+            \2b725ba3da7d32c91cf8fb34ab75a676957d280bfeabf17f3bb18e501381b785\
+            \5be35fe62495194643e61caf9ebe414c6c524c2103bed082a6f8b35a9ac543dd\
+            \c156457e7a1fb5d7137e4c5386ec562faaff3a35ca4c2102136dcd2e55f06b38\
+            \331491ccc9768f0d4f77dc956b64384d431c6a1c698661584c21021d1e6f9a58\
+            \d67a27fe816ce13bec19c3bdd826af44ed65cc46e75b8314782bef53aeffffff\
+            \ff01703a0f00000000001976a91471b6ade29bcdff95817522a958176e1a10a6\
+            \5dbf88ac00000000"
+        )
+        `shouldBe` [InputUndecided]
 
   describe "judgeInputs on Bitcoin Cash" $ do
     let unsigned = spending "" []
@@ -293,9 +478,8 @@ spec = do
     -- regtest, both with Schnorr signatures. The first spends a coinbase
     -- of 50 coins to the same key and makes 1,000 fungible tokens. The
     -- second spends that output, tokens and all.
-    let parse h = either error id (runGetS deserialize (fromJust (decodeHex h))) :: Tx
-        genesis =
-          parse
+    let genesis =
+          txOf
             "0200000001f28fd1cdb4293ae6bb76e580c5a3469fb926690471f3ffb798ef0a\
             \cda9886525000000006441e31c237fe3a1a45f6c32c779c78025f29bd735fa44\
             \d18c182bc1c08fbbcab25f08cbd8c1937dccd38acf37ef2bf8907e75029d622c\
@@ -304,7 +488,7 @@ spec = do
             \cdb4293ae6bb76e580c5a3469fb926690471f3ffb798ef0acda988652510fde8\
             \0376a9145dd6bc82b5a42053b8f7802e68d296ac3578537a88ac00000000"
         spend =
-          parse
+          txOf
             "0200000001db5f2a09c11a2aaceb0d9bfa755006380257d48dab94a73cfd4d69\
             \c2e2d122a6000000006441f52f838cf46e41b8c630334d2b6edefdb49f67fd19\
             \45ee864321da50b1fa652b6b2db4b517110ee5598cbf5193eac763a56d59bfe2\

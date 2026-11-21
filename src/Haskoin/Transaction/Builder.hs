@@ -815,7 +815,9 @@ spentCoins tx given =
 -- * A coin that commits to a multisig script whose keys are not direct
 --   pushes, as a redeem script or as a witness script. Its spend breaks
 --   the @MINIMALDATA@ rule of the relay policy. 'decodeInput' and
---   'decodeWitnessInput' do not read such a script.
+--   'decodeWitnessInput' do not read such a script. A coin locked to such
+--   a script itself cannot be given here: 'decodeOutput' does not read it,
+--   so that a 'PayMulSig' is always the script the signatures cover.
 --
 -- An uncompressed key in a SegWit input is accepted, since a block may
 -- hold it, although nodes do not relay it.
@@ -1038,6 +1040,11 @@ data InputVerdict
 -- ('txSigHashCashToken'). Inputs of those kinds are 'InputVerified' here
 -- and not by 'verifyStdInput'. A multisig is never 'InputForged': one
 -- that does not verify is 'InputUndecided'.
+--
+-- A coin locked to a multisig script whose keys are not direct pushes, or
+-- to the hash of one, is 'InputUndecided' on every network: 'decodeOutput'
+-- does not read that script. On Bitcoin Cash no block holds a spend of
+-- such a coin.
 judgeInputs :: Network -> Tx -> [Maybe TxOut] -> [InputVerdict]
 judgeInputs net tx given = zipWith judge [0 ..] decoded
   where

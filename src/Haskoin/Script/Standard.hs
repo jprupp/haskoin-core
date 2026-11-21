@@ -209,16 +209,30 @@ maxWitnessScriptSize = 10000
 -- The counts of a multisig output are @OP_1@ to @OP_16@, or a one-byte push
 -- for 17 to 'maxMultisigKeys', and a key must fill its push exactly.
 --
--- A 'ScriptOutput' describes what a script does, not its bytes. Two kinds of
--- script decode to a value that 'encodeOutput' writes back as other bytes:
--- a multisig whose keys are not direct pushes, and a data carrier whose data
--- is not pushed in the shortest way. Bitcoin Core gives those the same type
--- (@multisig@ and @nulldata@). So never hash or sign the result of
--- @encodeOutput@ in place of a script that came from somewhere else. Hash
--- and sign the bytes of that script. 'decodeInput' refuses a redeem script
--- that would not come back as the same bytes, and
--- 'Haskoin.Transaction.Segwit.decodeWitnessInput' refuses such a witness
--- script.
+-- The keys of a multisig output must be direct pushes too. Here the match is
+-- stricter than the @Solver@ of Bitcoin Core, which calls a script
+-- @multisig@ also when a key is pushed with @OP_PUSHDATA1@, @2@ or @4@.
+-- Bitcoin Cash Node asks for the shortest push, as this function does. The
+-- reason is the type. A 'ScriptOutput' describes what a script does, not its
+-- bytes: it has no place for the form of a push, and 'encodeOutput' writes
+-- direct pushes. The signature of a multisig input covers the bytes of the
+-- script of its coin. A script read as a 'PayMulSig' and written back with
+-- other pushes is another script, and a signature over it does not open the
+-- coin. So a 'PayMulSig' stands for one script only, and the signers and
+-- verifiers of this library, which take a 'ScriptOutput', sign and verify
+-- the script of the coin. The cost: for this library such a coin is not a
+-- standard output, and its spend is neither signed nor verified. On Bitcoin
+-- a block may hold that spend and nodes do not relay it (the @MINIMALDATA@
+-- rule of the relay policy). On Bitcoin Cash no block holds it. The other
+-- way, a value that keeps the bytes it was read from, would change the type
+-- for every caller, for coins that only a script written by hand makes.
+--
+-- One kind of script still decodes to a value that 'encodeOutput' writes
+-- back as other bytes: a data carrier whose data is not pushed in the
+-- shortest way. Bitcoin Core gives it the same type (@nulldata@). No one
+-- spends such an output, so nothing signs its script. Still, never hash the
+-- result of @encodeOutput@ in place of a script that came from somewhere
+-- else: hash the bytes of that script.
 --
 -- Three kinds of script that the @Solver@ of Bitcoin Core classifies are not
 -- decoded here, because a 'PublicKey' holds a point of the curve:
@@ -417,7 +431,8 @@ p2wshScriptHash script
     size = B.length bytes
 
 -- | Match @[OP_M, PubKey1, ..., PubKeyN, OP_N, OP_CHECKMULTISIG]@ with M and N
--- from 1 to 'maxMultisigKeys' and M at most N.
+-- from 1 to 'maxMultisigKeys', M at most N, and each key a direct push: see
+-- 'decodeOutput' for why no other push of a key is read.
 matchPayMulSig :: Script -> Either String ScriptOutput
 matchPayMulSig (Script ops) = case splitAt (length ops - 2) ops of
   (m : xs, [n, OP_CHECKMULTISIG]) -> do
@@ -429,8 +444,9 @@ matchPayMulSig (Script ops) = case splitAt (length ops - 2) ops of
     return $ PayMulSig keys intM
   _ -> Left "matchPayMulSig: script did not match output template"
   where
-    key (OP_PUSHDATA bs _) = decodePubKey bs
-    key _ = Left "matchPayMulSig: invalid multisig opcode"
+    -- A key is 33 or 65 bytes, so its direct push is its shortest one
+    key (OP_PUSHDATA bs OPCODE) = decodePubKey bs
+    key _ = Left "matchPayMulSig: a key is not a direct push"
 
 -- | The count that a multisig opcode stands for: @OP_1@ to @OP_16@, or a
 -- one-byte push of 17 to 'maxMultisigKeys'. Bitcoin Core reads the count as a
@@ -594,13 +610,12 @@ decodeSimpleInputFor net rdm ops = case (rdm, ops) of
 --   alone does not decode. See 'TxSignature'.
 --
 -- * The redeem script must be in the form that 'encodeOutput' writes, byte
---   for byte. Bitcoin Core's @Solver@ also calls a script a multisig when a
---   key is pushed with @OP_PUSHDATA1@, but a 'ScriptOutput' cannot hold the
---   form of a push, so such a script would come back out as other bytes with
---   another hash. It is refused here, so that 'Haskoin.Address.inputAddress'
---   is always the hash of the bytes the input carries, and so that encoding
---   a decoded input never rewrites its redeem script. Spending such a script
---   breaks the @MINIMALDATA@ rule of the relay policy, so no standard
+--   for byte, so that 'Haskoin.Address.inputAddress' is always the hash of
+--   the bytes the input carries, and so that encoding a decoded input never
+--   rewrites its redeem script. A multisig whose keys are pushed with
+--   @OP_PUSHDATA1@ is not in that form, although Bitcoin Core's @Solver@
+--   calls it a multisig: 'decodeOutput' does not read it. Spending such a
+--   script breaks the @MINIMALDATA@ rule of the relay policy, so no standard
 --   transaction has one.
 --
 -- * The witness program of a 'NestedWitnessInput' must be a direct push and

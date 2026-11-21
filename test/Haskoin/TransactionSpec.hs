@@ -1110,13 +1110,22 @@ segwitSpec =
       decodeWitnessInput btc (P2WSH (WitnessProgramSH [sigBytes] multisigScript)) `shouldBe` Left "decodeWitnessInput: Non-standard script output"
       decodeWitnessInput btc EmptyWitnessProgram `shouldBe` Left "decodeWitnessInput: Empty witness program"
 
-    -- A 'ScriptOutput' does not keep the form of a push, so the multisig
-    -- below would be written back with the key after a direct push: other
-    -- bytes, which the coin does not commit to.
-    it "a witness script that would be written back as other bytes is refused" $ do
+    -- The same keys as the multisig above, in other bytes, which the coin
+    -- does not commit to. It is no standard output, so no witness script
+    -- that is read.
+    it "a multisig witness script whose key is not a direct push is refused" $ do
       let keyAfterPushData1 = Script [OP_1, OP_PUSHDATA keyBytes OPDATA1, OP_1, OP_CHECKMULTISIG]
-      decodeOutput keyAfterPushData1 `shouldBe` Right multisig
+      decodeOutput keyAfterPushData1 `shouldBe` Left "decodeOutput: Non-standard output"
       decodeWitnessInput btc (P2WSH (WitnessProgramSH ["", sigBytes] keyAfterPushData1))
+        `shouldBe` Left "decodeOutput: Non-standard output"
+
+    -- A 'ScriptOutput' does not keep the form of a push, so the data
+    -- carrier below would be written back with its data after a direct
+    -- push: other bytes, which the coin does not commit to.
+    it "a witness script that would be written back as other bytes is refused" $ do
+      let dataAfterPushData1 = Script [OP_RETURN, OP_PUSHDATA "\x01\x02\x03\x04" OPDATA1]
+      decodeOutput dataAfterPushData1 `shouldBe` Right (DataCarrier ["\x01\x02\x03\x04"])
+      decodeWitnessInput btc (P2WSH (WitnessProgramSH [] dataAfterPushData1))
         `shouldBe` Left "decodeWitnessInput: the witness script is not in the form that encodeOutput writes"
 
     it "a witness program is computed from a standard input, native or nested" $ do
