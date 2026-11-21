@@ -119,6 +119,24 @@ spec = do
       -- DER: 30 26 | 02 21 00 <n> | 02 01 01
       decodeStrictSig (hex "3026022100fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141020101")
         `shouldBe` Nothing
+  -- Bitcoin Cash Node reads a signature of 64 bytes as a Schnorr signature,
+  -- also when the bytes are an ECDSA signature in DER.
+  describe "The length that Bitcoin Cash reads as a Schnorr signature" $ do
+    -- an r or an s of this many bytes: 0x01 and then zero bytes
+    let number n = BS.pack [0x02, n, 0x01] <> BS.replicate (fromIntegral n - 1) 0x00
+        -- DER: 30, the length of what follows, then r and s
+        der r s = BS.pack [0x30, 4 + r + s] <> number r <> number s
+    it "is the length of an ECDSA signature whose r and s take 29 bytes each" $
+      -- 2 + (2 + 29) + (2 + 29) = 64
+      fmap isCashSchnorrLength (decodeStrictSig (der 29 29)) `shouldBe` Just True
+    it "is not the length of a signature one byte shorter or longer" $ do
+      -- 2 + (2 + 29) + (2 + 28) = 63
+      fmap isCashSchnorrLength (decodeStrictSig (der 29 28)) `shouldBe` Just False
+      -- 2 + (2 + 29) + (2 + 30) = 65
+      fmap isCashSchnorrLength (decodeStrictSig (der 29 30)) `shouldBe` Just False
+    it "is not the length of an ordinary signature, of 70 bytes" $
+      -- 2 + (2 + 32) + (2 + 32) = 70
+      fmap isCashSchnorrLength (decodeStrictSig (der 32 32)) `shouldBe` Just False
   describe "Binary signature decoding" $ do
     it "decodes the smallest signature" $
       fmap exportSig (decodeSerial (hex "3006020101020101"))

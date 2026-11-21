@@ -778,6 +778,17 @@ more than a block of Bitcoin Cash can hold: to verify a signature of Bitcoin
 Cash with them, check `isCanonicalHalfOrder` too, and read the key with
 `decodePubKey`.
 
+On Bitcoin Cash a signature of 64 bytes before its hash type byte is a Schnorr
+signature, also when its bytes are the DER form of an ECDSA signature that
+verifies. Such a signature is rare by accident, and a computer makes one on
+purpose in a minute. `decodeTxSig` refuses that length on the Bitcoin Cash
+networks, so `decodeInput` and `verifyStdTx` do not take it for an ECDSA
+signature, and `judgeInputs` reads it as a Schnorr signature. `decodeStrictSig`
+reads it: with that function, check `isCashSchnorrLength` too. `signTx` does
+not hand out such a signature. When one comes out, which the specification of
+Bitcoin Cash gives one chance in 2^49, it fails and says to change the
+transaction and sign again.
+
 #### CashTokens
 
 An output of Bitcoin Cash can hold tokens (CHIP-2022-02). They are written at

@@ -25,6 +25,7 @@ module Haskoin.Crypto.Signature
 
     -- * Schnorr signatures of Bitcoin Cash
     verifyCashSchnorr,
+    isCashSchnorrLength,
   )
 where
 
@@ -140,8 +141,37 @@ isCanonicalHalfOrder = isLowS
 -- block chain of Bitcoin. Use 'isCanonicalHalfOrder' for the low-S rule: a
 -- rule of the relay policy on Bitcoin, and a consensus rule on Bitcoin Cash,
 -- where what this function reads is more than a block can hold.
+--
+-- On Bitcoin Cash the length matters too. A signature of 64 bytes is a
+-- Schnorr signature there ('verifyCashSchnorr'), also when it is the strict
+-- DER form of an ECDSA signature that verifies: this function reads it, and
+-- no block of Bitcoin Cash holds it as an ECDSA signature. Check
+-- 'isCashSchnorrLength' there. 'Haskoin.Script.SigHash.decodeTxSig' does.
 decodeStrictSig :: ByteString -> Maybe Sig
 decodeStrictSig = importSig
+
+-- | Is the DER form of this ECDSA signature 64 bytes long? On Bitcoin Cash
+-- a signature of that length is a Schnorr signature, whatever its bytes
+-- (@IsSchnorrSig@ in Bitcoin Cash Node). The node verifies it as one in
+-- @OP_CHECKSIG@, where an ECDSA signature fails, and takes no signature of
+-- that length in a multisig that has no field of bits. So no block of
+-- Bitcoin Cash holds such an ECDSA signature, and a node drops the peer
+-- that sends a transaction with one. On Bitcoin it is an ordinary
+-- signature.
+--
+-- The DER form has 6 bytes besides r and s, which mostly take 32 or 33
+-- bytes each. Here they take 58 together. The specification of the Schnorr
+-- signatures of Bitcoin Cash gives one chance in 2^49 that a signer makes
+-- such a signature, but a computer makes one on purpose in a minute, with
+-- a key of its own.
+--
+-- This is, with 'isCanonicalHalfOrder', what to check of a signature read
+-- by 'decodeStrictSig' before it is verified for Bitcoin Cash.
+-- 'Haskoin.Script.SigHash.decodeTxSig' refuses such a signature on a
+-- network with a fork id, and 'Haskoin.Transaction.Builder.Sign.makeSignature'
+-- does not hand one out there.
+isCashSchnorrLength :: Sig -> Bool
+isCashSchnorrLength = (== 64) . BS.length . exportSig
 
 -- | Verify a Schnorr signature of Bitcoin Cash: 64 bytes, @r@ then @s@,
 -- of a public key over a 32-byte digest.

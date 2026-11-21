@@ -606,6 +606,61 @@ spec = do
       verifyStdTx btc tx [(PayPKHash h160, value, coin)] `shouldBe` True
       judgeInputs btc tx [prev (PayPKHash h160)] `shouldBe` [InputVerified]
 
+  -- Transactions that Bitcoin Cash Node 29.2.0 and Bitcoin Core 32.1 judged
+  -- on regtest. Each has one input, signed by the key 03974d27...ce40 with a
+  -- good ECDSA signature whose r and s take 29 bytes each: its DER form is
+  -- 6 + 29 + 29 = 64 bytes, where most signatures have 70 to 72. Bitcoin
+  -- Cash Node reads a signature of 64 bytes as a Schnorr signature. It
+  -- refused both transactions with "mandatory-script-verify-flag-failed",
+  -- the reason for which it drops the peer that sent the transaction.
+  describe "verifyStdTx and judgeInputs on an ECDSA signature of 64 bytes" $ do
+    it "on Bitcoin Cash, say forged of a key hash input, where the node reads a Schnorr signature" $
+      -- The node: "Signature must be zero for failed CHECK(MULTI)SIG
+      -- operation". The signature is after the push of its 0x41 = 65
+      -- bytes: 64 and the hash type.
+      verdicts
+        bchRegTest
+        (hex "76a91473dd2b9cb7ce0af55615372357094ba779b743e588ac")
+        ( txOf
+            "02000000012106f47f465220eccf0f8bf413656ba995d6e2241703ca77b2bc32\
+            \053a922e2c000000006441303e021d412389f0428046438bea9c0e2427db23ab\
+            \0bce6fe36d851e0dc86b41ed021d20576521b06f9bc52aacf1dee9900a53c82c\
+            \9e9ad11dae4edc0d6164db412103974d27bb4ae05f5f64805ba2d39802f702e1\
+            \3213b52d10e048e7daaf063bce40ffffffff01583e0f00000000001976a91400\
+            \79e2c6e56eccf59e088ee40cfd3b503362157c88acec135901"
+        )
+        `shouldBe` (False, [InputForged])
+    it "on Bitcoin Cash, do not verify a multisig input, where the node takes no signature of that length" $
+      -- The node: "Signature cannot be 65 bytes in CHECKMULTISIG". The coin
+      -- is locked to the hash of a script that asks for one signature of
+      -- two keys.
+      verdicts
+        bchRegTest
+        (hex "a914d52daac634cd249e6674061cf065f05cf388213587")
+        ( txOf
+            "0200000001d0f0c7264bb826a67ef0ec644850b16b222507010305eddc64cb69\
+            \193f57531b000000008b0041303e021d412389f0428046438bea9c0e2427db23\
+            \ab0bce6fe36d851e0dc86b41ed021d2bb4f160b75b0483b12fa6b358c685c20c\
+            \04299e64c997a0605bbaeea94147512103974d27bb4ae05f5f64805ba2d39802\
+            \f702e13213b52d10e048e7daaf063bce402102d77b272781a48f7a51de424305\
+            \f88043665e45d084546195268a458c675db59552aeffffffff01583e0f000000\
+            \00001976a9140079e2c6e56eccf59e088ee40cfd3b503362157c88ac29983f00"
+        )
+        `shouldBe` (False, [InputUndecided])
+    it "on Bitcoin, verify a witness key hash input, which the node put in a block" $
+      verdicts
+        btcRegTest
+        (hex "001473dd2b9cb7ce0af55615372357094ba779b743e5")
+        ( txOf
+            "02000000000101a9e92b1b6c32297125fbe2ec62992e4f0367bb79e16d6bf2e6\
+            \192c681e7bc3480100000000ffffffff01583e0f00000000001976a9140079e2\
+            \c6e56eccf59e088ee40cfd3b503362157c88ac0241303e021d412389f0428046\
+            \438bea9c0e2427db23ab0bce6fe36d851e0dc86b41ed021d45d27dbe1a69e0b6\
+            \a7fdd755a5050c8aa396901d3d6e15a054bead1bda012103974d27bb4ae05f5f\
+            \64805ba2d39802f702e13213b52d10e048e7daaf063bce40904ce700"
+        )
+        `shouldBe` (True, [InputVerified])
+
   describe "judgeInputs on Bitcoin Cash" $ do
     let unsigned = spending "" []
         digest prefix = txSigHashCashToken bch unsigned prefix pkhScript value 0 (setForkIdFlag sigHashAll)

@@ -456,6 +456,12 @@ parseExistingSigs net tx so i = insSigs <> witSigs
 --   hash to the coin. The same for a pay-to-witness-script-hash coin and
 --   its witness script, with 'maxWitnessScriptSize'.
 -- * A SegWit coin on a network without SegWit.
+-- * On a network with a fork id, a signature that comes out 64 bytes long
+--   ('isCashSchnorrLength'). Bitcoin Cash reads that length as a Schnorr
+--   signature, so no node takes the transaction. The nonce is that of RFC
+--   6979, so the same key and digest give the same signature again: the
+--   caller changes the transaction, its fee for instance, and signs again.
+--   The specification of Bitcoin Cash gives one chance in 2^49 for this.
 --
 -- A legacy input signed with 'SIGHASH_SINGLE' at an index that has no
 -- output is refused. The digest of that case is the constant 1, which
@@ -484,7 +490,12 @@ makeSignature net tx i (SigInput so val _ sh rdmM) key = do
   m <- makeSigHash net tx i so val sh' rdmM
   when (signsConstantDigest && i >= length tx.outputs) $
     Left "makeSignature: SIGHASH_SINGLE without an output at the input index"
-  return $ TxSignature (signHash key.key m) sh'
+  let sig = signHash key.key m
+  when (isJust net.sigHashForkId && isCashSchnorrLength sig) $
+    Left
+      "makeSignature: the signature is 64 bytes long, which this network reads as a Schnorr signature: \
+      \change the transaction and sign again"
+  return $ TxSignature sig sh'
   where
     shown = show (toInteger sh)
     sh'

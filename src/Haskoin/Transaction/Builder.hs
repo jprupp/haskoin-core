@@ -808,6 +808,11 @@ spentCoins tx given =
 --   @MINIMALDATA@ rule there. On Bitcoin that rule is one of the relay
 --   policy: a block may hold a longer push, and the answer is 'True' for
 --   it.
+-- * On Bitcoin Cash, no signature is 64 bytes long before its hash type
+--   byte. A node reads that length as a Schnorr signature, also when the
+--   bytes are a valid ECDSA signature in DER, and this function reads no
+--   Schnorr signature ('decodeTxSig'). On Bitcoin a block may hold such an
+--   ECDSA signature, and the answer is 'True' for it.
 --
 -- The answer can be 'False' for an input that a block may hold but that
 -- nodes do not relay:
@@ -1047,7 +1052,11 @@ data InputVerdict
 -- a script hash, and a coin that holds tokens, whose digest covers them
 -- ('txSigHashCashToken'). Inputs of those kinds are 'InputVerified' here
 -- and not by 'verifyStdInput'. A multisig is never 'InputForged': one
--- that does not verify is 'InputUndecided'.
+-- that does not verify is 'InputUndecided'. A signature of 64 bytes before
+-- its hash type byte is always read as a Schnorr signature, as a node reads
+-- it. A valid ECDSA signature whose DER form has that length does not
+-- verify as one, so the spend of a coin of one key with it is
+-- 'InputForged'.
 --
 -- So on Bitcoin Cash the second reading does say 'InputVerified', and it
 -- must take no more than a block does. Bitcoin Cash applies to every block

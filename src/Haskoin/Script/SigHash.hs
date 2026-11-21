@@ -469,7 +469,7 @@ splitTokenPrefix bytes = case splitTokenData bytes of
 --
 -- This is the form of a signature that nodes relay. The binary and JSON
 -- forms, and 'decodeTxSig', apply the three signature rules of the standard
--- script flags of Bitcoin Core, and one rule of the network:
+-- script flags of Bitcoin Core, and two rules of the network:
 --
 -- * @DERSIG@: strict DER, as BIP 66 defines it, with r and s between 1 and
 --   the curve order minus 1.
@@ -481,20 +481,37 @@ splitTokenPrefix bytes = case splitTokenData bytes of
 -- * The 'SIGHASH_FORKID' flag is set exactly on the networks that have a
 --   fork id.
 --
+-- * On a network that has a fork id, the signature is not 64 bytes long
+--   before its hash type byte ('isCashSchnorrLength'). See below.
+--
 -- Nothing may follow the hash type byte.
 --
--- Only the first rule is a consensus rule, and only since BIP 66. A block
--- can therefore hold signatures that do not decode: one with a high S, one
--- with an undefined hash type byte, and, before BIP 66 activated, one in a
--- looser DER form. An input with such a signature fails
+-- On Bitcoin only the first rule is a consensus rule, and only since BIP 66.
+-- A block can therefore hold signatures that do not decode: one with a high
+-- S, one with an undefined hash type byte, and, before BIP 66 activated, one
+-- in a looser DER form. An input with such a signature fails
 -- 'Haskoin.Script.Standard.decodeInput', and has no
 -- 'Haskoin.Address.inputAddress'. This type is not a parser for the whole
 -- chain history. 'Haskoin.Crypto.Signature.decodeStrictSig' reads a
 -- signature under BIP 66 alone.
 --
 -- On Bitcoin Cash, a signature of 64 bytes followed by the hash type byte is
--- a Schnorr signature, which Bitcoin Cash Node accepts in @OP_CHECKSIG@.
--- This type only holds ECDSA signatures, so those do not decode either.
+-- a Schnorr signature, whatever its bytes. Bitcoin Cash Node verifies it as
+-- one in @OP_CHECKSIG@, and takes no signature of that length in a multisig
+-- that has no field of bits. This type only holds ECDSA signatures, so on a
+-- network with a fork id nothing of 64 bytes decodes: not a Schnorr
+-- signature, and not an ECDSA signature whose DER form has that length.
+--
+-- Such an ECDSA signature exists: its r and s take 58 bytes together, where
+-- they mostly take 64 or 65. It verifies as ECDSA, and no block of Bitcoin
+-- Cash holds it, so to read it as a good signature is to call valid a
+-- transaction that a node refuses and drops its peer for. The specification
+-- of the Schnorr signatures of Bitcoin Cash gives one chance in 2^49 of
+-- making one by accident, but a computer makes one on purpose in a minute.
+-- On Bitcoin it is an ordinary signature, and it decodes. 'encodeTxSig'
+-- writes such a value on every network: on a network with a fork id it is
+-- written and not read back. The signer does not make one there
+-- ('Haskoin.Transaction.Builder.Sign.makeSignature').
 data TxSignature
   = TxSignature
       { sig :: !Sig,
@@ -517,6 +534,8 @@ instance Marshal Network TxSignature where
         sig <- deserialize
         unless (isCanonicalHalfOrder sig) $
           fail "Non-canonical signature: S value is unnecessarily high"
+        when (isJust net.sigHashForkId && isCashSchnorrLength sig) $
+          fail "Non-canonical signature: a signature of 64 bytes is a Schnorr signature on this network"
         sh <- fromIntegral <$> getWord8
         when (isSigHashUnknown sh) $
           fail "Non-canonical signature: unknown hashtype byte"
@@ -543,9 +562,11 @@ encodeTxSig :: Network -> TxSignature -> ByteString
 encodeTxSig net = runPutS . marshalPut net
 
 -- | Parse a signature with its hash type byte, under the rules listed at
--- 'TxSignature': strict DER, a low S, a defined hash type, and the fork id
--- flag that the network asks for. The empty string is 'TxSignatureEmpty'. A
--- signature that is valid by consensus alone does not decode.
+-- 'TxSignature': strict DER, a low S, a defined hash type, the fork id
+-- flag that the network asks for, and on a network with a fork id a length
+-- other than 64 bytes, which is a Schnorr signature there. The empty string
+-- is 'TxSignatureEmpty'. A signature that is valid by consensus alone does
+-- not decode.
 decodeTxSig :: Network -> ByteString -> Either String TxSignature
 decodeTxSig net =
   runGetS $ do
