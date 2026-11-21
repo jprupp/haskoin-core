@@ -65,6 +65,7 @@ module Haskoin.Crypto.Keys.Slip39
     encryptMasterSecret,
     decryptMasterSecret,
     decryptMasterSecretBytes,
+    roundIterations,
 
     -- * Shamir's secret sharing
     splitSecret,
@@ -607,8 +608,8 @@ decryptMasterSecretBytes passphraseBytes ems = do
 -- that order: the halves L and R become (R, L xor F(i, R)) each round, and
 -- the result is R || L. The round function is PBKDF2-HMAC-SHA256 of the
 -- round number followed by the passphrase, salted with the salt prefix
--- and R, with 2500 times 2 to the exponent iterations. The passphrase is
--- given as its bytes.
+-- and R, with 'roundIterations' iterations. The passphrase is given as its
+-- bytes.
 feistel :: [Word8] -> Int -> Bool -> Int -> ByteString -> ByteString -> ByteString
 feistel rounds identifier ext iterExponent passphrase secret = right <> left
   where
@@ -617,7 +618,7 @@ feistel rounds identifier ext iterExponent passphrase secret = right <> left
     step (l, r) i = (r, B.pack (B.zipWith xor l (roundFunction i r)))
     roundFunction i r =
       fastPBKDF2_SHA256
-        Parameters {iterCounts = 2500 `shiftL` iterExponent, outputLength = half}
+        Parameters {iterCounts = roundIterations iterExponent, outputLength = half}
         (B.cons i passphrase)
         (saltPrefix <> r)
     -- Without the extendable flag the identifier salts the passphrase, so
@@ -625,6 +626,17 @@ feistel rounds identifier ext iterExponent passphrase secret = right <> left
     saltPrefix
       | ext = B.empty
       | otherwise = "shamir" <> integerToBytes 2 (toInteger identifier)
+
+-- | The PBKDF2 iterations of one round of the cipher at an iteration
+-- exponent: 2500 times 2 to its power, the @2500 << e@ of the
+-- specification. The four rounds together make the 10000 times 2 to the
+-- exponent that a share states.
+--
+-- The count has a name of its own so that a test can state it at each of
+-- the 16 exponents. A run of the cipher cannot do that for the high ones:
+-- at the exponent 15 one encryption takes minutes.
+roundIterations :: Int -> Int
+roundIterations iterExponent = 2500 `shiftL` iterExponent
 
 {- Generating shares -}
 
@@ -708,7 +720,11 @@ generateShares = generateSharesFrom (liftIO . getEntropy)
 --
 -- The source is only asked for whole values, never for zero bytes, and
 -- only after the scheme, the exponent, the passphrase and the secret have
--- passed their checks.
+-- passed their checks. It is asked in the order of the reference
+-- implementation, so both give the same shares from the same stream of
+-- bytes: two bytes for the identifier, the high byte first and its top bit
+-- dropped, then the random shares and the random part of the digest share
+-- of each split, the split among the groups first and each group after it.
 generateSharesFrom ::
   (Monad m) =>
   -- | the source of random bytes

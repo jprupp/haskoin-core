@@ -100,6 +100,21 @@ Bitcoin testnet3 is deprecated and still works.
 - `arbitrarySigningDataOf` is `arbitrarySigningData` for coins that the
   caller chooses. `arbitraryLegacySigInput` and `arbitraryWitnessSigInput`
   are the two halves of `arbitrarySigInput` without Taproot.
+- `roundIterations` in `Haskoin.Crypto.Keys.Slip39`: the PBKDF2 iterations of
+  one round of the SLIP-39 cipher at an iteration exponent, 2500 × 2^e. The
+  cipher computed this count in place. It has a name so that a test states
+  it at each of the 16 exponents: one encryption at the exponent 15 takes
+  minutes, and no test had an exponent above 3. The cipher itself is now
+  tested at the exponents 4 and 5, and a share is read and written with
+  every field of its header at its highest value.
+- **The tests compare the SLIP-39 shares that `generateSharesFrom` draws with
+  expected ones.** They checked that drawn shares rebuild the secret, and
+  shares do that also when a random value is replaced by zeros, where one
+  share shows most of the secret. A source that gives the random values of a
+  case of `data/slip39_split.json` must now give the mnemonics of that case,
+  and two draws from the system must differ. The documentation of
+  `generateSharesFrom` says in which order it asks its source for bytes: the
+  order of the reference implementation.
 - **The `Network` record holds the aserti3-2d anchor block where it is known**,
   in the new field `asertAnchorBlock`: block 661647 on Bitcoin Cash mainnet
   and block 16844 on testnet4, the constants of Bitcoin Cash Node.
