@@ -201,6 +201,7 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes, fromMaybe, isJust, isNothing, listToMaybe, mapMaybe, maybeToList)
 import Data.Serialize qualified as S
+import Data.Set qualified as Set
 import Data.Word (Word32, Word64, Word8)
 import GHC.Generics (Generic)
 import Haskoin.Crypto.Hash (Hash160, addressHash)
@@ -1761,6 +1762,13 @@ xPrvSigner xprv originM =
 -- when the input asks for no sighash. The BIP 341 digest commits to the
 -- output every input spends, so every input must have its coin then.
 --
+-- A PSBT that another party wrote can hold thousands of leaf scripts and
+-- of derivation records on one input, and thousands of leaves in one
+-- record, at no cost to its writer. The signer finds the record of the key
+-- of a leaf, and a leaf among those a record lists, by a lookup. So the
+-- time it takes to find the keys of an input grows with the size of the
+-- input, and not with the product of two of those numbers.
+--
 -- An input without its coin, with a final script already, with a coin,
 -- redeem script or witness script that is no standard template, or for
 -- which the signer holds no key, is left as it is.
@@ -1841,13 +1849,32 @@ signPsbt net signer psbt = do
       rootM <- inputTapMerkleRoot m
       records <- inputTapDerivations m
       leaves <- tapLeafScripts m
-      -- The secret key of an x-only key, by a record of that key which
-      -- the test accepts, or by the hash of the key. A key the signer
-      -- gives is kept only when it is the key that was asked for.
+      -- The record of each x-only key, with the leaves it lists as a set.
+      -- An input has at most one record for a key, since the key is the
+      -- key of the entry in its map. A leaf finds its record and its hash
+      -- here by a lookup: a walk through the records for each leaf, or
+      -- through the leaves of a record for each place of a leaf in the
+      -- tree, would take time by the product of two numbers that whoever
+      -- wrote the PSBT chooses.
+      let recordOf =
+            Map.fromList
+              [ (exportXOnlyPubKey recordKey, (d.derivation, Set.fromList d.leafHashes))
+              | (recordKey, d) <- records
+              ]
+      -- The secret key of an x-only key, by the record of that key when
+      -- the test accepts the leaves it lists, or by the hash of the key.
+      -- A key the signer gives is kept only when it is the key that was
+      -- asked for.
       let heldXOnly accepts public =
             listToMaybe . filter (sameX public . derivePubKey) . catMaybes $
-              [signer.keyOfRecord (PublicKey candidate True) d.derivation | (recordKey, d) <- records, sameX recordKey public, accepts d, candidate <- bothParities public]
-                <> [(.key) <$> signer.keyOfHash (addressHash (encodeSerial (PublicKey candidate True))) | candidate <- bothParities public]
+              [ signer.keyOfRecord (PublicKey candidate True) derivation
+              | Just (derivation, listed) <- [Map.lookup (exportXOnlyPubKey public) recordOf],
+                accepts listed,
+                candidate <- bothParities public
+              ]
+                <> [ (.key) <$> signer.keyOfHash (addressHash (encodeSerial (PublicKey candidate True)))
+                   | candidate <- bothParities public
+                   ]
       keySig <- case internalM of
         Nothing -> return []
         Just internal -> do
@@ -1870,7 +1897,7 @@ signPsbt net signer psbt = do
           -- commit it to the output key
           | Just outKey <- importXOnlyPubKey program,
             commitsLeaf outKey leaf,
-            Just secret <- heldXOnly ((hashOfLeaf `elem`) . (.leafHashes)) leafKey -> do
+            Just secret <- heldXOnly (Set.member hashOfLeaf) leafKey -> do
               h <- taprootSigHash tx spent i sighash Nothing (Just (hashOfLeaf, 0xffffffff))
               signature <- taprootSignature (signSchnorr secret (hashToMsg h)) sighash
               return [insertTapScriptSig leafKey hashOfLeaf signature]
@@ -2129,6 +2156,11 @@ signingInput input output sighash scripts =
 -- (SIGHASH_DEFAULT for a Taproot coin, and with the fork id flag on a
 -- network that has one), as Bitcoin Core requires.
 --
+-- A Taproot input of a PSBT that another party wrote can hold thousands
+-- of leaf scripts and of script path signatures, at no cost to its writer.
+-- A leaf finds its signature by a lookup, so the time such an input takes
+-- grows with its size, and not with the product of the two numbers.
+--
 -- The coins finalized are those of P2PK, P2PKH and multisig scripts, P2SH
 -- coins with their redeem script, P2WPKH coins, P2WSH coins with their
 -- witness script, nested in P2SH or not, and Taproot coins by their key
@@ -2291,11 +2323,17 @@ finalTaprootScripts tx allCoins i m coinScript = do
         Left "the key path signature does not verify"
       return (Just (B.empty, [encodeTaprootSig signature]))
     Nothing -> do
-      let candidates =
+      -- A leaf finds its signature by a lookup, as it finds its record in
+      -- the signer: a walk through the signatures for each leaf would take
+      -- time by the product of two numbers that whoever wrote the PSBT
+      -- chooses
+      let signatureOf = Map.fromList [((exportXOnlyPubKey k, h), sig) | ((k, h), sig) <- scriptSigs]
+          candidates =
             [ (leaf, leafKey, signature)
             | leaf <- leaves,
               Just leafKey <- [singleKeyLeaf leaf],
-              Just signature <- [lookup (leafKey, leafHash leaf.leafVersion leaf.script) [((k, h), sig) | ((k, h), sig) <- scriptSigs, sameX k leafKey]]
+              let hashOfLeaf = leafHash leaf.leafVersion leaf.script,
+              Just signature <- [Map.lookup (exportXOnlyPubKey leafKey, hashOfLeaf) signatureOf]
             ]
       case candidates of
         [] -> return Nothing
@@ -2307,5 +2345,3 @@ finalTaprootScripts tx allCoins i m coinScript = do
           unless (verifySchnorr leafKey signature.sig (hashToMsg digest)) $
             Left "the script path signature does not verify"
           return (Just (B.empty, [encodeTaprootSig signature, S.encode leaf.script, leaf.controlBlock]))
-  where
-    sameX a b = exportXOnlyPubKey a == exportXOnlyPubKey b

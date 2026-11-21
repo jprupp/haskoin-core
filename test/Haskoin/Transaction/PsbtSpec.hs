@@ -13,6 +13,7 @@
 module Haskoin.Transaction.PsbtSpec (spec) where
 
 import BitcoinCore
+import Control.Exception (evaluate)
 import Control.Monad (foldM, forM, forM_)
 import Crypto.Hash (Digest, SHA256, digestFromByteString)
 import Data.Aeson ((.:), (.:?), (.=))
@@ -28,6 +29,7 @@ import Data.List (isPrefixOf, isSuffixOf)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromJust, fromMaybe, isJust, listToMaybe, mapMaybe)
 import Data.Serialize qualified as S
+import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding (decodeUtf8, encodeUtf8)
@@ -40,7 +42,9 @@ import Haskoin.Script
 import Haskoin.Transaction
 import Haskoin.Util
 import Haskoin.Util.Arbitrary
+import Numeric (showHex)
 import System.Environment (lookupEnv)
+import System.Timeout (timeout)
 import Test.Hspec
 import Test.Hspec.QuickCheck (prop)
 import Test.QuickCheck
@@ -147,6 +151,7 @@ spec = do
     coinsSpec
     version2FieldsSpec
     taprootChecksSpec vectors371
+    taprootCostSpec
     decoderChecksSpec
     taprootSpec vectors371
     complexSpec
@@ -2136,6 +2141,84 @@ taprootChecksSpec vectors =
       final.version `shouldBe` Version2
       tx <- expectRight (psbtTransaction final)
       verifyStdTx btc tx coins `shouldBe` True
+
+{- The time a Taproot input with many leaves, records and signatures takes -}
+
+-- | The secret key that is the number, for the tests that need many keys
+secretOf :: Int -> SecKey
+secretOf i = fromString (replicate (64 - length digits) '0' <> digits)
+  where
+    digits = showHex i ""
+
+-- | A PSBT that spends a Taproot coin whose script tree has the leaves, all
+-- at the depth given, so they are a power of two. The internal key of the
+-- coin is the point G. The input has the coin, and each leaf that the test
+-- keeps, with the control block of its place in the tree.
+spendingTree :: (Script -> Bool) -> Word8 -> [Script] -> Psbt
+spendingTree kept depth scripts = onInputs (\m -> foldr insertTapLeafScript m leaves) psbt
+  where
+    internal = derivePubKey secretOne
+    tree = fromJust (tapTreeFromLeaves [TapLeaf depth 0xc0 script | script <- scripts])
+    output = TaprootOutput internal (Just tree)
+    control = encodeControlBlock (0xc0 + keyParity (taprootOutputKey output)) internal
+    (psbt, _) = spendingPsbt (taprootScriptOutput output)
+    leaves =
+      [ TapLeafScript (control proof) script version
+      | (version, script, proof) <- getMerkleProofs tree,
+        kept script
+      ]
+
+-- A PSBT that another party wrote can hold thousands of leaf scripts,
+-- derivation records and signatures on one input, at no cost to its
+-- writer. The signer and the finalizer once compared each leaf with each
+-- record or signature. The seconds in the comments are those of that code
+-- built without optimisation, on the computer where the tests were
+-- written. The code that looks up takes 0.1 to 0.5 seconds there.
+taprootCostSpec :: Spec
+taprootCostSpec =
+  describe "A Taproot input takes time by its size, and not by the square of its size: in under three seconds" $ do
+    let keyLeaf secret = Script [opPushData (exportXOnlyPubKey (derivePubKey secret)), OP_CHECKSIG]
+        -- 2048 leaves at depth 11, each the check of a key of its own
+        leaves = [keyLeaf (secretOf i) | i <- [1001 .. 3048]]
+        -- 16384 keys that are in no leaf
+        strangers = [derivePubKey (secretOf i) | i <- [100001 .. 116384]]
+        derivation = Derivation (fingerprintOf "d90c6a4f") "m/86'/0'/0'/0/0"
+        -- Whether the work leaves the PSBT as it is, when it answers within
+        -- the seconds. The PSBT is built before the time starts.
+        leavesAlone :: Int -> (Psbt -> Either String Psbt) -> Psbt -> IO (Maybe Bool)
+        leavesAlone seconds work psbt = do
+          _ <- evaluate (B.length (encodePsbt psbt))
+          timeout (seconds * 1000000) (evaluate (work psbt == Right psbt))
+
+    -- 2048 leaves × 16384 records = 33,554,432 comparisons of two keys: 13 seconds
+    it "the signer leaves alone 2048 leaves and 16384 records of keys it does not hold" $ do
+      let records m = foldr (\key -> insertInputTapDerivation key (TapDerivation [] derivation)) m strangers
+      leavesAlone 3 (signPsbt btc (keySigner secretThree)) (onInputs records (spendingTree (const True) 11 leaves))
+        `shouldReturn` Just True
+
+    -- The signatures are 64 bytes that verify for no key, filed under a
+    -- leaf hash that is the hash of no leaf of the input.
+    -- 2048 leaves × 16384 signatures = 33,554,432 comparisons of two keys: 13 seconds
+    it "the finalizer leaves alone 2048 leaves and 16384 signatures that are for none of them" $ do
+      let signature key = Map.insert (Key 0x14 (exportXOnlyPubKey key <> B.replicate 32 0xaa)) (B.replicate 64 0x01)
+          signatures m = foldr signature m strangers
+      leavesAlone 3 (finalizePsbt btc) (onInputs signatures (spendingTree (const True) 11 leaves))
+        `shouldReturn` Just True
+
+    -- One leaf can be at many places of a tree, and the input then has it
+    -- once for each place, each time with another control block. Here the
+    -- tree has 8192 leaves at depth 13: the same key check 4096 times, each
+    -- beside a leaf of its own. The record of the key lists 262144 leaves,
+    -- and not that one.
+    -- 4096 places × 262144 leaf hashes = 1,073,741,824 comparisons of two hashes: 13 seconds
+    it "the signer leaves alone one leaf at 4096 places, whose record lists 262144 other leaves" $ do
+      let own = keyLeaf secretTwo
+          beside i = Script [opPushData (S.encode i), OP_DROP]
+          others = [fromJust (digestFromByteString (B.replicate 28 0 <> S.encode i)) | i <- [1 .. 262144 :: Word32]]
+          record = insertInputTapDerivation (derivePubKey secretTwo) (TapDerivation others derivation)
+          scripts = concat [[own, beside i] | i <- [1 .. 4096 :: Word32]]
+      leavesAlone 3 (signPsbt btc (keySigner secretThree)) (onInputs record (spendingTree (== own) 13 scripts))
+        `shouldReturn` Just True
 
 {- The coins of a PSBT, and the previous transaction a signer may require -}
 

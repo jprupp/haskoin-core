@@ -197,6 +197,24 @@ Bitcoin testnet3 is deprecated and still works.
 
 ### Fixed
 
+- **`signPsbt` and `finalizePsbt` no longer take time that grows with the
+  square of the size of a Taproot input.** One input of a PSBT can hold any
+  number of leaf scripts, derivation records and script path signatures.
+  For each leaf script, the signer went through every record of the input,
+  and the finalizer through every signature. An input with 1024 leaf
+  scripts and 8192 records, a PSBT of 730 kB, took `signPsbt` 50 seconds,
+  and an input with 4000 leaf scripts and 4000 signatures, a PSBT of one
+  megabyte, took `finalizePsbt` 4 seconds: four times as long, or more, for
+  twice the size. Whoever writes a PSBT can make such an input at no cost.
+  It needs no valid signature, and the signer need not hold a key of it. A
+  program that signs or finalizes a PSBT from another party could be made
+  to stall. Both functions now find the record of a key and the signature
+  of a leaf by a lookup, and take 0.10 and 0.05 seconds for these two
+  inputs. The signer also went through the leaves that a record lists once
+  for each place of a leaf script in the tree, which was a second product
+  of two numbers: 1.5 seconds for one leaf at 4000 places and a record of
+  32,000 leaves, and now 0.3 seconds. The signatures and the final
+  witnesses are the same as before.
 - **`judgeInputs` verifies a multisig of Bitcoin Cash with Schnorr signatures
   whose field of bits is the byte 0x81.** That is two signatures of eight
   keys, by the first key and the last. The field of bits takes the place of

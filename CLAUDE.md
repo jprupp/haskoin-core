@@ -201,6 +201,10 @@ Read a file before any work on what its line names.
   test fail, build the real source again before the probe.
 - A run under a memory limit: a clean `haskell-dev build` needs 1.2 GB for
   GHC, and each of the eight test processes about 100 MB.
+- A test of a cost: `timeout` around `evaluate`, as `taprootCostSpec` of
+  `PsbtSpec.hs`. Size it so that the old code, timed first, is 4 times over.
+- `--match "/Module/name/"` runs nothing unless `name` is the whole name of
+  a `describe`. Without slashes, a part of the name is enough.
 - The long-line check prints 978 lines at 2.0.1, most of them test vectors
   and `CHANGELOG.md`. With `grep -c` in place of `grep -n` it counts them for
   each file: compare the counts before and after the change.
