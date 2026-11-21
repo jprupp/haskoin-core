@@ -450,6 +450,14 @@ Decoding a `ScriptOutput` fails for a script that matches no template. A `Script
 holds any script, as a list of `ScriptOp` values, so use that type for the others.
 `encodeOutput` and `decodeOutput` convert between `ScriptOutput` and `Script`.
 
+The templates are matched on their exact bytes: every hash and key is a direct
+push. A multisig script whose keys are pushed with `OP_PUSHDATA1` is therefore
+not a `PayMulSig`, although Bitcoin Core calls it `multisig`. A signature covers
+the bytes of the script of its coin, and a `ScriptOutput` does not keep them, so
+a `PayMulSig` must stand for one script only. The library does not sign or
+verify the spend of such a coin. Nodes of Bitcoin do not relay that spend, and
+on Bitcoin Cash no block holds it.
+
 #### Opcodes on the two chains
 
 Bitcoin and Bitcoin Cash split a script into opcodes in the same way, so one
