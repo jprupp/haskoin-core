@@ -164,6 +164,8 @@ Read a file before any work on what its line names.
   or on Bitcoin Cash (EDA, DAA, aserti3-2d), and the tests of those rules.
 - `claude-notes/protocol.md`: the protocol machines of the reference nodes
   (`Haskoin.Network.Protocol`), their report in `doc/protocol/` and citations.
+- `claude-notes/slip39.md`: SLIP-39 shares (`Haskoin.Crypto.Keys.Slip39`),
+  their tests and where the literal values of the tests come from.
 
 ## Working notes
 
@@ -205,6 +207,9 @@ Read a file before any work on what its line names.
   `PsbtSpec.hs`. Size it so that the old code, timed first, is 4 times over.
 - `--match "/Module/name/"` runs nothing unless `name` is the whole name of
   a `describe`. Without slashes, a part of the name is enough.
+- The seconds that `haskell-dev test` prints change with the load of the
+  machine: 3 to 9 for one spec. To time examples, run the built `spec` of
+  `.stack-work/dist` with `--match "/Module/" --times`.
 - The long-line check prints 978 lines at 2.0.1, most of them test vectors
   and `CHANGELOG.md`. With `grep -c` in place of `grep -n` it counts them for
   each file: compare the counts before and after the change.

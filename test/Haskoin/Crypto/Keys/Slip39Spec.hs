@@ -19,7 +19,7 @@ module Haskoin.Crypto.Keys.Slip39Spec (spec) where
 import Control.DeepSeq (force)
 import Control.Exception (evaluate)
 import Control.Monad (forM_)
-import Control.Monad.State.Strict (State, modify, runState)
+import Control.Monad.State.Strict (State, evalState, modify, runState, state)
 import Crypto.Hash (SHA256 (..), hashWith)
 import Crypto.Random (drgNewTest, getRandomBytes, withDRG)
 import Data.Aeson (FromJSON (..), withObject, (.:))
@@ -211,6 +211,29 @@ spec = do
     it "encodes a 20-byte value as 23 words, with no padding" $
       -- 160 bits is 16 words exactly
       fmap (length . T.words) (encodeShare vector1 {value = B.replicate 20 0}) `shouldBe` Right 23
+    it "reads and writes a share whose header fields all have their highest value" $ do
+      -- The 40 bits of such a header are all set, which is four times the
+      -- word 1023, "zero": the identifier 32767, the flag, the exponent 15,
+      -- the two indices 15, and 15 for the two thresholds and the group
+      -- count, which the header holds as one less. The words of the value
+      -- and of the checksum are those of the verifier.
+      let highest =
+            Share
+              { identifier = 32767,
+                extendable = True,
+                iterationExponent = 15,
+                groupIndex = 15,
+                groupThreshold = 16,
+                groupCount = 16,
+                memberIndex = 15,
+                memberThreshold = 16,
+                value = hex "101112131415161718191a1b1c1d1e1f"
+              }
+          mnemonic =
+            "zero zero zero zero again beard entrance declare airline blue \
+            \frequent legend endorse bumpy hush soldier lunar expand pipeline dictate"
+      decodeShare mnemonic `shouldBe` Right highest
+      encodeShare highest `shouldBe` Right mnemonic
     it "reads words in upper case" $
       decodeShare (T.toUpper (mnemonicOf vectors 1)) `shouldBe` Right vector1
     it "refuses 19 words" $
@@ -397,6 +420,37 @@ spec = do
       fmap (.ciphertext) (encryptMasterSecret 1 True 0 "TREZOR" secret) `shouldBe` Right (hex "c5462e7421d4c690de1668d6a3bfd337")
     it "gives another ciphertext under another iteration exponent" $
       fmap (.ciphertext) (encryptMasterSecret 1 True 1 "" secret) `shouldBe` Right (hex "d51a2d68cb0adf27958873071f5253ac")
+    it "decrypts under an iteration exponent of 4" $
+      -- 2500 × 2^4 = 40,000 iterations a round. The verifier's value: no
+      -- vector of the reference implementation has an exponent above 3.
+      decryptMasterSecret "TREZOR" ems {iterationExponent = 4, ciphertext = B.replicate 16 0x11}
+        `shouldBe` Right (hex "65dfcb7b12749b53e39e72600297a274")
+    it "encrypts under an iteration exponent of 5" $
+      -- 2500 × 2^5 = 80,000 iterations a round, the first count that 16
+      -- bits do not hold. The verifier's value.
+      fmap (.ciphertext) (encryptMasterSecret 1 True 5 "" secret)
+        `shouldBe` Right (hex "fe2efd8f0a0d4ea564cc86c509b1bbf5")
+    it "runs 2500 iterations a round at the exponent 0, and twice as many at each exponent after it" $
+      -- 2500 × 2^15 = 2500 × 32768 = 81,920,000 at the last one. The cipher
+      -- is not run above the exponent 5 here: at 15 it takes minutes.
+      map roundIterations [0 .. 15]
+        `shouldBe` [ 2500,
+                     5000,
+                     10000,
+                     20000,
+                     40000,
+                     80000,
+                     160000,
+                     320000,
+                     640000,
+                     1280000,
+                     2560000,
+                     5120000,
+                     10240000,
+                     20480000,
+                     40960000,
+                     81920000
+                   ]
     it "decrypts to another master secret under a wrong passphrase, without an error" $
       decryptMasterSecret "trezor" ems `shouldSatisfy` \r -> r /= Right (hex "bb54aac4b89dc868ba37d9cc21b2cece") && either (const False) (const True) r
     it "accepts the first and the last printable ASCII characters" $
@@ -462,6 +516,11 @@ spec = do
       it ("combines any threshold of the shares of " <> T.unpack c.caseDescription) $
         forM_ (thresholdSubsets c) $ \subset ->
           combineMnemonics c.casePassphrase subset `shouldBe` Right c.caseMasterSecret
+      it ("draws the shares of " <> T.unpack c.caseDescription <> " from the verifier's random values") $
+        -- every value that the source gives is in the shares, and the
+        -- source is asked for no byte more
+        runState (fmap (>>= traverse (traverse encodeShare)) (generateSharesFromCase scripted c)) (drawnBytes c)
+          `shouldBe` (Right c.caseMnemonics, B.empty)
     it "gives the 2-of-3 case these three mnemonics" $
       -- The second split case, written out: the first three words are the
       -- identifier 42, the flag and the exponent 1; the fourth differs by
@@ -515,6 +574,16 @@ spec = do
     it "refuses a source that gives fewer bytes than asked" $
       fst (runState (generateSharesFrom (\_ -> return "x") (Scheme 1 [(2, 3)]) True 0 "" "ABCDEFGHIJKLMNOP") ())
         `shouldBe` Left "The source of random bytes gave 1 bytes where 2 were asked for"
+    it "refuses a source that gives more bytes than asked" $
+      fst (runState (generateSharesFrom (\_ -> return "xyz") (Scheme 1 [(2, 3)]) True 0 "" "ABCDEFGHIJKLMNOP") ())
+        `shouldBe` Left "The source of random bytes gave 3 bytes where 2 were asked for"
+    it "reads the identifier from the first two bytes of its source, the high byte first" $
+      -- 0x30 × 256 + 0x39 = 12345
+      drawnIdentifier "\x30\x39" `shouldBe` Right [[12345]]
+    it "drops the top bit of those two bytes, for an identifier of 15 bits" $ do
+      -- 0xffff - 0x8000 = 0x7fff = 32767
+      drawnIdentifier "\xff\xff" `shouldBe` Right [[32767]]
+      drawnIdentifier "\x80\x00" `shouldBe` Right [[0]]
     it "draws a 15-bit identifier and shares of which any two of three rebuild the secret" $ do
       let secret = "ABCDEFGHIJKLMNOP"
           drawn = fst (withDRG (drgNewTest (1, 2, 3, 4, 5)) (generateSharesFrom getRandomBytes (Scheme 1 [(2, 3)]) True 0 "" secret))
@@ -552,6 +621,15 @@ spec = do
           let ws = T.words (mnemonicOf vectors 1)
               changed = T.unwords (take position ws ++ [word] ++ drop (position + 1) ws)
            in ws !! position /= word ==> decodeShare changed === Left "The checksum of the mnemonic is invalid"
+    it "draws other shares from the system's randomness each time" $ do
+      -- Each draw has 15 bits of identifier and 96 bits of random part of
+      -- its own, so two draws that are the same mean a source that is not
+      -- random
+      let draw = generateMnemonics (Scheme 1 [(2, 3)]) True 0 "" "ABCDEFGHIJKLMNOP"
+      first <- draw
+      second <- draw
+      fmap (map length) first `shouldBe` Right [3]
+      first `shouldNotBe` second
     it "draws shares with the system's randomness that rebuild a two-level scheme" $ do
       let secret = "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"
       drawn <- generateMnemonics (Scheme 2 [(1, 1), (2, 3), (3, 5)]) True 0 "pass" secret
@@ -739,6 +817,33 @@ bytesOf n = B.pack <$> vectorOf n arbitrary
 -- each request asked for, in order.
 recordedZeros :: Int -> State [Int] ByteString
 recordedZeros n = modify (++ [n]) >> return (B.replicate n 0)
+
+-- | A source of random bytes that gives the bytes of its state from the
+-- front, as many as asked for, and fewer when they run out.
+scripted :: Int -> State ByteString ByteString
+scripted n = state (B.splitAt n)
+
+-- | The bytes that the split of a case draws, in the order of the
+-- reference implementation: two bytes of identifier with the high byte
+-- first, then, for the split among the groups and for each group in turn,
+-- the random shares and the random part of the digest share.
+drawnBytes :: SplitCase -> ByteString
+drawnBytes c =
+  B.pack [fromIntegral (c.caseIdentifier `div` 256), fromIntegral (c.caseIdentifier `mod` 256)]
+    <> mconcat [mconcat r.randomShares <> r.digestRandom | r <- c.caseRandom]
+
+-- | 'generateSharesFrom' on the scheme, the flag, the exponent, the
+-- passphrase and the master secret of a split case.
+generateSharesFromCase :: (Monad m) => (Int -> m ByteString) -> SplitCase -> m (Either String [[Share]])
+generateSharesFromCase source c =
+  generateSharesFrom source c.caseScheme c.caseExtendable c.caseIterationExponent c.casePassphrase c.caseMasterSecret
+
+-- | The identifier of each share of a 1-of-1 split, which draws nothing
+-- but the two bytes of the identifier, from a source that gives the bytes.
+drawnIdentifier :: ByteString -> Either String [[Int]]
+drawnIdentifier bytes =
+  map (map (.identifier))
+    <$> evalState (generateSharesFrom scripted (Scheme 1 [(1, 1)]) True 0 "" "ABCDEFGHIJKLMNOP") bytes
 
 -- | The last n elements of a list.
 lastN :: Int -> [a] -> [a]
