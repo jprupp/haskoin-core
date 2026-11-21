@@ -1046,9 +1046,16 @@ test network before you use it on mainnet.
 - **Signature hash types.** By default `signPsbt` signs only `SIGHASH_ALL` and
   `SIGHASH_DEFAULT`, because the other types leave part of the transaction
   unsigned. To accept others, set `acceptedSigHashes` on the `Signer`.
-- **Verification.** `verifyStdTx` checks the signatures of the standard templates
-  by the rules that nodes relay by, and that outputs do not exceed inputs. It is
-  not a script interpreter and does not apply every consensus rule.
+- **Verification.** `verifyStdTx` checks the signatures of the standard templates,
+  and that outputs do not exceed inputs. It is not a script interpreter and does
+  not apply every consensus rule. Its answer is not what a node does with the
+  transaction. It answers `True` only for inputs in a form that a block can
+  hold, and nodes do not relay some of them: a SegWit input signed with an
+  uncompressed key, a Taproot input with an annex and, on Bitcoin, an input
+  script with a push longer than its data needs. It answers `False` for a script
+  that it does not read, and also for some inputs that a block may hold, such
+  as a signature with a high S or a key in the hybrid form on Bitcoin.
+  `judgeInputs` tells a forged input from one that is left to a node.
 - **Untrusted text.** The cost of `decodeBase58` and `decodeBase58Check` grows
   with the square of the input length. Limit the length of input you pass to them
   directly. The address and key decoders of the library already do.

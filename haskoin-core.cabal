@@ -130,6 +130,7 @@ library
       Haskoin.Util.Arbitrary.Message
       Haskoin.Util.Arbitrary.Network
       Haskoin.Util.Arbitrary.Script
+      Haskoin.Util.Arbitrary.Spelling
       Haskoin.Util.Arbitrary.Transaction
       Haskoin.Util.Arbitrary.Util
       Haskoin.Util.Direct

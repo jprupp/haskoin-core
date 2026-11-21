@@ -9,5 +9,6 @@ slow-specs = [
   "Haskoin.Network",
   "Haskoin.Transaction",
   "Haskoin.Transaction.Psbt",
+  "Haskoin.Transaction.Verdict",
   "Haskoin.Util.Direct",
 ]

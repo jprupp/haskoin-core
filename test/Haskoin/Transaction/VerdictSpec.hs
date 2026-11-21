@@ -53,6 +53,21 @@ verdictsOf net locked tx =
     judgeInputs net tx [Just (TxOut 1000000 l) | l <- locked]
   )
 
+-- | Every signed transaction with one input in this spelling gets these
+-- three answers: that of 'verifyStdTx', the verdict of 'judgeInputs' on that
+-- input, and whether it says verified of every other input, which are as
+-- the signer wrote them. 'verifyStdTx' gets every coin that it can take: a
+-- script that is no standard output cannot be given to it.
+answersFor :: Network -> Spelling -> (Bool, InputVerdict, Bool) -> Property
+answersFor net spelling expected =
+  forAll (arbitraryRespelled net spelling) $ \r -> answers r === expected
+  where
+    answers r = case splitAt r.index (judgeInputs net r.tx (map Just r.coins)) of
+      (before, verdict : after) ->
+        (verifyStdTx net r.tx (coinsOf r), verdict, all (== InputVerified) (before <> after))
+      _ -> error "answersFor: no verdict for the input"
+    coinsOf r = [(so, c.value, i.outpoint) | (c, i) <- zip r.coins r.tx.inputs, Right so <- [decodeSerial c.script]]
+
 -- | A multisig script: two signatures of three keys, each key after the
 -- push of its 0x21 = 33 bytes.
 directPushes :: ByteString
@@ -149,6 +164,13 @@ spec = do
           sig = ecdsa other 0x01 (txSigHash btc unsigned pkhScript value 0 sigHashAll)
       judgeInputs btc (spending (pushing [sig, pubBytes other]) []) [prev (PayPKHash h160)]
         `shouldBe` [InputForged]
+    -- No key hashes to the hash that the coin names but its key, so the
+    -- script fails before the signature is looked at.
+    it "says forged of an empty item where the key goes, pushed by OP_0" $ do
+      let unsigned = spending "" []
+          sig = ecdsa k 0x01 (txSigHash btc unsigned pkhScript value 0 sigHashAll)
+          inputScript = runPutS (serialize (Script [opPushData sig, OP_0]))
+      judgeInputs btc (spending inputScript []) [prev (PayPKHash h160)] `shouldBe` [InputForged]
     it "does the same for a witness key hash, plain and nested" $ do
       let unsigned = spending "" []
           sig = ecdsa k 0x01 (txSigHashForkId btc unsigned pkhScript value 0 sigHashAll)
@@ -599,6 +621,44 @@ spec = do
         \c18c89b1969f0a5f0c4e02f0182b3c2c816d11bfb0568b1381d22e1c308fa5d0\
         \81b7f44543351b41"
         `shouldBe` (False, [InputVerified, InputUndecided])
+    -- The second input spends a coin locked to the hash of a script that
+    -- asks for two signatures of eight keys. The first and the last key
+    -- sign, so the bits are 0b10000001, the byte 0x81.
+    describe "a multisig with Schnorr signatures whose field of bits is 0x81" $ do
+      let twoOfEight = hex "a914cc42e7ae705e45609df7c35f91739beb07503a9a87"
+          -- a transaction up to the input script of its second input
+          startOfEight =
+            "020000000297840471ad17d047f8eaeea6be46191efe4b06de6ff022bfe7531b\
+            \75539f49a3100000006b483045022100c716c53177583c6cba7d5821e4cc5efb\
+            \a9f55f5b8bdad8dd841687449318cf2f0220160b350f4c8ff8dec0470624947a\
+            \d71ac8d6cbfc12930ba49df8b9c05f098f5941210256b328b30c8bf5839e2405\
+            \8747879408bdb36241dc9c2e7c619faa12b2920967fdffffff97840471ad17d0\
+            \47f8eaeea6be46191efe4b06de6ff022bfe7531b75539f49a30d000000"
+          -- what follows the bits in that input script: the two signatures,
+          -- and the script of 0x0113 = 275 bytes after OP_PUSHDATA2
+          afterBits =
+            "4142ca12be6b6f5ffef66a83bdeac7384577fd651e34383da87ed19ebca0f8e0\
+            \2fcdbb95bb8b706787119e73d084c0f350273abbdec260704b622e11356137f6\
+            \d541418a7a0a965224e2b0524fbfbe9da002d7f892ebdcf834d1e81290c910ac\
+            \1a276fca0598732282028495ef858d6c900e10244f996860fa0e18e25818167c\
+            \88d0f7414d1301522102552c630b64b54bf50210c9e253d38bd4949c72e22873\
+            \500f6285c2bede312a8421030f0fb9a244ad31a369ee02b7abfbbb0bfa3812b9\
+            \a39ed93346d03d67d412d17721022f1b310f4c065331bc0d79ba4661bb9822d6\
+            \7d7c4a1b0a1892e1fd0cd23aa68d210299c2aa85d2b21a62f396907a802a58e5\
+            \21dafd5bddaccbd72786eea189bc4dc921021a7a569e91dbf60581509c7fc946\
+            \d1003b60c7dee85299538db6353538d595742103a92c9b7cac68758de5783ed8\
+            \e5123598e4ad137091e42987d3bad8a08e35bf3d21034f355bdcb7cc0af728ef\
+            \3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa21036360e856310ce5d2\
+            \94e8be33fc807077dc56ac80d95d9cd4ddbd21325eff73f758ae"
+          spendOfEight script = verdictsOf bchRegTest [first, twoOfEight] (txOf (startOfEight <> script <> end))
+      -- The shortest push of the byte 0x81 is OP_1NEGATE, the byte 0x4f. The
+      -- input script is 1 + 410 = 411 bytes long, 0x019b.
+      it "verify it when OP_1NEGATE pushes the bits, which the node took" $
+        spendOfEight ("fd9b014f" <> afterBits) `shouldBe` (False, [InputVerified, InputVerified])
+      -- The same bits as one byte of data: 0x01 0x81. The node: "Data push
+      -- larger than necessary".
+      it "do not verify it when the bits are pushed as a byte of data" $
+        spendOfEight ("fd9c010181" <> afterBits) `shouldBe` (False, [InputVerified, InputUndecided])
     it "on Bitcoin, still verify a key that is not pushed by the shortest push, which a block may hold" $ do
       let sig = ecdsa k 0x01 (txSigHash btc (spending "" []) pkhScript value 0 sigHashAll)
           -- the key after OP_PUSHDATA1 and its length
@@ -835,6 +895,54 @@ spec = do
       splitTokenPrefix ("\xef" <> category <> "\x10\x00" <> script) `shouldBe` Nothing
       splitTokenPrefix ("\xef" <> category <> "\x10\xfd\x05\x00" <> script) `shouldBe` Nothing
       splitTokenPrefix ("\xef" <> category) `shouldBe` Nothing
+
+  -- A spend can be written in other bytes with every signature still good:
+  -- see "Haskoin.Util.Arbitrary.Spelling". Each property below makes signed
+  -- transactions of one to four inputs with one input in such a spelling,
+  -- and states three answers: that of 'verifyStdTx', the verdict of
+  -- 'judgeInputs' on that input, and whether every other input is verified.
+  -- The signatures are good, so the verdict is never forged.
+  --
+  -- MINIMALDATA, LOW_S, STRICTENC and WITNESS_PUBKEYTYPE are rules of the
+  -- relay policy of Bitcoin Core: a block may hold an input that breaks
+  -- one. The verifiers take the first and the last, and leave the two
+  -- others to a node.
+  describe "verifyStdTx and judgeInputs on a good spend written a way that Bitcoin does not relay" $ do
+    prop "verify an input script that pushes an item by a longer push" $
+      answersFor btc LongPush (True, InputVerified, True)
+    prop "verify a SegWit input of an uncompressed key" $
+      answersFor btc UncompressedKey (True, InputVerified, True)
+    prop "do not verify a signature with a high S" $
+      answersFor btc HighS (False, InputUndecided, True)
+    prop "do not verify a key in the hybrid form" $
+      answersFor btc HybridKey (False, InputUndecided, True)
+
+  -- BIP 141: the input script of a nested input is exactly the push of its
+  -- program, and the witness script hashes to the program. BIP 16: the
+  -- redeem script hashes to the coin. A signature covers the bytes of the
+  -- script of its coin.
+  describe "verifyStdTx and judgeInputs on a good spend written a way that no block of Bitcoin holds" $ do
+    prop "do not verify a nested witness program that is pushed by a longer push" $
+      answersFor btc LongProgramPush (False, InputUndecided, True)
+    prop "do not verify a redeem script or a witness script in other bytes than the coin commits to" $
+      answersFor btc UncommittedScript (False, InputUndecided, True)
+    prop "do not verify a coin locked to another spelling of the script that was signed" $
+      answersFor btc UnsignedScript (False, InputUndecided, True)
+
+  -- MINIMALDATA, LOW_S and STRICTENC are rules of every block of Bitcoin
+  -- Cash: they are among the MANDATORY_SCRIPT_VERIFY_FLAGS of Bitcoin Cash
+  -- Node.
+  describe "verifyStdTx and judgeInputs on a good spend written a way that no block of Bitcoin Cash holds" $ do
+    prop "do not verify an input script that pushes an item by a longer push" $
+      answersFor bch LongPush (False, InputUndecided, True)
+    prop "do not verify a signature with a high S" $
+      answersFor bch HighS (False, InputUndecided, True)
+    prop "do not verify a key in the hybrid form" $
+      answersFor bch HybridKey (False, InputUndecided, True)
+    prop "do not verify a redeem script in other bytes than the coin commits to" $
+      answersFor bch UncommittedScript (False, InputUndecided, True)
+    prop "do not verify a coin locked to another spelling of the script that was signed" $
+      answersFor bch UnsignedScript (False, InputUndecided, True)
 
   describe "judgeInputs on signed transactions" $
     prop "never says forged of an input that verifies" $
