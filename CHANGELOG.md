@@ -80,6 +80,26 @@ Bitcoin testnet3 is deprecated and still works.
   P2SH32 address (type 2 or 3), and `plainAddress` turns a token-aware
   address back into its plain form.
 - `arbitraryTokenData` and `arbitraryNFToken` in `Haskoin.Util.Arbitrary`.
+- **A generator of signed transactions with one input written another way,**
+  to test a verifier: the new module `Haskoin.Util.Arbitrary.Spelling`,
+  exported by `Haskoin.Util.Arbitrary`. The other generators make what
+  `signTx` writes, so a verifier that is wrong about any other form passed
+  every test made from them. `arbitraryRespelled` makes a signed transaction
+  of one to four inputs with one input in the `Spelling` asked for, and gives
+  it with the outputs that it spends (`Respelled`). Every signature in it is
+  good. The spellings are a longer push in an input script (`LongPush`), a
+  longer push of a nested witness program (`LongProgramPush`), a high S
+  (`HighS`), a key in the hybrid form (`HybridKey`), an uncompressed key in a
+  SegWit input (`UncompressedKey`), a redeem script or a witness script in
+  other bytes than the coin commits to (`UncommittedScript`), and a coin
+  locked to another spelling of the script that was signed
+  (`UnsignedScript`). The documentation of each says what the nodes of
+  Bitcoin and of Bitcoin Cash do with it. The properties of the test suite
+  state the answers of `verifyStdTx` and `judgeInputs` for each spelling on
+  each chain.
+- `arbitrarySigningDataOf` is `arbitrarySigningData` for coins that the
+  caller chooses. `arbitraryLegacySigInput` and `arbitraryWitnessSigInput`
+  are the two halves of `arbitrarySigInput` without Taproot.
 - **The `Network` record holds the aserti3-2d anchor block where it is known**,
   in the new field `asertAnchorBlock`: block 661647 on Bitcoin Cash mainnet
   and block 16844 on testnet4, the constants of Bitcoin Cash Node.
@@ -177,6 +197,28 @@ Bitcoin testnet3 is deprecated and still works.
 
 ### Fixed
 
+- **`judgeInputs` verifies a multisig of Bitcoin Cash with Schnorr signatures
+  whose field of bits is the byte 0x81.** That is two signatures of eight
+  keys, by the first key and the last. The field of bits takes the place of
+  the empty item of a multisig, and every block wants the shortest push of
+  it, which for the byte 0x81 is the opcode `OP_1NEGATE`. `judgeInputs` read
+  `OP_1` to `OP_16` there and not `OP_1NEGATE`, so it answered
+  `InputUndecided` for a spend that Bitcoin Cash Node 29.2.0 takes. It now
+  answers `InputVerified`. The second reading of an input script now reads
+  every push opcode (`pushOpData`), `OP_0` too. So the spend of a key hash
+  coin with `OP_0` or `OP_1NEGATE` where the key goes is `InputForged`, as
+  it was already for `OP_1` to `OP_16` and for any other item that is not
+  the key: no key hashes to the hash that the coin names but its own. It was
+  `InputUndecided`.
+- **The README said that `verifyStdTx` checks signatures "by the rules that
+  nodes relay by".** It does not: it answers `True` for some inputs that a
+  block may hold and nodes do not relay, a SegWit input signed with an
+  uncompressed key, a Taproot input with an annex and, on Bitcoin, an input
+  script with a longer push. It answers `False` for others, such as a high
+  S. The README now says so under "Security notes", and so do the comments
+  of `verifyStdTx` and `verifyStdInput`, which also name the key in the
+  hybrid form among the inputs that are refused. The functions did not
+  change.
 - **On Bitcoin Cash, an ECDSA signature whose DER form is 64 bytes is no
   longer read as an ECDSA signature.** On Bitcoin Cash a signature of 64
   bytes before its hash type byte is a Schnorr signature, whatever its

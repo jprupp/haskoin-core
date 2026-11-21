@@ -189,18 +189,33 @@ arbitraryAddrOnlyTxOut net = do
 arbitrarySigInput :: Network -> Gen (SigInput, [PrivateKey])
 arbitrarySigInput net =
   oneof $
-    [ wrapKey <$> arbitraryPKSigInput net,
-      wrapKey <$> arbitraryPKHashSigInput net,
-      arbitraryMSSigInput net,
-      arbitrarySHSigInput net
-    ]
-      <> concat
-        [ [ wrapKey <$> arbitraryWPKHSigInput net,
-            arbitraryWSHSigInput net,
-            wrapKey <$> arbitraryTaprootSigInput net
-          ]
-        | net.segWit
-        ]
+    legacySigInputs net
+      <> concat [witnessSigInputs net <> [wrapKey <$> arbitraryTaprootSigInput net] | net.segWit]
+
+-- | Arbitrary 'SigInput' of a coin that is not a witness program: locked to
+-- a key, to a key hash, to a multisig script, or to the hash of one of
+-- those scripts.
+arbitraryLegacySigInput :: Network -> Gen (SigInput, [PrivateKey])
+arbitraryLegacySigInput = oneof . legacySigInputs
+
+-- | Arbitrary 'SigInput' of a SegWit version 0 coin: a witness key hash or
+-- a witness script hash. Only a network with SegWit has such coins.
+arbitraryWitnessSigInput :: Network -> Gen (SigInput, [PrivateKey])
+arbitraryWitnessSigInput = oneof . witnessSigInputs
+
+legacySigInputs :: Network -> [Gen (SigInput, [PrivateKey])]
+legacySigInputs net =
+  [ wrapKey <$> arbitraryPKSigInput net,
+    wrapKey <$> arbitraryPKHashSigInput net,
+    arbitraryMSSigInput net,
+    arbitrarySHSigInput net
+  ]
+
+witnessSigInputs :: Network -> [Gen (SigInput, [PrivateKey])]
+witnessSigInputs net =
+  [ wrapKey <$> arbitraryWPKHSigInput net,
+    arbitraryWSHSigInput net
+  ]
 
 -- | Arbitrary 'SigInput' of a Taproot output without a script tree, spent
 -- by its key path with the key of the internal key, as a wallet of BIP 86
@@ -321,9 +336,15 @@ arbitraryWSHSigInput net = do
 -- spend no more than the inputs hold.
 arbitrarySigningData :: Network -> Gen (Tx, [SigInput], [PrivateKey])
 arbitrarySigningData net = do
-  v <- arbitrary
   ni <- choose (1, 5)
-  sigis <- vectorOf ni (arbitrarySigInput net)
+  arbitrarySigningDataOf net =<< vectorOf ni (arbitrarySigInput net)
+
+-- | 'arbitrarySigningData' for these coins and their keys, to choose what
+-- the transaction spends. Of two coins with the same outpoint, the first is
+-- kept. The inputs of the transaction are in an arbitrary order.
+arbitrarySigningDataOf :: Network -> [(SigInput, [PrivateKey])] -> Gen (Tx, [SigInput], [PrivateKey])
+arbitrarySigningDataOf net sigis = do
+  v <- arbitrary
   let uSigis = nubBy (\(a, _) (b, _) -> a.outpoint == b.outpoint) sigis
   -- The signer refuses SIGHASH_SINGLE on a legacy input without an output
   -- at its index, so every input gets an output when one asks for it

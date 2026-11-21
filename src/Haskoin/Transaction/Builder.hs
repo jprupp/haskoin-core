@@ -735,6 +735,10 @@ mergeTxInput net txs tx ((so, val), i) = do
 -- standard kinds of input listed at 'verifyStdInput', and 'False' for any
 -- other script, valid or not. For those kinds it follows consensus: it
 -- does not answer 'True' for an input that no block can contain.
+--
+-- It does not follow the relay policy, so its answer is not what a node
+-- does with the transaction. 'verifyStdInput' lists inputs that it accepts
+-- and nodes do not relay, and inputs that it refuses and a block may hold.
 verifyStdTx ::
   Network -> Tx -> [(ScriptOutput, Word64, OutPoint)] -> Bool
 verifyStdTx net tx coins =
@@ -819,6 +823,10 @@ spentCoins tx given =
 --
 -- * A signature is read with 'decodeTxSig', which applies the relay rules:
 --   low S and a defined hash type.
+-- * A key is read with 'decodePubKey': compressed or uncompressed. A key in
+--   the hybrid form, 65 bytes that start with 0x06 or 0x07, is refused. On
+--   Bitcoin a block may hold it, and the @STRICTENC@ rule of the relay
+--   policy does not allow it. On Bitcoin Cash no block holds it.
 -- * A legacy multisig input with an empty item before its signatures
 --   leaves that item on the stack. Consensus allows it outside a witness,
 --   and the @CLEANSTACK@ rule of the relay policy does not.
@@ -829,8 +837,17 @@ spentCoins tx given =
 --   a script itself cannot be given here: 'decodeOutput' does not read it,
 --   so that a 'PayMulSig' is always the script the signatures cover.
 --
--- An uncompressed key in a SegWit input is accepted, since a block may
--- hold it, although nodes do not relay it.
+-- The answer can be 'True' for an input that a block may hold but that
+-- nodes do not relay. So 'True' does not say that nodes relay the
+-- transaction, and the relay policy also has rules on the whole
+-- transaction, such as its size and its outputs, that are not looked at
+-- here:
+--
+-- * A SegWit version 0 input signed with an uncompressed key
+--   (@WITNESS_PUBKEYTYPE@ of the relay policy).
+-- * On Bitcoin, an input script with a push longer than its data needs
+--   (@MINIMALDATA@ of the relay policy), as said above.
+-- * A Taproot input with an annex, which Bitcoin Core 32.1 does not relay.
 verifyStdInput :: Network -> Tx -> [(ScriptOutput, Word64, OutPoint)] -> Int -> Bool
 verifyStdInput net tx coins = verifyInput net tx (spentCoins tx coins)
 
@@ -1032,7 +1049,8 @@ data InputVerdict
 --   not by a script;
 -- * with exactly the items such an input has, and a hash type of all;
 -- * whose key is not the one the coin names, or whose signature does not
---   verify over the digest.
+--   verify over the digest. An item that an opcode of its own pushes, such
+--   as the empty item of @OP_0@, is not the key either.
 --
 -- To find a forged input, an input that 'verifyStdInput' refuses is read a
 -- second time. Without a fork id that reading takes more than a node
@@ -1052,11 +1070,15 @@ data InputVerdict
 -- a script hash, and a coin that holds tokens, whose digest covers them
 -- ('txSigHashCashToken'). Inputs of those kinds are 'InputVerified' here
 -- and not by 'verifyStdInput'. A multisig is never 'InputForged': one
--- that does not verify is 'InputUndecided'. A signature of 64 bytes before
--- its hash type byte is always read as a Schnorr signature, as a node reads
--- it. A valid ECDSA signature whose DER form has that length does not
--- verify as one, so the spend of a coin of one key with it is
--- 'InputForged'.
+-- that does not verify is 'InputUndecided'. The field of bits of a
+-- multisig with Schnorr signatures is read in the shortest push of it,
+-- which is an opcode of its own for the bytes 0x01 to 0x10 and for 0x81
+-- (@OP_1NEGATE@): the first key and the last of eight.
+--
+-- A signature of 64 bytes before its hash type byte is always read as a
+-- Schnorr signature, as a node reads it. A valid ECDSA signature whose DER
+-- form has that length does not verify as one, so the spend of a coin of
+-- one key with it is 'InputForged'.
 --
 -- So on Bitcoin Cash the second reading does say 'InputVerified', and it
 -- must take no more than a block does. Bitcoin Cash applies to every block
@@ -1141,15 +1163,14 @@ judgeInputs net tx given = zipWith judge [0 ..] decoded
       where
         inp = (tx.inputs !! i).script
         ws = if length tx.witness > i then tx.witness !! i else []
-        -- the items of an input script that only pushes data, in a form
-        -- of push that a block holds
+        -- The items of an input script that only pushes data, in a form
+        -- of push that a block holds. The empty item, a number from 1 to
+        -- 16 and the byte 0x81 are each pushed by an opcode of their own
+        -- ('pushOpData'): the field of bits of a multisig can be any of
+        -- the last two.
         pushes = case runGetS deserialize inp of
-          Right (Script ops) | blockHoldsPushes net inp -> mapM pushed ops
+          Right (Script ops) | blockHoldsPushes net inp -> mapM pushOpData ops
           _ -> Nothing
-        -- a small number is pushed by an opcode of its own
-        pushed = \case
-          OP_PUSHDATA d _ -> Just d
-          op -> B.singleton . fromIntegral <$> eitherToMaybe (scriptOpToInt op)
         -- the item of an input script that is one push by its length and
         -- nothing else: the only form that a witness program nested in a
         -- script hash may take (BIP 141)
