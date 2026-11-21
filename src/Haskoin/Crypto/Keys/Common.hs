@@ -128,9 +128,14 @@ wrapPubKey c p = PublicKey p c
 -- this function, or 'decodeSerial', for those. 'deserialize' reads a key from the
 -- start of a longer stream and leaves the rest.
 --
--- A hybrid key, 65 bytes starting with 0x06 or 0x07, is refused. Consensus
--- takes that form, but the relay rules of Bitcoin Core do not, and no wallet
--- makes one.
+-- A hybrid key, 65 bytes starting with 0x06 or 0x07, is refused. On Bitcoin,
+-- consensus takes that form, but the relay rules of Bitcoin Core do not, and
+-- no wallet makes one. On Bitcoin Cash consensus refuses it too: a signature
+-- check of a key that is not compressed or uncompressed fails in every block
+-- (@SCRIPT_VERIFY_STRICTENC@, one of the @MANDATORY_SCRIPT_VERIFY_FLAGS@ of
+-- Bitcoin Cash Node). So this function reads the keys that a block of
+-- Bitcoin Cash can hold, and 'importPubKey', which takes a hybrid key, reads
+-- more.
 decodePubKey :: ByteString -> Either String PublicKey
 decodePubKey = runGetS $ do
   k <- deserialize

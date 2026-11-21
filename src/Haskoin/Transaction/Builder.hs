@@ -58,7 +58,7 @@ module Haskoin.Transaction.Builder
   )
 where
 
-import Control.Monad (foldM, unless, when)
+import Control.Monad (foldM, mfilter, unless, when)
 import Control.Monad.Identity (runIdentity)
 import Crypto.Secp256k1
 import Data.Bits (popCount, testBit)
@@ -803,6 +803,11 @@ spentCoins tx given =
 --   342). The witness puts an item there for each key, and the script
 --   starts with the push of a key on top of them.
 -- * A network without SegWit has no witness inputs.
+-- * On Bitcoin Cash, the input script pushes each item by the shortest
+--   push that holds it ('isMinimalPush'). Every block must keep the
+--   @MINIMALDATA@ rule there. On Bitcoin that rule is one of the relay
+--   policy: a block may hold a longer push, and the answer is 'True' for
+--   it.
 --
 -- The answer can be 'False' for an input that a block may hold but that
 -- nodes do not relay:
@@ -838,7 +843,8 @@ verifyInput net tx spent i
         | otherwise ->
             or $
               rights
-                [ (\si -> null ws && verifyLegacyInput so0 val si) <$> unmarshal net inp,
+                [ (\si -> null ws && blockHoldsPushes net inp && verifyLegacyInput so0 val si)
+                    <$> unmarshal net inp,
                   nestedScriptOutput >>= \so -> verifyNestedInput so0 so val <$> wp so
                 ]
   where
@@ -999,8 +1005,9 @@ data InputVerdict
     InputForged
   | -- | neither: a script that is not run here, a coin that was not
     -- given, a hash type other than all, an encoding that is not read,
-    -- and without a fork id an input that 'verifyStdInput' refuses
-    -- although its signature verifies
+    -- without a fork id an input that 'verifyStdInput' refuses although
+    -- its signature verifies, and on Bitcoin Cash an input in an encoding
+    -- that no block holds
     InputUndecided
   deriving (Eq, Show)
 
@@ -1023,10 +1030,11 @@ data InputVerdict
 --   verify over the digest.
 --
 -- To find a forged input, an input that 'verifyStdInput' refuses is read a
--- second time, and that reading takes more than a node does: any form of
--- push, a signature with a high S, a hybrid key. So it is not trusted to
--- say that an input is good. On a network without a fork id,
--- 'InputVerified' is the answer of 'verifyStdInput' and of nothing else.
+-- second time. Without a fork id that reading takes more than a node
+-- does: any form of push, a signature with a high S, a hybrid key. So it
+-- is not trusted to say that an input is good. On a network without a
+-- fork id, 'InputVerified' is the answer of 'verifyStdInput' and of
+-- nothing else.
 -- An input whose signature verifies and that 'verifyStdInput' refuses is
 -- 'InputUndecided' there: one that a block may hold and that nodes do not
 -- relay, such as a high S, and one that no block holds, such as a witness
@@ -1040,6 +1048,25 @@ data InputVerdict
 -- ('txSigHashCashToken'). Inputs of those kinds are 'InputVerified' here
 -- and not by 'verifyStdInput'. A multisig is never 'InputForged': one
 -- that does not verify is 'InputUndecided'.
+--
+-- So on Bitcoin Cash the second reading does say 'InputVerified', and it
+-- must take no more than a block does. Bitcoin Cash applies to every block
+-- three rules of encoding that Bitcoin applies only to what it relays.
+-- They are among the @MANDATORY_SCRIPT_VERIFY_FLAGS@ of Bitcoin Cash Node,
+-- which drops the peer that sends a transaction that breaks one:
+--
+-- * the S of an ECDSA signature is low (@LOW_S@, 'isCanonicalHalfOrder');
+-- * a key is compressed or uncompressed, and not hybrid (@STRICTENC@,
+--   'decodePubKey');
+-- * the input script pushes each item by the shortest push that holds it
+--   (@MINIMALDATA@, 'isMinimalPush').
+--
+-- An input that breaks one of them is 'InputUndecided' on Bitcoin Cash,
+-- also when its signature does not verify. This is the way of the guards
+-- that the paragraph above warns about, and the only one as long as
+-- 'verifyStdInput' does not read these inputs: a kind of input that the
+-- second reading learns must come with the rules that a block of Bitcoin
+-- Cash applies to it.
 --
 -- A coin locked to a multisig script whose keys are not direct pushes, or
 -- to the hash of one, is 'InputUndecided' on every network: 'decodeOutput'
@@ -1105,10 +1132,11 @@ judgeInputs net tx given = zipWith judge [0 ..] decoded
       where
         inp = (tx.inputs !! i).script
         ws = if length tx.witness > i then tx.witness !! i else []
-        -- the items of an input script that only pushes data
+        -- the items of an input script that only pushes data, in a form
+        -- of push that a block holds
         pushes = case runGetS deserialize inp of
-          Right (Script ops) -> mapM pushed ops
-          Left _ -> Nothing
+          Right (Script ops) | blockHoldsPushes net inp -> mapM pushed ops
+          _ -> Nothing
         -- a small number is pushed by an opcode of its own
         pushed = \case
           OP_PUSHDATA d _ -> Just d
@@ -1127,7 +1155,12 @@ judgeInputs net tx given = zipWith judge [0 ..] decoded
         -- open it, whatever it signed
         keyed named sig pub digest
           | not named = InputForged
-          | otherwise = maybe InputUndecided (\k -> signed sig k digest) (importPubKey pub)
+          | otherwise = maybe InputUndecided (\k -> signed sig k digest) (keyOf pub)
+        -- The key of a signature check. Bitcoin takes a hybrid key in a
+        -- block. On Bitcoin Cash no block holds the check of one.
+        keyOf bytes
+          | forked = (.point) <$> eitherToMaybe (decodePubKey bytes)
+          | otherwise = importPubKey bytes
         -- Forged is said of the hash type "all" only. With another hash
         -- type a signature that verifies is verified, and one that does
         -- not is left alone.
@@ -1138,9 +1171,12 @@ judgeInputs net tx given = zipWith judge [0 ..] decoded
               Right m
                 -- on Bitcoin Cash a signature of 64 bytes is a Schnorr one
                 | forked && B.length body == 64 -> sure (verifyCashSchnorr key body m)
-                | otherwise -> maybe InputUndecided (\s -> sure (verifyHashSig m s key)) (decodeStrictSig body)
+                | otherwise -> maybe InputUndecided (\s -> sure (verifyHashSig m s key)) (ecdsaSig body)
           where
             body = B.init sig
+            -- Bitcoin takes a high S in a block. On Bitcoin Cash no block
+            -- holds one, and 'verifyHashSig' verifies it like a low S.
+            ecdsaSig = mfilter (\s -> not forked || isCanonicalHalfOrder s) . decodeStrictSig
             sure ok
               | ok = InputVerified
               | B.last sig == (if forked then 0x41 else 0x01) = InputForged
@@ -1185,6 +1221,20 @@ judgeInputs net tx given = zipWith judge [0 ..] decoded
           m <- taprootSigHash tx outs i sh Nothing Nothing
           return (verdict (verifySchnorr key s (hashToMsg m)))
         verdict ok = if ok then InputVerified else InputForged
+
+-- | Can a block of the network hold an input script that pushes its items
+-- as this one does? On Bitcoin any script passes: a block may hold a push
+-- that is longer than its data needs, and only the relay policy refuses
+-- it. On Bitcoin Cash every block must keep that rule: the script only
+-- pushes data (@SIGPUSHONLY@), and each item by the shortest push that
+-- holds it (@MINIMALDATA@, 'isMinimalPush'). A network of Bitcoin Cash is
+-- one whose signatures commit to a fork id.
+blockHoldsPushes :: Network -> B.ByteString -> Bool
+blockHoldsPushes net script
+  | isNothing net.sigHashForkId = True
+  | otherwise = case runGetS deserialize script of
+      Right (Script ops) -> all isMinimalPush ops
+      Left _ -> False
 
 -- | The most keys that a Taproot multisig script can have and still be
 -- spent: @MAX_PUBKEYS_PER_MULTI_A@ of Bitcoin Core, and the limit of

@@ -58,6 +58,12 @@ signHash :: SecKey -> Hash256 -> Sig
 signHash k = signMsg k . hashToMsg
 
 -- | Verify an ECDSA signature for a 256-bit hash.
+--
+-- A signature with a high s verifies like its low-S form: the s is brought
+-- below half the curve order first, as libsecp256k1 asks. So 'True' does not
+-- say that the s is low. Where a high s is refused, on Bitcoin Cash in every
+-- block and on Bitcoin by the relay policy, check 'isCanonicalHalfOrder' as
+-- well.
 verifyHashSig :: Hash256 -> Sig -> PubKey -> Bool
 verifyHashSig h s p = verifySig p (normalizeSig s) (hashToMsg h)
 
@@ -105,11 +111,20 @@ instance FromJSON Sig where
         Just s -> return s
 
 -- | Is the s component at most half the curve order? This is the low-S rule
--- that Bitcoin Core applies to the transactions it relays:
--- @SCRIPT_VERIFY_LOW_S@ is one of its standard flags. It is not a consensus
--- rule, so a block may hold a signature with a high s. The decoders of this
--- module do not apply it. Check it with this function where the relay rules
--- matter. 'signHash' always makes a signature that passes.
+-- (@SCRIPT_VERIFY_LOW_S@), and the two chains give it another weight:
+--
+-- * On Bitcoin it is a rule of the relay policy, one of the standard flags
+--   of Bitcoin Core. It is not a consensus rule, so a block may hold a
+--   signature with a high s.
+-- * On Bitcoin Cash it is a consensus rule since November 2017, one of the
+--   @MANDATORY_SCRIPT_VERIFY_FLAGS@ of Bitcoin Cash Node: no block holds an
+--   ECDSA signature with a high s, and a node drops the peer that sends a
+--   transaction with one.
+--
+-- The decoders of this module do not apply the rule, and 'verifyHashSig'
+-- does not tell a high s from a low one. Check it with this function where
+-- the relay rules of Bitcoin matter, and always on Bitcoin Cash. 'signHash'
+-- always makes a signature that passes.
 isCanonicalHalfOrder :: Sig -> Bool
 isCanonicalHalfOrder = isLowS
 
@@ -122,7 +137,9 @@ isCanonicalHalfOrder = isLowS
 -- verify. 'importSig' applies both rules.
 --
 -- A high s is accepted, since BIP 66 allows it and such signatures are in the
--- block chain. Use 'isCanonicalHalfOrder' for the low-S relay rule.
+-- block chain of Bitcoin. Use 'isCanonicalHalfOrder' for the low-S rule: a
+-- rule of the relay policy on Bitcoin, and a consensus rule on Bitcoin Cash,
+-- where what this function reads is more than a block can hold.
 decodeStrictSig :: ByteString -> Maybe Sig
 decodeStrictSig = importSig
 

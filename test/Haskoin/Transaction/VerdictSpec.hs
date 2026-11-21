@@ -43,9 +43,14 @@ judged net locked tx = judgeInputs net tx [Just (TxOut 1000000 locked)]
 -- | The answers of 'verifyStdTx' and of 'judgeInputs' for such a
 -- transaction. The script of the coin must be a standard output.
 verdicts :: Network -> ByteString -> Tx -> (Bool, [InputVerdict])
-verdicts net locked tx =
-  ( verifyStdTx net tx [(either error id (decodeSerial locked), 1000000, (head tx.inputs).outpoint)],
-    judged net locked tx
+verdicts net locked = verdictsOf net [locked]
+
+-- | The same answers for a transaction of several inputs, which spend coins
+-- of 1,000,000 with these scripts, in order.
+verdictsOf :: Network -> [ByteString] -> Tx -> (Bool, [InputVerdict])
+verdictsOf net locked tx =
+  ( verifyStdTx net tx [(either error id (decodeSerial l), 1000000, i.outpoint) | (l, i) <- zip locked tx.inputs],
+    judgeInputs net tx [Just (TxOut 1000000 l) | l <- locked]
   )
 
 -- | A multisig script: two signatures of three keys, each key after the
@@ -454,6 +459,152 @@ spec = do
             \5dbf88ac00000000"
         )
         `shouldBe` [InputUndecided]
+
+  -- Bitcoin Cash applies to every block three rules of encoding that Bitcoin
+  -- applies only to what it relays: the S of an ECDSA signature is low
+  -- (LOW_S), a key is compressed or uncompressed (STRICTENC), and data is
+  -- pushed by the shortest push that holds it (MINIMALDATA). Each
+  -- transaction below went to Bitcoin Cash Node 29.2.0 on regtest. Its first
+  -- input is a plain spend, and its second input is the one that the test
+  -- is about. The node took the transactions that keep the three rules. It
+  -- refused each other one with "mandatory-script-verify-flag-failed", the
+  -- reason for which it drops the peer that sent the transaction.
+  describe "verifyStdTx and judgeInputs on what no block of Bitcoin Cash holds" $ do
+    let -- the script of the coin of the first input, locked to a key hash
+        first = hex "76a914670caa79e51d78ed0c583b89ff39d9c49b7199e788ac"
+        -- the coin of the second input, locked to the hash of the key 02552c63...2a84
+        keyHash = hex "76a914db3f00d429f2715383cc594258ec11d6de52669788ac"
+        -- a transaction up to the input script of its second input, which
+        -- spends the coin locked to the key hash
+        start =
+          "0200000002bd30e74505225b6e250d6254e743c9375329f1ec140c0f330c2a81\
+          \fe77493ab60f0000006b483045022100df1a1c4bef63f9d732768d57b3cd690b\
+          \6d343029b41fe88f5d19f251338face902201661eaffaf61e3a60c055d736289\
+          \60ae09346c5f77e38c415a59e7812c0e28b041210256b328b30c8bf5839e2405\
+          \8747879408bdb36241dc9c2e7c619faa12b2920967fdffffffbd30e74505225b\
+          \6e250d6254e743c9375329f1ec140c0f330c2a81fe77493ab603000000"
+        -- what follows that input script: the sequence, two outputs and the lock time
+        end =
+          "fdffffff02a0bb0d00000000001976a91479b000887626b294a914501a4cd226\
+          \b58b23598388acc07a1000000000001976a914ebc0ee0b2ab9e8277a600c2514\
+          \75e22a3241a1c188ac00000000"
+        -- the answers for the transaction whose second input has this
+        -- script, written after its length
+        spend script = verdictsOf bchRegTest [first, keyHash] (txOf (start <> script <> end))
+    it "verify the spends that keep the three rules, which the node took" $ do
+      -- an ECDSA signature after the push of its 0x48 = 72 bytes, then the
+      -- key after the push of its 0x21 = 33 bytes
+      spend
+        "6b483045022100fe866c7d7a79393c11175ad82fc8de9350f31a11394a827fcb\
+        \bf66ea1d2cf0b302204ed891157ee41a89f5a4c23fe3e4fc2f1cd1498d4e5ec3\
+        \75029f6f849e137f4e412102552c630b64b54bf50210c9e253d38bd4949c72e2\
+        \2873500f6285c2bede312a84"
+        `shouldBe` (True, [InputVerified, InputVerified])
+      -- a Schnorr signature after the push of its 0x41 = 65 bytes, which
+      -- 'verifyStdTx' does not read
+      spend
+        "64412eafe74e802f469cb0fcbdbbe31884691f205a1a56b2d93b36d779323f47\
+        \05cc25358fda1954d7b9f39a5f4221f6d08850b2b799ebfd0abdcb1f44ce0cea\
+        \a70b412102552c630b64b54bf50210c9e253d38bd4949c72e22873500f6285c2\
+        \bede312a84"
+        `shouldBe` (False, [InputVerified, InputVerified])
+    it "do not verify an ECDSA signature with a high S" $
+      -- the first signature above with n - S for S, n being the order of
+      -- the curve: n - 4ed89115...9e137f4e = b1276eea...3222c1f3
+      spend
+        "6c493046022100fe866c7d7a79393c11175ad82fc8de9350f31a11394a827fcb\
+        \bf66ea1d2cf0b3022100b1276eea811be5760a5b3dc01c1b03cf9ddd935960e9\
+        \dcc6bd32ef083222c1f3412102552c630b64b54bf50210c9e253d38bd4949c72\
+        \e22873500f6285c2bede312a84"
+        `shouldBe` (False, [InputVerified, InputUndecided])
+    it "do not verify a key in the hybrid form" $
+      -- The second input spends a coin locked to the hash of the same key
+      -- written with both coordinates after 0x06, and its signature is
+      -- good.
+      verdictsOf
+        bchRegTest
+        [first, hex "76a9143f20fee78bcb773cf5be7ee3f12e7ffc340830c788ac"]
+        ( txOf
+            "0200000002bd30e74505225b6e250d6254e743c9375329f1ec140c0f330c2a81\
+            \fe77493ab60f0000006b483045022100c3d639833017a65fa7bed3a3cd7f9c85\
+            \c60cc0f55a70d84719bc9e8fda30bde9022078aee3f447ed47044c7947b62619\
+            \b05b61f6128b1abd9687f2de29b04ed0ba5f41210256b328b30c8bf5839e2405\
+            \8747879408bdb36241dc9c2e7c619faa12b2920967fdffffffbd30e74505225b\
+            \6e250d6254e743c9375329f1ec140c0f330c2a81fe77493ab60d0000008b4830\
+            \45022100c151bff7da6ba95495aacb8ff59e2c6b7b49764121ae559e11242713\
+            \d29b5b5c022029eafd90bc648920c18f6ecbc4678e3a6f5214e9a0774cda0beb\
+            \827cb6905c91414106552c630b64b54bf50210c9e253d38bd4949c72e2287350\
+            \0f6285c2bede312a84e3ca35a0c8c0cf4c40398e720377e1ee09c7a6b0fd0568\
+            \3d5fe02d8f68231466fdffffff02a0bb0d00000000001976a91479b000887626\
+            \b294a914501a4cd226b58b23598388acc07a1000000000001976a914ebc0ee0b\
+            \2ab9e8277a600c251475e22a3241a1c188ac00000000"
+        )
+        `shouldBe` (False, [InputVerified, InputUndecided])
+    it "do not verify a key or an ECDSA signature that is not pushed by the shortest push" $ do
+      -- the valid spend with OP_PUSHDATA1 before the length of the key: 0x4c 0x21
+      spend
+        "6c483045022100fe866c7d7a79393c11175ad82fc8de9350f31a11394a827fcb\
+        \bf66ea1d2cf0b302204ed891157ee41a89f5a4c23fe3e4fc2f1cd1498d4e5ec3\
+        \75029f6f849e137f4e414c2102552c630b64b54bf50210c9e253d38bd4949c72\
+        \e22873500f6285c2bede312a84"
+        `shouldBe` (False, [InputVerified, InputUndecided])
+      -- the valid spend with OP_PUSHDATA2 before the length of the signature: 0x4d 0x48 0x00
+      spend
+        "6d4d48003045022100fe866c7d7a79393c11175ad82fc8de9350f31a11394a82\
+        \7fcbbf66ea1d2cf0b302204ed891157ee41a89f5a4c23fe3e4fc2f1cd1498d4e\
+        \5ec375029f6f849e137f4e412102552c630b64b54bf50210c9e253d38bd4949c\
+        \72e22873500f6285c2bede312a84"
+        `shouldBe` (False, [InputVerified, InputUndecided])
+    it "do not verify a Schnorr signature that is not pushed by the shortest push" $
+      -- the valid spend with OP_PUSHDATA4 before the length of the signature: 0x4e 0x41 0x00 0x00 0x00
+      spend
+        "684e410000002eafe74e802f469cb0fcbdbbe31884691f205a1a56b2d93b36d7\
+        \79323f4705cc25358fda1954d7b9f39a5f4221f6d08850b2b799ebfd0abdcb1f\
+        \44ce0ceaa70b412102552c630b64b54bf50210c9e253d38bd4949c72e2287350\
+        \0f6285c2bede312a84"
+        `shouldBe` (False, [InputVerified, InputUndecided])
+    it "do not verify a multisig with Schnorr signatures whose field of bits is not pushed by its opcode" $ do
+      let -- the coin of the second input: two signatures of three keys
+          twoOfThree =
+            hex
+              "522102552c630b64b54bf50210c9e253d38bd4949c72e22873500f6285c2bede\
+              \312a8421030f0fb9a244ad31a369ee02b7abfbbb0bfa3812b9a39ed93346d03d\
+              \67d412d17721022f1b310f4c065331bc0d79ba4661bb9822d67d7c4a1b0a1892\
+              \e1fd0cd23aa68d53ae"
+          -- a transaction up to the input script of its second input,
+          -- which spends that coin
+          startOfMultisig =
+            "0200000002bd30e74505225b6e250d6254e743c9375329f1ec140c0f330c2a81\
+            \fe77493ab60f0000006a47304402207b92790f3145f2c30048db725e7e184d0f\
+            \56e2d921ec5d7548118e8bb75e4c9b022026f590f98b3d50c6fe8c4e19ef62c5\
+            \4160813fb917b5d03b2c7419a5165fab7d41210256b328b30c8bf5839e240587\
+            \47879408bdb36241dc9c2e7c619faa12b2920967fdffffffbd30e74505225b6e\
+            \250d6254e743c9375329f1ec140c0f330c2a81fe77493ab606000000"
+          spendOfMultisig script =
+            verdictsOf bchRegTest [first, twoOfThree] (txOf (startOfMultisig <> script <> end))
+      -- The bits 0b011 name the first two keys. The node took them as
+      -- OP_3, the byte 0x53, before the two signatures.
+      spendOfMultisig
+        "85534189ad1a4e4571427393606bf673906fcd23b34b272565c61c402b02f3bf\
+        \0f70391154fb060bc776c427772c1ec7379f3c31b14171bcdc978867887acbba\
+        \3d5dbb4141f77f97c4a106af0a26e39a0dd7cb740ba1e0c2bc90cddb70adc18c\
+        \89b1969f0a5f0c4e02f0182b3c2c816d11bfb0568b1381d22e1c308fa5d081b7\
+        \f44543351b41"
+        `shouldBe` (False, [InputVerified, InputVerified])
+      -- the same bits as one byte of data after OP_PUSHDATA1: 0x4c 0x01 0x03
+      spendOfMultisig
+        "874c01034189ad1a4e4571427393606bf673906fcd23b34b272565c61c402b02\
+        \f3bf0f70391154fb060bc776c427772c1ec7379f3c31b14171bcdc978867887a\
+        \cbba3d5dbb4141f77f97c4a106af0a26e39a0dd7cb740ba1e0c2bc90cddb70ad\
+        \c18c89b1969f0a5f0c4e02f0182b3c2c816d11bfb0568b1381d22e1c308fa5d0\
+        \81b7f44543351b41"
+        `shouldBe` (False, [InputVerified, InputUndecided])
+    it "on Bitcoin, still verify a key that is not pushed by the shortest push, which a block may hold" $ do
+      let sig = ecdsa k 0x01 (txSigHash btc (spending "" []) pkhScript value 0 sigHashAll)
+          -- the key after OP_PUSHDATA1 and its length
+          tx = spending (runPutS (serialize (Script [opPushData sig, OP_PUSHDATA pub OPDATA1]))) []
+      verifyStdTx btc tx [(PayPKHash h160, value, coin)] `shouldBe` True
+      judgeInputs btc tx [prev (PayPKHash h160)] `shouldBe` [InputVerified]
 
   describe "judgeInputs on Bitcoin Cash" $ do
     let unsigned = spending "" []

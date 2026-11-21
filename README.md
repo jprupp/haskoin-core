@@ -767,6 +767,17 @@ print (addrToText bch (xPubWitnessAddr (deriveXPubKey key)))
 `signTx` sets the fork id flag of the signature hash when the network needs it.
 Pass `sigHashAll` as usual.
 
+Bitcoin Cash applies to every block three rules of encoding that Bitcoin
+applies only to the transactions it relays: the S of an ECDSA signature is low,
+a key is compressed or uncompressed, and an input script pushes each item by
+the shortest push that holds it. A node of Bitcoin Cash drops the peer that
+sends it a transaction that breaks one. `verifyStdTx` and `judgeInputs` apply
+the three rules on the Bitcoin Cash networks. `decodeStrictSig`,
+`verifyHashSig` and `importPubKey` follow the consensus of Bitcoin, and take
+more than a block of Bitcoin Cash can hold: to verify a signature of Bitcoin
+Cash with them, check `isCanonicalHalfOrder` too, and read the key with
+`decodePubKey`.
+
 #### CashTokens
 
 An output of Bitcoin Cash can hold tokens (CHIP-2022-02). They are written at
