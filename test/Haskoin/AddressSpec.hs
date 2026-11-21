@@ -210,7 +210,7 @@ spec = do
     it "addrToBase58 gives the legacy form of a Bitcoin Cash address" $ do
       addrToBase58 bch p2pkh `shouldBe` Just "1BpEi6DfDAUFd7GtittLSdBeYJvcoaVggu"
       addrToBase58 bch p2sh `shouldBe` Just "3CWFddi6m4ndiGyKqzYvsFYagqDLPVMTzC"
-      addrToBase58 bchTest p2sh `shouldBe` Just "2N44ThNe8NXHyv4bsX8AoVCXquBRW94Ls7W"
+      addrToBase58 bchTest3 p2sh `shouldBe` Just "2N44ThNe8NXHyv4bsX8AoVCXquBRW94Ls7W"
     it "addrToBase58 has no form for other kinds" $ do
       addrToBase58 btc p2wpkh `shouldBe` Nothing
       addrToBase58 bch p2sh32 `shouldBe` Nothing
@@ -462,7 +462,7 @@ spec = do
       (addrToText bch =<< eitherToMaybe (scriptToAddressBS bch puzzle))
         `shouldBe` Just "bitcoincash:pdh79rq2kmcmxukp563ydtnr7a8ex85rvhs45zyudrtpjqqqqqqqqgss5hn0j"
     it "a witness program has no address on Bitcoin Cash" $
-      forM_ [bch, bchTest, bchTest4, bchRegTest] $ \net -> do
+      forM_ [bch, bchTest3, bchTest4, bchRegTest] $ \net -> do
         -- version 0 with 20 bytes, version 0 with 32 bytes, and Taproot
         assertEqual net.name (Left "Could not decode address") $
           scriptToAddressBS net (fromJust (decodeHex "001476a04053bda0a88bda5177b86a15c3b29f559873"))
@@ -517,7 +517,7 @@ spec = do
       scriptToAddressBS bch (fromJust (decodeHex field))
         `shouldSatisfy` either ("must encode at least one token" `isInfixOf`) (const False)
     prop "have the address of the script after any valid prefix" $
-      forAll ((,,) <$> arbitraryTokenData <*> arbitraryScriptOutput bch <*> elements [bch, bchTest]) $
+      forAll ((,,) <$> arbitraryTokenData <*> arbitraryScriptOutput bch <*> elements [bch, bchTest3]) $
         \(t, out, net) -> do
           let bytes = encodeSerial out
               field = fromJust (encodeTokenPrefix t) <> bytes
@@ -712,8 +712,8 @@ textTable =
     (bch, tokenP2sh, "bitcoincash:rpm2qsznhks23z7629mms6s4cwef74vcwv59yeyr7n"),
     (bch, tokenP2sh32, "bitcoincash:rvvxx9puznz3v6qyh5vjqv6kmgfkexzk0rx56faphrrr99syjqexy30vcqxv4"),
     (bch, cash15, "bitcoincash:0yqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9cc7akt68km"),
-    (bchTest, p2pkh, "bchtest:qpm2qsznhks23z7629mms6s4cwef74vcwvqcw003ap"),
-    (bchTest, p2sh, "bchtest:ppm2qsznhks23z7629mms6s4cwef74vcwvhanqgjxu")
+    (bchTest3, p2pkh, "bchtest:qpm2qsznhks23z7629mms6s4cwef74vcwvqcw003ap"),
+    (bchTest3, p2sh, "bchtest:ppm2qsznhks23z7629mms6s4cwef74vcwvhanqgjxu")
   ]
 
 -- | Valid addresses of one network that another network must reject.
@@ -729,7 +729,7 @@ otherNetworkTable =
     (bch, "bc1qw6syq5aa5z5ghkj3w7ux59wrk204txrn9k4rmm"),
     (bch, "bchtest:qpm2qsznhks23z7629mms6s4cwef74vcwvqcw003ap"),
     (bch, "qpm2qsznhks23z7629mms6s4cwef74vcwvqcw003ap"),
-    (bchTest, "bitcoincash:qpm2qsznhks23z7629mms6s4cwef74vcwvy22gdx6a")
+    (bchTest3, "bitcoincash:qpm2qsznhks23z7629mms6s4cwef74vcwvy22gdx6a")
   ]
 
 -- | Locking script of every address kind that has one, with a network that

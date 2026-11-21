@@ -1881,7 +1881,7 @@ signerScopeSpec =
 
     -- 0x41 is SIGHASH_ALL (0x01) with SIGHASH_FORKID (0x40)
     it "on the Bitcoin Cash networks, signs an input that asks for no sighash type with SIGHASH_ALL and the fork id flag" $
-      forM_ [bch, bchTest, bchTest4, bchRegTest] $ \net ->
+      forM_ [bch, bchTest3, bchTest4, bchRegTest] $ \net ->
         (map (B.last . snd) <$> (partialSignatures . inputAt 0 =<< signPsbt net signer psbt)) `shouldBe` Right [0x41]
 
     -- Input 0 is a coin of key 1. Input 1 is a P2WSH coin of someone else,

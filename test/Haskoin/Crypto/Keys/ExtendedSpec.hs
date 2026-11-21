@@ -137,7 +137,7 @@ spec = do
       forM_ [btc, bch] $ \net -> do
         xPrvExport net xprv1 `shouldBe` xprv1Text
         xPubExport net xpub1 `shouldBe` xpub1Text
-      forM_ [btcTest, btcTest4, btcRegTest, bchTest, bchTest4, bchRegTest] $ \net -> do
+      forM_ [btcTest, btcTest4, btcRegTest, bchTest3, bchTest4, bchRegTest] $ \net -> do
         xPrvExport net xprv1 `shouldBe` tprv1Text
         xPubExport net xpub1 `shouldBe` tpub1Text
     it "refuses an xpub given to the private key importer, and the reverse" $ do

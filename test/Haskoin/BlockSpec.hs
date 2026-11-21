@@ -1653,21 +1653,21 @@ chainConstantsSpec = describe "chain parameters of the reference nodes" $ do
     btcRegTest.targetTimespan `shouldBe` 86400
     diffInterval btcRegTest `shouldBe` 144
   it "retargets every 2016 blocks on the other networks" $
-    map diffInterval [btc, btcTest, btcTest4, bch, bchTest, bchTest4, bchRegTest] `shouldBe` replicate 7 2016
+    map diffInterval [btc, btcTest, btcTest4, bch, bchTest3, bchTest4, bchRegTest] `shouldBe` replicate 7 2016
   it "starts the EDA and the DAA one block after the heights of Bitcoin Cash Node" $ do
     -- chainparams.cpp of Bitcoin Cash Node: uahfHeight 478558, daaHeight
     -- 504031 on mainnet; 1155875 and 1188697 on testnet3; 6 and 3000 on
     -- testnet4
     (bch.edaHeight, bch.daaHeight) `shouldBe` (Just 478559, Just 504032)
-    (bchTest.edaHeight, bchTest.daaHeight) `shouldBe` (Just 1155876, Just 1188698)
+    (bchTest3.edaHeight, bchTest3.daaHeight) `shouldBe` (Just 1155876, Just 1188698)
     (bchTest4.edaHeight, bchTest4.daaHeight) `shouldBe` (Just 7, Just 3001)
     -- 0 and 0 on regtest
     (bchRegTest.edaHeight, bchRegTest.daaHeight) `shouldBe` (Just 1, Just 1)
   it "activates ASERT at the time of Bitcoin Cash Node, with its half-lives" $ do
     -- axionActivationTime = 1605441600; nASERTHalfLife is two days on
     -- mainnet (172800 seconds) and one hour on the test networks (3600)
-    map (.asertActivationTime) [bch, bchTest, bchTest4, bchRegTest] `shouldBe` replicate 4 (Just 1605441600)
-    map (.asertHalfLife) [bch, bchTest, bchTest4, bchRegTest] `shouldBe` [172800, 3600, 3600, 172800]
+    map (.asertActivationTime) [bch, bchTest3, bchTest4, bchRegTest] `shouldBe` replicate 4 (Just 1605441600)
+    map (.asertHalfLife) [bch, bchTest3, bchTest4, bchRegTest] `shouldBe` [172800, 3600, 3600, 172800]
   it "knows the aserti3-2d anchor of mainnet and testnet4, as Bitcoin Cash Node does" $ do
     -- asertAnchorParams: block 661647 on mainnet and 16844 on testnet4. The
     -- checkpoint of testnet4 at 16845 is the first block after its anchor.
@@ -1675,9 +1675,9 @@ chainConstantsSpec = describe "chain parameters of the reference nodes" $ do
       `shouldBe` Just (661647, "00000000000000000083ed4b7a780d59e3983513215518ad75654bb02deee62f")
     bchTest4.asertAnchorBlock
       `shouldBe` Just (16844, "00000000602570ee2b66c1d3f75d404c234f8aacdcc784da97e65838a2daf0fc")
-    map (.asertAnchorBlock) [btc, btcTest, btcTest4, btcRegTest, bchTest, bchRegTest] `shouldBe` replicate 6 Nothing
+    map (.asertAnchorBlock) [btc, btcTest, btcTest4, btcRegTest, bchTest3, bchRegTest] `shouldBe` replicate 6 Nothing
   it "halves the subsidy every 210000 blocks, and every 150 on regtest" $ do
-    map (.halvingInterval) [btc, btcTest, btcTest4, bch, bchTest, bchTest4] `shouldBe` replicate 6 210000
+    map (.halvingInterval) [btc, btcTest, btcTest4, bch, bchTest3, bchTest4] `shouldBe` replicate 6 210000
     map (.halvingInterval) [btcRegTest, bchRegTest] `shouldBe` [150, 150]
   it "pays 50 coins before block 210000 and 25 from it" $ do
     computeSubsidy btc 209999 `shouldBe` 5000000000
@@ -1695,21 +1695,21 @@ chainConstantsSpec = describe "chain parameters of the reference nodes" $ do
   it "has the checkpoints of Bitcoin Cash Node on bitcoin cash" $ do
     -- mapCheckpoints of chainparams.cpp: 39 on mainnet, 19 on each testnet
     -- and the genesis block on regtest
-    map (length . (.checkpoints)) [bch, bchTest, bchTest4, bchRegTest] `shouldBe` [39, 19, 19, 1]
+    map (length . (.checkpoints)) [bch, bchTest3, bchTest4, bchRegTest] `shouldBe` [39, 19, 19, 1]
     validCP bch 33333 "000000002dd5588a74784eaa7ab0507a18ad16a236e7b1ce69f00d7ddfb5d0a6" `shouldBe` True
     validCP bch 33333 "000000002dd5588a74784eaa7ab0507a18ad16a236e7b1ce69f00d7ddfb5d0a7" `shouldBe` False
     -- the first blocks of the DAA, not the blocks before them
     lookup 504032 bch.checkpoints
       `shouldBe` Just "00000000000000000343e9875012f2062554c8752929892c82a0c0743ac7dcfd"
     lookup 504031 bch.checkpoints `shouldBe` Nothing
-    lookup 1188698 bchTest.checkpoints
+    lookup 1188698 bchTest3.checkpoints
       `shouldBe` Just "0000000000051b450faa75bb8e1ea30bc18c4b9736e765d2794259a53bc83f99"
-    lookup 1188697 bchTest.checkpoints `shouldBe` Nothing
+    lookup 1188697 bchTest3.checkpoints `shouldBe` Nothing
   it "has the seeds of the nodes on regtest" $ do
     btcRegTest.seeds `shouldBe` ["dummySeed.invalid"]
     bchRegTest.seeds `shouldBe` []
   it "enforces BIP94 on bitcoin testnet4 only" $ do
-    map (.bip94) [btc, btcTest, btcTest4, btcRegTest, bch, bchTest, bchTest4, bchRegTest]
+    map (.bip94) [btc, btcTest, btcTest4, btcRegTest, bch, bchTest3, bchTest4, bchRegTest]
       `shouldBe` [False, False, True, False, False, False, False, False]
     -- the first block of a period may be at most 600 seconds before its parent
     validTimeWarp btcTest4 2016 10000 9400 `shouldBe` True
@@ -1803,7 +1803,7 @@ minimumWorkSpec = describe "minimum chain work" $ do
     btcRegTest.minimumChainWork `shouldBe` 0
     -- chainparamsconstants.h of Bitcoin Cash Node at 3d13ce8
     bch.minimumChainWork `shouldBe` 0x0000000000000000000000000000000000000000030fd678912166474fe93f14
-    bchTest.minimumChainWork `shouldBe` 0x00000000000000000000000000000000000000000000011fdbbe582349040762
+    bchTest3.minimumChainWork `shouldBe` 0x00000000000000000000000000000000000000000000011fdbbe582349040762
     bchTest4.minimumChainWork `shouldBe` 0x000000000000000000000000000000000000000000000000bd5a1b5bda45b5da
     bchRegTest.minimumChainWork `shouldBe` 0
 

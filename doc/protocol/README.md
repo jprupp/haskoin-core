@@ -38,7 +38,7 @@ that network.
 | testnet4     | `btcTest4`   | Bitcoin Core      | `1c163f28` | 48333 |
 | regtest      | `btcRegTest` | Bitcoin Core      | `fabfb5da` | 18444 |
 | Bitcoin Cash | `bch`        | Bitcoin Cash Node | `e3e1f3e8` | 8333  |
-| testnet3     | `bchTest`    | Bitcoin Cash Node | `f4e5f3f4` | 18333 |
+| testnet3     | `bchTest3`   | Bitcoin Cash Node | `f4e5f3f4` | 18333 |
 | testnet4     | `bchTest4`   | Bitcoin Cash Node | `e2b7daaf` | 28333 |
 | regtest      | `bchRegTest` | Bitcoin Cash Node | `dab5bffa` | 18444 |
 

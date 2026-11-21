@@ -202,7 +202,7 @@ spec = do
       cashAddrEncode bch 3 hash32
         `shouldBe` Just "bitcoincash:rvvxx9puznz3v6qyh5vjqv6kmgfkexzk0rx56faphrrr99syjqexy30vcqxv4"
     it "uses the prefix of the network" $ do
-      cashAddrEncode bchTest 0 hash20
+      cashAddrEncode bchTest3 0 hash20
         `shouldBe` Just "bchtest:qpm2qsznhks23z7629mms6s4cwef74vcwvqcw003ap"
       cashAddrEncode bchRegTest 0 hash20
         `shouldBe` Just "bchreg:qpm2qsznhks23z7629mms6s4cwef74vcwv6ycwvz78"

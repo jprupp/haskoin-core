@@ -458,17 +458,17 @@ permissionSpec = describe "permissions" $ do
 networkSpec :: Spec
 networkSpec = describe "networks" $ do
   it "has the default block size of each network" $ do
-    map (\n -> (BCHN.defaultOptions n).defaultBlockSize) [bch, bchTest, bchTest4, bchRegTest]
+    map (\n -> (BCHN.defaultOptions n).defaultBlockSize) [bch, bchTest3, bchTest4, bchRegTest]
       `shouldBe` [32000000, 32000000, 2000000, 32000000]
   it "has the same timeouts and scores on every network" $
     mapM_
       (\n -> (BCHN.defaultOptions n).banScore `shouldBe` 100)
-      [bch, bchTest, bchTest4, bchRegTest]
+      [bch, bchTest3, bchTest4, bchRegTest]
   it "scores a version older than the genesis block of the network" $ do
     let v = withTime 1296688601
         score n = scores (snd (feed 1 (Receive (MVersion v)) (open n id Inbound [])))
     score bch `shouldBe` []
-    score bchTest `shouldBe` [20]
+    score bchTest3 `shouldBe` [20]
     score bchTest4 `shouldBe` [20]
     score bchRegTest `shouldBe` [20]
   it "never finds too little work in headers on regtest" $ do

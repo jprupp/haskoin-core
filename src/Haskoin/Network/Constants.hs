@@ -21,7 +21,7 @@ module Haskoin.Network.Constants
     btcTest4,
     btcRegTest,
     bch,
-    bchTest,
+    bchTest3,
     bchTest4,
     bchRegTest,
     allNets,
@@ -627,10 +627,16 @@ bchTest4 =
 -- Bitcoin Cash Node 29.2.0 supports testnet3 without a deprecation notice,
 -- unlike Bitcoin Core, so this network is not deprecated. 'bchTest4' is the
 -- smaller test network, with blocks of 2 MB.
-bchTest :: Network
-bchTest =
+--
+-- The value and its 'name', @bchtest3@, carry the number of the testnet, as
+-- those of 'bchTest4' do, so that neither looks like the default test network
+-- of Bitcoin Cash. They were @bchTest@ and @bchtest@ before 3.0.0. The
+-- CashAddr prefix stays @bchtest@: Bitcoin Cash Node gives it to every test
+-- network.
+bchTest3 :: Network
+bchTest3 =
   Network
-    { name = "bchtest",
+    { name = "bchtest3",
       addrPrefix = 111,
       scriptPrefix = 196,
       secretPrefix = 239,
@@ -815,4 +821,4 @@ bchRegTest =
 -- | List of all networks supported by this library, the deprecated 'btcTest'
 -- included.
 allNets :: [Network]
-allNets = [btc, bch, btcTest, btcTest4, bchTest4, bchTest, btcRegTest, bchRegTest]
+allNets = [btc, bch, btcTest, btcTest4, bchTest4, bchTest3, btcRegTest, bchRegTest]

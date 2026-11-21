@@ -845,7 +845,7 @@ the `Env`.
 The rules are the same on the four networks of this library; `defaultOptions`
 of each network makes one machine per network.
 
-| | main (`bch`) | testnet3 (`bchTest`) | testnet4 (`bchTest4`) | regtest (`bchRegTest`) |
+| | main (`bch`) | testnet3 (`bchTest3`) | testnet4 (`bchTest4`) | regtest (`bchRegTest`) |
 |---|---|---|---|---|
 | Magic | e3e1f3e8 | f4e5f3f4 | e2b7daaf | dab5bffa |
 | Genesis time (floor of a `version` time) | 1231006505 | 1296688602 | 1597811185 | 1296688602 |

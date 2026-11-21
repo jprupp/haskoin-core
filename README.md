@@ -181,7 +181,7 @@ the chain take one as their first argument.
 | `btcTest4`   | Bitcoin testnet4      | `btctest4`           |
 | `btcRegTest` | Bitcoin regtest       | `btcreg`             |
 | `bch`        | Bitcoin Cash mainnet  | `bch`                |
-| `bchTest`    | Bitcoin Cash testnet3 | `bchtest`            |
+| `bchTest3`   | Bitcoin Cash testnet3 | `bchtest3`           |
 | `bchTest4`   | Bitcoin Cash testnet4 | `bchtest4`           |
 | `bchRegTest` | Bitcoin Cash regtest  | `bchreg`             |
 
@@ -190,8 +190,13 @@ compile. Bitcoin Core has deprecated testnet3 in favour of testnet4, whose BIP94
 rules stop the storms of minimum-difficulty blocks that made testnet3 hard to
 use, and will remove it. Use `btcTest4` instead. `btcTest` is still in `allNets`
 and `netByName` still finds it, so that code reading old testnet3 data keeps
-working; a later major version will remove it. `bchTest` is not deprecated:
+working; a later major version will remove it. `bchTest3` is not deprecated:
 Bitcoin Cash Node still supports testnet3.
+
+The Bitcoin Cash testnet3 carries its number, `bchTest3` and `bchtest3`, as
+testnet4 does, so that neither looks like the default test network of Bitcoin
+Cash. Before 3.0.0 it was `bchTest` and `bchtest`. Its CashAddr prefix is still
+`bchtest`, which every Bitcoin Cash test network shares.
 
 The constants of each network are those of the reference node: Bitcoin Core
 32.1 for Bitcoin and Bitcoin Cash Node 29.2.0 for Bitcoin Cash. Bitcoin Core

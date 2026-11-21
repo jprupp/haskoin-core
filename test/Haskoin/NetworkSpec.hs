@@ -1084,7 +1084,7 @@ blockFilterSpec = describe "block filters" $ do
 constantsSpec :: Spec
 constantsSpec = describe "network constants" $ do
   it "lists eight networks with distinct names and magics" $ do
-    map (.name) allNets `shouldBe` ["btc", "bch", "btctest", "btctest4", "bchtest4", "bchtest", "btcreg", "bchreg"]
+    map (.name) allNets `shouldBe` ["btc", "bch", "btctest", "btctest4", "bchtest4", "bchtest3", "btcreg", "bchreg"]
     length (nub (map (.magic) allNets)) `shouldBe` 8
   it "finds every network by name" $
     forM_ allNets $
@@ -1092,13 +1092,13 @@ constantsSpec = describe "network constants" $ do
   it "finds nothing for an unknown name" $
     netByName "ltc" `shouldBe` Nothing
   it "uses the magic bytes of each network" $
-    map (.magic) [btc, btcTest, btcTest4, btcRegTest, bch, bchTest, bchTest4, bchRegTest]
+    map (.magic) [btc, btcTest, btcTest4, btcRegTest, bch, bchTest3, bchTest4, bchRegTest]
       `shouldBe` [0xf9beb4d9, 0x0b110907, 0x1c163f28, 0xfabfb5da, 0xe3e1f3e8, 0xf4e5f3f4, 0xe2b7daaf, 0xdab5bffa]
   it "uses the default port of each network" $
-    map (.defaultPort) [btc, btcTest, btcTest4, btcRegTest, bch, bchTest, bchTest4, bchRegTest]
+    map (.defaultPort) [btc, btcTest, btcTest4, btcRegTest, bch, bchTest3, bchTest4, bchRegTest]
       `shouldBe` [8333, 18333, 48333, 18444, 8333, 18333, 28333, 18444]
   it "has the genesis block of each network" $
-    map (headerHash . (.genesisHeader)) [btc, btcTest, btcTest4, btcRegTest, bch, bchTest, bchTest4, bchRegTest]
+    map (headerHash . (.genesisHeader)) [btc, btcTest, btcTest4, btcRegTest, bch, bchTest3, bchTest4, bchRegTest]
       `shouldBe` [ "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f",
                    "000000000933ea01ad0ee984209779baaec3ced90fa3f408719526f8d77f4943",
                    "00000000da84f2bafbbc53dee25a72ae507ff4914b867c565be350b0da8bf043",
@@ -1109,10 +1109,10 @@ constantsSpec = describe "network constants" $ do
                    "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206"
                  ]
   it "limits messages to 4 MB on bitcoin and twice the block size on bitcoin cash" $
-    map (.maxMessageSize) [btc, btcTest, btcTest4, btcRegTest, bch, bchTest, bchTest4, bchRegTest]
+    map (.maxMessageSize) [btc, btcTest, btcTest4, btcRegTest, bch, bchTest3, bchTest4, bchRegTest]
       `shouldBe` [4000000, 4000000, 4000000, 4000000, 64000000, 64000000, 4000000, 64000000]
   it "knows the block size of each network" $
-    map (.maxBlockSize) [btc, bch, bchTest, bchTest4, bchRegTest]
+    map (.maxBlockSize) [btc, bch, bchTest3, bchTest4, bchRegTest]
       `shouldBe` [1000000, 32000000, 32000000, 2000000, 32000000]
   it "activates BIP34, BIP65 and BIP66 at height 1 on bitcoin regtest, as Bitcoin Core does" $ do
     btcRegTest.bip34Height `shouldBe` 1
@@ -1134,7 +1134,7 @@ constantsSpec = describe "network constants" $ do
     btcTest4.bip34Height `shouldBe` 1
     btcTest4.bip34Hash `shouldBe` Nothing
   it "uses the BIP44 coin type of each network" $
-    map (.bip44Coin) [btc, btcTest, btcTest4, btcRegTest, bch, bchTest, bchTest4, bchRegTest]
+    map (.bip44Coin) [btc, btcTest, btcTest4, btcRegTest, bch, bchTest3, bchTest4, bchRegTest]
       `shouldBe` [0, 1, 1, 1, 145, 1, 1, 1]
   it "lists the Bitcoin Forks seed for bitcoin cash" $
     bch.seeds `shouldSatisfy` elem "seed-bch.bitcoinforks.org"
@@ -1215,7 +1215,7 @@ sizeLimitSpec = describe "message size per command" $ do
     maxPayloadSize bchTest4 MCInv `shouldBe` 2097152
   it "limits messages without block content to 4 MB on bitcoin and 2 MiB on bitcoin cash" $
     -- MAX_PROTOCOL_MESSAGE_LENGTH: 4 * 1000 * 1000 in Bitcoin Core, 2 * 1024 * 1024 in Bitcoin Cash Node
-    map (.maxProtocolMessageSize) [btc, btcTest, btcTest4, btcRegTest, bch, bchTest, bchTest4, bchRegTest]
+    map (.maxProtocolMessageSize) [btc, btcTest, btcTest4, btcRegTest, bch, bchTest3, bchTest4, bchRegTest]
       `shouldBe` [4000000, 4000000, 4000000, 4000000, 2097152, 2097152, 2097152, 2097152]
   it "checks the magic before the command name" $
     -- magic 00000000 and the command "ping" followed by a line feed
@@ -1313,7 +1313,7 @@ compactPositionSpec = describe "compact block positions" $ do
     counts (runGetS (getMessage bch) (frame bch "cmpctblock" (compact 65535 (hex "0100" <> tx))))
       `shouldBe` Right (65535, [0])
   it "allows positions of 16 bits on bitcoin and of 32 bits on bitcoin cash" $
-    map (.maxCompactBlockIndex) [btc, btcTest, btcTest4, btcRegTest, bch, bchTest, bchTest4, bchRegTest]
+    map (.maxCompactBlockIndex) [btc, btcTest, btcTest4, btcRegTest, bch, bchTest3, bchTest4, bchRegTest]
       `shouldBe` [65535, 65535, 65535, 65535, 4294967295, 4294967295, 4294967295, 4294967295]
   it "keeps 32-bit positions in the form without a network" $ do
     parse (hex (bh1Hex <> "01feffffffff")) `shouldBe` Right (GetBlockTxn bh1 [4294967295])

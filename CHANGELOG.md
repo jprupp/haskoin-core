@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 
 ## [3.0.0] - 2026-11-20
 
-This release breaks backwards compatibility in two places:
+This release breaks backwards compatibility in three places:
 
 - The `Network` record has a new field, `asertAnchorBlock`, so code that
   builds a `Network` field by field, or uses its constructor positionally,
@@ -17,6 +17,8 @@ This release breaks backwards compatibility in two places:
   of addresses built with an earlier version must be rebuilt, or have these
   outputs added, before it runs with 3.0.0: see "Upgrading an index of
   addresses" below.
+- The Bitcoin Cash testnet3 is renamed `bchTest3`, with the name `bchtest3`
+  for `netByName`, from `bchTest` and `bchtest`: see "Changed" below.
 
 Bitcoin testnet3 is deprecated and still works.
 
@@ -27,7 +29,7 @@ Bitcoin testnet3 is deprecated and still works.
   of each network treats one peer, as a pure state machine translated from the
   upstream source: Bitcoin Core 32.1 (`Haskoin.Network.Protocol.BitcoinCore`)
   for `btc`, `btcTest`, `btcTest4` and `btcRegTest`, and Bitcoin Cash Node
-  29.2.0 (`Haskoin.Network.Protocol.BitcoinCashNode`) for `bch`, `bchTest`,
+  29.2.0 (`Haskoin.Network.Protocol.BitcoinCashNode`) for `bch`, `bchTest3`,
   `bchTest4` and `bchRegTest`. `machine` picks the machine of a network with
   the node's default options, `start` opens a connection from a `Setup` and
   `step` feeds it a message, a framing error, a tick or a notification. Each
@@ -95,18 +97,25 @@ Bitcoin testnet3 is deprecated and still works.
 - **Bitcoin testnet3, `btcTest`.** Using it gives a deprecation warning; use
   `btcTest4`. Bitcoin Core has deprecated testnet3 and says it will remove it
   in an upcoming release. It stays in `allNets` and `netByName` still finds
-  it, and a later major version will remove it. `bchTest` is not deprecated:
+  it, and a later major version will remove it. `bchTest3` is not deprecated:
   Bitcoin Cash Node still supports testnet3 without a notice.
 
 ### Changed
+
+- **Bitcoin Cash testnet3 is `bchTest3`.** The value `bchTest` is now
+  `bchTest3`, and its `name`, the one `netByName` reads, is `bchtest3` instead
+  of `bchtest`, in the way of `bchTest4` and `bchtest4`. With a number on both
+  testnets, neither looks like the default test network of Bitcoin Cash. Code
+  that names the network, and data that stores its name, must change. The
+  CashAddr prefix is still `bchtest`, so addresses do not change.
 
 - **The constants of the networks match the reference nodes,** Bitcoin Core
   32.1 and Bitcoin Cash Node 29.2.0:
   - `btc` and `btcTest` have no checkpoints, as Bitcoin Core has none. The
     minimum chain work still protects a header sync.
-  - The checkpoints of `bch`, `bchTest` and `bchTest4` are those of Bitcoin
+  - The checkpoints of `bch`, `bchTest3` and `bchTest4` are those of Bitcoin
     Cash Node: 39, 19 and 19 of them. Two checkpoints were not in Bitcoin
-    Cash Node: block 504031 of `bch` and block 1188697 of `bchTest`, the
+    Cash Node: block 504031 of `bch` and block 1188697 of `bchTest3`, the
     blocks before the DAA. It checkpoints 504032 and 1188698, the first
     blocks of the DAA.
   - `bchRegTest` has `edaHeight` and `daaHeight` of `Just 1`, from the
