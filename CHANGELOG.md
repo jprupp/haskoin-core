@@ -168,6 +168,46 @@ Bitcoin testnet3 is deprecated and still works.
 
 ### Fixed
 
+- **On Bitcoin Cash, the verifiers no longer verify an input in an encoding
+  that no block of Bitcoin Cash holds.** Bitcoin Cash applies to every block
+  three rules of encoding that Bitcoin applies only to the transactions it
+  relays: the S of an ECDSA signature is low (`LOW_S`), a key is compressed
+  or uncompressed (`STRICTENC`), and an input script pushes each item by the
+  shortest push that holds it (`MINIMALDATA`). They are among the
+  `MANDATORY_SCRIPT_VERIFY_FLAGS` of Bitcoin Cash Node 29.2.0, which refuses
+  a transaction that breaks one ("mandatory-script-verify-flag-failed") and
+  drops the peer that sent it. The library applied them as Bitcoin does:
+  - `judgeInputs` said `InputVerified` for a valid ECDSA signature whose S
+    was replaced by the order of the curve less S. Anyone can change a
+    signature seen on the network that way, without a key.
+  - `judgeInputs` said `InputVerified` for the spend of a coin locked to the
+    hash of a key in the hybrid form, 65 bytes that start with 0x06 or 0x07.
+    Whoever makes the coin chooses the key, so anyone could make one.
+  - `verifyStdInput` and `verifyStdTx` said `True`, and `judgeInputs` said
+    `InputVerified`, for an input script that pushes a signature, a key or a
+    redeem script by `OP_PUSHDATA1`, `2` or `4` where a shorter push holds
+    it. `judgeInputs` said so too when the signature is a Schnorr signature,
+    when the coin holds tokens, and when the field of bits of a multisig
+    with Schnorr signatures is pushed as data in place of its opcode. Anyone
+    can change the pushes of an input seen on the network, without a key.
+
+  A caller that sends a transaction to its peers when every input is
+  `InputVerified` sent these, and each node of Bitcoin Cash then closed its
+  connection. On a network with a fork id the answers are now `False` and
+  `InputUndecided`, also when the signature does not verify. An input in
+  the encoding that every wallet makes is verified as before. Nothing
+  changes on Bitcoin: there a block may hold the three forms,
+  `verifyStdInput` still answers `True` for a longer push, and a high S and
+  a hybrid key were `InputUndecided` already.
+- **The documentation of `isCanonicalHalfOrder`, `decodeStrictSig`,
+  `verifyHashSig` and `decodePubKey` gave the rules of Bitcoin as the rules
+  of consensus.** A low S and the form of a key are rules of the relay
+  policy on Bitcoin and consensus rules on Bitcoin Cash. Each comment now
+  says what holds on each chain, and that of `verifyHashSig` says that a
+  signature with a high S verifies. To verify a signature of Bitcoin Cash
+  with these functions, check `isCanonicalHalfOrder` too, and read the key
+  with `decodePubKey` and not with `importPubKey`. The README says so under
+  "Bitcoin Cash". The functions themselves did not change.
 - **`decodeOutput` no longer reads a multisig script whose keys are pushed
   by `OP_PUSHDATA1`, `2` or `4`, and the signers and verifiers no longer
   sign or verify the spend of such a coin over another script.** The
@@ -696,7 +736,7 @@ which 2.0.0 fixes:*
 
 - `unmarshal` and `unmarshalLazy` fail when bytes are left over after the value. They used to read a value from the start of the input and ignore the rest, so two different byte strings could read as the same public key, signature or extended key. Code that reads a value from the start of a longer stream must run `marshalGet` itself.
 - The binary form of `XPubKey` holds a compressed public key in exactly 33 bytes, as BIP 32 defines it and as `xPubImport` already required. A key in the 65-byte form used to be read.
-- `decodeStrictSig`, and with it the binary and JSON forms of `Sig`, apply the encoding rule of BIP 66 and nothing more. A signature with a high S value is now read. Low S is a relay rule of Bitcoin Core (`SCRIPT_VERIFY_LOW_S`), not a consensus rule, and blocks hold signatures with a high S. `isCanonicalHalfOrder` tests the relay rule. The form of a transaction signature, `TxSignature`, still applies it. The signers make low-S signatures, as before.
+- `decodeStrictSig`, and with it the binary and JSON forms of `Sig`, apply the encoding rule of BIP 66 and nothing more. A signature with a high S value is now read. Low S is a relay rule of Bitcoin Core (`SCRIPT_VERIFY_LOW_S`), not a consensus rule of Bitcoin, and its blocks hold signatures with a high S. On Bitcoin Cash it is a consensus rule. `isCanonicalHalfOrder` tests the relay rule. The form of a transaction signature, `TxSignature`, still applies it. The signers make low-S signatures, as before.
 - `makeXPrvKey` throws `DerivationException` for a seed that is not 16 to 64 bytes long, the range that BIP 32 gives and that Bitcoin Core enforces. A seed of any length used to give a master key, the empty string included, and anyone can compute the keys of such a wallet. A wallet that was made from a seed of another length can still be opened without this function: its master key is `XPrvKey 0 "00000000" 0 chain key`, where `key` and `chain` are the two halves of `hmac512 "Bitcoin seed" seed`.
 - `applyPath` returns `Left` for a path that leads below depth 255, which no key can have. It used to throw `DerivationException`, although its type promises an error value.
 - The path constructors `:|` and `:/` throw `DerivationException` for an index of 2^31 or more. Such a path could be built before, but its text and binary forms did not read back to the same path, and deriving along it threw. The two constructors are now pattern synonyms. Code that builds and matches paths with them compiles as before.
