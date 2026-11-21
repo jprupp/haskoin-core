@@ -177,6 +177,40 @@ Bitcoin testnet3 is deprecated and still works.
 
 ### Fixed
 
+- **On Bitcoin Cash, an ECDSA signature whose DER form is 64 bytes is no
+  longer read as an ECDSA signature.** On Bitcoin Cash a signature of 64
+  bytes before its hash type byte is a Schnorr signature, whatever its
+  bytes. Bitcoin Cash Node 29.2.0 verifies it as one in `OP_CHECKSIG`, where
+  it fails, and takes no signature of that length in a multisig without a
+  field of bits. It refuses the transaction both times
+  ("mandatory-script-verify-flag-failed") and drops the peer that sent it. A
+  valid ECDSA signature of that length exists: its r and s take 29 bytes
+  each, and a computer makes one in a minute, with a key of its own.
+  `verifyStdInput` and `verifyStdTx` said `True` for an input signed with
+  one, and `judgeInputs` said `InputVerified`.
+
+  On a network with a fork id, `decodeTxSig` now refuses a signature of 64
+  bytes: "Non-canonical signature: a signature of 64 bytes is a Schnorr
+  signature on this network". So do the binary and JSON forms of
+  `TxSignature`, and `decodeInput` does not read an input that has one.
+  `verifyStdInput` and `verifyStdTx` answer `False`. `judgeInputs` reads the
+  signature as a Schnorr signature, which does not verify: `InputForged` for
+  a coin of one key and the hash type "all", `InputUndecided` for a multisig.
+  Blocks of Bitcoin Cash before May 2019 could hold such a signature, and
+  `decodeInput` no longer reads its input. Nothing changes on Bitcoin, where
+  it is an ordinary signature: Bitcoin Core 32.1 put one in a block on
+  regtest, and the library verifies it.
+
+  The new `isCashSchnorrLength` is the test of that length, to check with
+  `isCanonicalHalfOrder` on a signature read by `decodeStrictSig`. The
+  signer uses it too. `makeSignature`, and so `signInput`, `signTx` and
+  `signPsbt`, said that they refuse what a node would refuse, and could
+  hand out such a signature on Bitcoin Cash, once in 2^49 by the
+  specification. They now fail with "makeSignature: the signature is 64
+  bytes long, which this network reads as a Schnorr signature: change the
+  transaction and sign again". The nonce is that of RFC 6979, so the same
+  transaction gives the same signature again. `encodeTxSig` still writes
+  such a value when a caller builds one.
 - **On Bitcoin Cash, the verifiers no longer verify an input in an encoding
   that no block of Bitcoin Cash holds.** Bitcoin Cash applies to every block
   three rules of encoding that Bitcoin applies only to the transactions it

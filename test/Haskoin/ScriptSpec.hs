@@ -149,6 +149,15 @@ sigDerHex =
 sigDer :: Sig
 sigDer = fromJust $ decodeStrictSig $ hex sigDerHex
 
+-- | An ECDSA signature whose DER form is 64 bytes, without its hash type
+-- byte: r and s take 0x1d = 29 bytes each. Bitcoin Core 32.1 put it in a
+-- block on regtest, and Bitcoin Cash Node 29.2.0 refused it, in the
+-- transactions of "Haskoin.Transaction.VerdictSpec".
+shortDerHex :: Text
+shortDerHex =
+  "303e021d412389f0428046438bea9c0e2427db23ab0bce6fe36d851e0dc86b41ed\
+  \021d20576521b06f9bc52aacf1dee9900a53c82c9e9ad11dae4edc0d6164db"
+
 -- | The signature with SIGHASH_ALL, pushed in a script.
 sigAllPushHex :: Text
 sigAllPushHex = "47" <> sigDerHex <> "01"
@@ -1026,6 +1035,14 @@ txSignatureSpec = do
     -- 64 bytes and the hash type byte 0x41. Bitcoin Cash Node takes a
     -- 64-byte signature as Schnorr.
     decodeTxSig bch (B.replicate 64 0x11 <> "\x41") `shouldSatisfy` isLeft
+  it "does not read an ECDSA signature of 64 bytes on Bitcoin Cash, where a node reads a Schnorr signature" $
+    -- r and s take 29 bytes each: 6 + 29 + 29 = 64
+    decodeTxSig bch (hex (shortDerHex <> "41"))
+      `shouldBe` Left
+        "Failed reading: Non-canonical signature: a signature of 64 bytes is a Schnorr signature on this network\n\
+        \Empty call stack\n"
+  it "reads an ECDSA signature of 64 bytes on Bitcoin, where a block may hold it" $
+    decodeTxSig btc (hex (shortDerHex <> "01")) `shouldSatisfy` isRight
   it "does not read SIGHASH_UTXOS on Bitcoin Cash, which the digest does not support" $
     -- 0x61 is SIGHASH_ALL with SIGHASH_UTXOS and SIGHASH_FORKID
     decodeTxSig bch (hex (sigDerHex <> "61"))
