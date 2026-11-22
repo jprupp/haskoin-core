@@ -201,6 +201,7 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes, fromMaybe, isJust, isNothing, listToMaybe, mapMaybe, maybeToList)
 import Data.Serialize qualified as S
+import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Word (Word32, Word64, Word8)
 import GHC.Generics (Generic)
@@ -1383,6 +1384,17 @@ tapScriptSigs m =
     signature <- first (("The value of the key " <> showKey key <> " ") <>) (decodeTaprootSig value)
     return ((leafKey, leaf), signature)
 
+-- | The script path signatures of a Taproot input, each by the data of
+-- its key as it is in the map: the 32 bytes of the x-only key, then the
+-- leaf hash. The finalizer looks a signature up by these bytes. Unlike
+-- 'tapScriptSigs', it does not ask that the 32 bytes are a point of the
+-- curve: 'decodePsbt' reads a signature under any 32 bytes, as Bitcoin
+-- Core does, and such a signature is one that no leaf asks for.
+tapScriptSigsByKeyData :: PsbtMap -> Either String [(ByteString, TaprootSignature)]
+tapScriptSigsByKeyData m =
+  forM [(key, value) | (key, value) <- Map.toAscList m, key.keyType == tapScriptSigType] $ \(key, value) ->
+    (key.keyData,) <$> first (("The value of the key " <> showKey key <> " ") <>) (decodeTaprootSig value)
+
 insertTapScriptSig :: PubKey -> Digest SHA256 -> TaprootSignature -> PsbtMap -> PsbtMap
 insertTapScriptSig leafKey leaf signature =
   Map.insert (Key tapScriptSigType (exportXOnlyPubKey leafKey <> BA.convert leaf)) (encodeTaprootSig signature)
@@ -1400,12 +1412,24 @@ data TapLeafScript = TapLeafScript
 -- | The leaf scripts of a Taproot input, with their control blocks:
 -- PSBT_IN_TAP_LEAF_SCRIPT
 tapLeafScripts :: PsbtMap -> Either String [TapLeafScript]
-tapLeafScripts m =
-  forM [(key, value) | (key, value) <- Map.toAscList m, key.keyType == tapLeafScriptType] $ \(key, value) -> do
-    _ <- first (const ("The key " <> showKey key <> " is not a control block")) (decodeControlBlock key.keyData)
-    when (B.null value) $ Left ("The value of the key " <> showKey key <> " has no leaf version")
-    script <- first (("The value of the key " <> showKey key <> " ") <>) (decodeScript (B.init value))
-    return (TapLeafScript key.keyData script (B.last value))
+tapLeafScripts = sequence . tapLeafScriptEntries
+
+-- | Each leaf script of a Taproot input, or why it is refused: a control
+-- block whose internal key is no point of the curve, or a script that is
+-- not a list of opcodes. 'decodePsbt' reads such an entry, as Bitcoin Core
+-- does, and a leaf of an unknown leaf version may hold any bytes. The
+-- signer and the finalizer take the entries one by one, so that one they
+-- cannot use does not hide the others.
+tapLeafScriptEntries :: PsbtMap -> [Either String TapLeafScript]
+tapLeafScriptEntries m =
+  [ do
+      _ <- first (const ("The key " <> showKey key <> " is not a control block")) (decodeControlBlock key.keyData)
+      when (B.null value) $ Left ("The value of the key " <> showKey key <> " has no leaf version")
+      script <- first (("The value of the key " <> showKey key <> " ") <>) (decodeScript (B.init value))
+      return (TapLeafScript key.keyData script (B.last value))
+  | (key, value) <- Map.toAscList m,
+    key.keyType == tapLeafScriptType
+  ]
 
 insertTapLeafScript :: TapLeafScript -> PsbtMap -> PsbtMap
 insertTapLeafScript leaf =
@@ -1755,12 +1779,35 @@ xPrvSigner xprv originM =
 -- * it is a legacy coin asked to sign SIGHASH_SINGLE with no output at its
 --   index, as 'makeSignature' explains.
 --
--- A Taproot coin is signed by its key path when the input has its internal
--- key, which with the Merkle root must give the output key, and by each of
--- its leaf scripts that is a single key check (@<key> OP_CHECKSIG@) and
--- that its control block commits to the output key, with 'sigHashDefault'
--- when the input asks for no sighash. The BIP 341 digest commits to the
--- output every input spends, so every input must have its coin then.
+-- A Taproot coin is signed by its key path when the input names its
+-- internal key, the signer holds that key and it gives the coin, and by
+-- each of its leaf scripts that is a single key check (@<key>
+-- OP_CHECKSIG@ of the leaf version 0xc0), that its control block commits
+-- to the output key with that leaf version, and whose key the signer
+-- holds, with 'sigHashDefault' when the input asks for no sighash.
+--
+-- No BIP says what a signer does with a Taproot input that it cannot sign,
+-- so the signer does as Bitcoin Core does: only the sighash type refuses
+-- the PSBT, and such an input is left as it is while the other inputs are
+-- signed. That is:
+--
+-- * every Taproot input while another input of the PSBT lacks its coin,
+--   since the BIP 341 digest commits to the output that every input
+--   spends;
+-- * the key path of an input whose internal key does not give, with the
+--   Merkle root of the input, the output key of the coin. When its
+--   wallet holds that key, Bitcoin Core adds a signature there, which
+--   verifies for no coin. The signer adds none: BIP 174 has a signer make
+--   only valid signatures;
+-- * a Taproot input for which the signer holds no key, whatever its
+--   Taproot fields hold.
+--
+-- 'decodePsbt' reads, as Bitcoin Core does, an internal key, a record or a
+-- control block whose 32 bytes are no point of the curve, and a leaf script
+-- that is not a list of opcodes. Such an entry gives the signer no key: it
+-- is skipped, and the other entries of the input are still signed. So is a
+-- leaf script entry that names another leaf version in its value than in
+-- its control block, which is not an entry of BIP 371.
 --
 -- A PSBT that another party wrote can hold thousands of leaf scripts and
 -- of derivation records on one input, and thousands of leaves in one
@@ -1836,81 +1883,119 @@ signPsbt net signer psbt = do
       return $ nubBy (\a b -> derivePublicKey a == derivePublicKey b) (concat recordKeys <> hashKeys)
 
     -- A key path signature, and one per leaf that is a single key check,
-    -- for a Taproot coin
+    -- for a Taproot coin. Only the sighash type refuses the PSBT, as BIP
+    -- 174 asks. An input that the signer cannot sign is left as it is, as
+    -- Bitcoin Core leaves it: one it holds no key for, whatever its
+    -- Taproot fields hold, and any Taproot input while another input lacks
+    -- its coin, since the BIP 341 digest commits to the output that every
+    -- input spends.
     signTaproot i m coinScript sighashM allCoins = do
       let sighash = fromMaybe sigHashDefault sighashM
       unless (isTaprootSigHash sighash) $
         Left ("the sighash type " <> show (fromIntegral sighash :: Word32) <> " is not one a Taproot signature may use")
       unless (acceptsSigHash signer sighash) $
         Left (notAcceptedSigHash sighash)
-      spent <- maybe (Left "a Taproot signature needs the output every input spends") Right allCoins
       program <- taprootProgram coinScript
-      internalM <- inputTapInternalKey m
-      rootM <- inputTapMerkleRoot m
-      records <- inputTapDerivations m
-      leaves <- tapLeafScripts m
-      -- The record of each x-only key, with the leaves it lists as a set.
-      -- An input has at most one record for a key, since the key is the
-      -- key of the entry in its map. A leaf finds its record and its hash
-      -- here by a lookup: a walk through the records for each leaf, or
-      -- through the leaves of a record for each place of a leaf in the
-      -- tree, would take time by the product of two numbers that whoever
-      -- wrote the PSBT chooses.
-      let recordOf =
-            Map.fromList
-              [ (exportXOnlyPubKey recordKey, (d.derivation, Set.fromList d.leafHashes))
-              | (recordKey, d) <- records
-              ]
-      -- The secret key of an x-only key, by the record of that key when
-      -- the test accepts the leaves it lists, or by the hash of the key.
-      -- A key the signer gives is kept only when it is the key that was
-      -- asked for.
-      let heldXOnly accepts public =
-            listToMaybe . filter (sameX public . derivePubKey) . catMaybes $
-              [ signer.keyOfRecord (PublicKey candidate True) derivation
-              | Just (derivation, listed) <- [Map.lookup (exportXOnlyPubKey public) recordOf],
-                accepts listed,
-                candidate <- bothParities public
-              ]
-                <> [ (.key) <$> signer.keyOfHash (addressHash (encodeSerial (PublicKey candidate True)))
-                   | candidate <- bothParities public
-                   ]
-      keySig <- case internalM of
-        Nothing -> return []
-        Just internal -> do
-          let expected = taprootOutputKey (TaprootOutput internal (MASTCommitment <$> rootM))
-          unless (exportXOnlyPubKey expected == program) $
-            Left "the internal key and the Merkle root do not give the output key of the coin"
-          -- Any record of the internal key will do: BIP 371 lists in a
-          -- record the leaves the key is in, and the internal key may be
-          -- in a leaf too
-          case heldXOnly (const True) internal of
-            Nothing -> return []
-            Just secret -> do
-              tweaked <- maybe (Left "the key cannot be tweaked") Right (taprootOutputSecKey secret (MASTCommitment <$> rootM))
-              h <- taprootSigHash tx spent i sighash Nothing Nothing
-              signature <- taprootSignature (signSchnorr tweaked (hashToMsg h)) sighash
-              return [insertTapKeySig signature]
-      scriptSigs <- fmap concat . forM leaves $ \leaf -> case singleKeyLeaf leaf of
-        Just leafKey
+      let held = heldTaprootKeys signer program m
+      case allCoins of
+        Just spent | isJust held.keyPathKey || not (null held.leafKeys) -> do
+          let signatureFor secret leafM = do
+                h <- taprootSigHash tx spent i sighash Nothing ((,0xffffffff) <$> leafM)
+                taprootSignature (signSchnorr secret (hashToMsg h)) sighash
+          keySig <- forM (maybeToList held.keyPathKey) $ \tweaked ->
+            insertTapKeySig <$> signatureFor tweaked Nothing
+          scriptSigs <- forM held.leafKeys $ \(leafKey, hashOfLeaf, secret) ->
+            insertTapScriptSig leafKey hashOfLeaf <$> signatureFor secret (Just hashOfLeaf)
+          return (foldr ($) m (keySig <> scriptSigs), [sighash])
+        _ -> return (m, [])
+
+-- | The secret keys a signer holds for a Taproot input
+data TaprootKeys = TaprootKeys
+  { -- | the secret key of the output key of the coin, which signs its key
+    -- path: the secret key of the internal key, tweaked
+    keyPathKey :: Maybe SecKey,
+    -- | for each leaf the signer can sign: the key of the leaf, the hash
+    -- of the leaf, and the secret key
+    leafKeys :: [(PubKey, Digest SHA256, SecKey)]
+  }
+
+-- | The keys a signer holds for a Taproot input whose coin has the witness
+-- program: the key of its key path, when the signer holds the internal key
+-- the input names, and the key of each leaf script that is a single key
+-- check and that its control block commits to the coin.
+--
+-- Only a key that can sign for the coin counts, as BIP 174 has a signer
+-- make only valid signatures. An internal key signs the key path only
+-- when it gives, with the Merkle root of the input, the output key of the
+-- coin. Bitcoin Core signs with an internal key that does not, and that
+-- signature verifies for no coin.
+--
+-- A field that cannot be used gives no key and no refusal: an internal key
+-- or a control block whose key is no point of the curve, a Merkle root
+-- that is not a hash, a leaf script that is not a list of opcodes, a
+-- record that does not decode. A signer holds no key for such a field,
+-- and the input may belong to another party, whose fields are not the
+-- signer's to judge.
+heldTaprootKeys :: Signer -> ByteString -> PsbtMap -> TaprootKeys
+heldTaprootKeys signer program m =
+  TaprootKeys
+    { keyPathKey = do
+        internal <- either (const Nothing) id (inputTapInternalKey m)
+        commitment <- fmap MASTCommitment <$> eitherToMaybe (inputTapMerkleRoot m)
+        guard (exportXOnlyPubKey (taprootOutputKey (TaprootOutput internal commitment)) == program)
+        -- Any record of the internal key will do: BIP 371 lists in a
+        -- record the leaves the key is in, and the internal key may be in
+        -- a leaf too
+        secret <- held (const True) internal
+        taprootOutputSecKey secret commitment,
+      leafKeys =
+        [ (leafKey, hashOfLeaf, secret)
+        | Just outKey <- [importXOnlyPubKey program],
+          Right leaf <- tapLeafScriptEntries m,
+          Just leafKey <- [singleKeyLeaf leaf],
           -- Only a leaf of the coin is signed: its control block must
           -- commit it to the output key
-          | Just outKey <- importXOnlyPubKey program,
-            commitsLeaf outKey leaf,
-            Just secret <- heldXOnly (Set.member hashOfLeaf) leafKey -> do
-              h <- taprootSigHash tx spent i sighash Nothing (Just (hashOfLeaf, 0xffffffff))
-              signature <- taprootSignature (signSchnorr secret (hashToMsg h)) sighash
-              return [insertTapScriptSig leafKey hashOfLeaf signature]
-          where
-            hashOfLeaf = leafHash leaf.leafVersion leaf.script
-        _ -> return []
-      let inserts = keySig <> scriptSigs
-      return (foldr ($) m inserts, [sighash | not (null inserts)])
-
+          commitsLeaf outKey leaf,
+          let hashOfLeaf = leafHash leaf.leafVersion leaf.script,
+          Just secret <- [held (Set.member hashOfLeaf) leafKey]
+        ]
+    }
+  where
+    -- The record of each x-only key, by the 32 bytes of the key, with the
+    -- leaves it lists as a set. An input has at most one record for a key,
+    -- since the key is the key of the entry in its map. A leaf finds its
+    -- record and its hash here by a lookup: a walk through the records
+    -- for each leaf, or through the leaves of a record for each place of
+    -- a leaf in the tree, would take time by the product of two numbers
+    -- that whoever wrote the PSBT chooses.
+    recordOf =
+      Map.fromList
+        [ (key.keyData, (d.derivation, Set.fromList d.leafHashes))
+        | (key, value) <- Map.toAscList m,
+          key.keyType == inTapDerivationType,
+          Right d <- [decodeTapDerivation value]
+        ]
+    -- The secret key of an x-only key, by the record of that key when the
+    -- test accepts the leaves it lists, or by the hash of the key. A key
+    -- the signer gives is kept only when it is the key that was asked for.
+    held :: (Set (Digest SHA256) -> Bool) -> PubKey -> Maybe SecKey
+    held accepts public =
+      listToMaybe . filter (sameX public . derivePubKey) . catMaybes $
+        [ signer.keyOfRecord (PublicKey candidate True) derivation
+        | Just (derivation, listed) <- [Map.lookup (exportXOnlyPubKey public) recordOf],
+          accepts listed,
+          candidate <- bothParities public
+        ]
+          <> [ (.key) <$> signer.keyOfHash (addressHash (encodeSerial (PublicKey candidate True)))
+             | candidate <- bothParities public
+             ]
     sameX a b = exportXOnlyPubKey a == exportXOnlyPubKey b
     -- The two points with the x coordinate of the key
     bothParities public =
-      mapMaybe (\prefix -> (.point) <$> eitherToMaybe (decodeSerial (B.cons prefix (exportXOnlyPubKey public)) :: Either String PublicKey)) [0x02, 0x03]
+      [ candidate.point
+      | prefix <- [0x02, 0x03],
+        Right candidate <- [decodeSerial (B.cons prefix (exportXOnlyPubKey public)) :: Either String PublicKey]
+      ]
 
 -- | The sighash type of an ECDSA signature for an input that asks for
 -- none: SIGHASH_ALL, with the fork id flag on a network that has one
@@ -1938,12 +2023,26 @@ singleKeyLeaf leaf = case leaf.script.ops of
   _ -> Nothing
 
 -- | Whether the control block of a leaf script commits the leaf to the
--- output key of the coin
+-- output key of the coin. The entry must name one leaf version
+-- ('namesOneLeafVersion').
 commitsLeaf :: PubKey -> TapLeafScript -> Bool
 commitsLeaf outKey leaf = case decodeControlBlock leaf.controlBlock of
   Right (v, internalKey, proof) ->
-    verifyScriptPathData outKey (ScriptPathData Nothing [] leaf.script (odd v) (v .&. 0xfe) internalKey proof Nothing)
+    let path = ScriptPathData Nothing [] leaf.script (odd v) (v .&. 0xfe) internalKey proof Nothing
+     in namesOneLeafVersion leaf && verifyScriptPathData outKey path
   Left _ -> False
+
+-- | Whether a leaf script entry names one leaf version. BIP 371 has the
+-- leaf version in the value of the entry, and the key of the entry is "the
+-- control block for this leaf", whose first byte holds the leaf version
+-- too (BIP 341), the one that a spend takes. An entry that names two is
+-- not an entry of BIP 371: a signature for the leaf of its value is of no
+-- use in a spend of the leaf of its control block. The signer and the
+-- finalizer pass over it.
+namesOneLeafVersion :: TapLeafScript -> Bool
+namesOneLeafVersion leaf = case B.uncons leaf.controlBlock of
+  Just (first, _) -> first .&. 0xfe == leaf.leafVersion
+  Nothing -> False
 
 -- | The error for a sighash type the signer does not accept
 notAcceptedSigHash :: SigHash -> String
@@ -2166,8 +2265,20 @@ signingInput input output sighash scripts =
 -- witness script, nested in P2SH or not, and Taproot coins by their key
 -- path signature or by a leaf script that is a single key check. Any
 -- other input stays as it is: one without enough signatures, one whose
--- scripts are no standard template, and a legacy coin known from its
--- witness output only, which Bitcoin Core does not finalize either.
+-- scripts are no standard template, a legacy coin known from its witness
+-- output only, a Taproot coin whose output key is no point of the curve,
+-- which nobody can spend, and a signed Taproot coin while another input of
+-- the PSBT lacks its coin, since the digest of a Taproot signature commits
+-- to the output every input spends and the signature cannot be verified
+-- before. Bitcoin Core does not finalize these either.
+--
+-- A leaf script or a script path signature of a Taproot input that cannot
+-- be used is passed over, and does not stop the finalizer: a leaf script
+-- that is not a list of opcodes, a control block whose internal key is no
+-- point of the curve, a signature under a key that is no point, and a leaf
+-- script entry that names another leaf version in its value than in its
+-- control block. Bitcoin Core does not finalize an input with these alone
+-- either.
 finalizePsbt :: Network -> Psbt -> Either String Psbt
 finalizePsbt net psbt = do
   coins <- spentOutputs psbt
@@ -2300,48 +2411,51 @@ namedSignatures m script =
 -- script and its control block. Every signature is verified first,
 -- against the output key and the digest of its leaf. A signature must
 -- use the sighash type the input names, and SIGHASH_DEFAULT when it names
--- none, as Bitcoin Core requires.
+-- none, as Bitcoin Core requires. 'Nothing' for an input without a
+-- signature it can use, and for one whose signature cannot be verified yet
+-- because another input lacks its coin.
 finalTaprootScripts :: Tx -> Maybe [TxOut] -> Int -> PsbtMap -> ScriptOutput -> Either String (Maybe (ByteString, WitnessStack))
 finalTaprootScripts tx allCoins i m coinScript = do
   program <- taprootProgram coinScript
-  outKey <- maybe (Left "the coin is not a Taproot output") Right (importXOnlyPubKey program)
   sighashM <- sigHashType m
   keySigM <- tapKeySig m
-  scriptSigs <- tapScriptSigs m
-  leaves <- tapLeafScripts m
+  scriptSigs <- tapScriptSigsByKeyData m
   let sameType :: TaprootSignature -> Either String ()
       sameType signature = case sighashM of
         Just asked -> unless (signature.hash == asked) $ Left "a Taproot signature does not use the sighash type of the input"
         Nothing -> unless (signature.hash == sigHashDefault) $ Left "a Taproot signature does not use SIGHASH_DEFAULT, and the input names no sighash type"
   -- Every signature of the input, used or not, as Bitcoin Core checks them
   mapM_ sameType (maybeToList keySigM <> map snd scriptSigs)
-  case keySigM of
-    Just signature -> do
-      spent <- maybe (Left "a Taproot signature needs the output every input spends") Right allCoins
+  -- A leaf finds its signature by a lookup, as it finds its record in the
+  -- signer: a walk through the signatures for each leaf would take time by
+  -- the product of two numbers that whoever wrote the PSBT chooses
+  let signatureOf = Map.fromList scriptSigs
+      signedLeaves =
+        [ (leaf, leafKey, hashOfLeaf, signature)
+        | Right leaf <- tapLeafScriptEntries m,
+          namesOneLeafVersion leaf,
+          Just leafKey <- [singleKeyLeaf leaf],
+          let hashOfLeaf = leafHash leaf.leafVersion leaf.script,
+          Just signature <- [Map.lookup (exportXOnlyPubKey leafKey <> BA.convert hashOfLeaf) signatureOf]
+        ]
+  case (keySigM, signedLeaves, allCoins, importXOnlyPubKey program) of
+    (Nothing, [], _, _) -> return Nothing
+    -- The digest of a Taproot signature commits to the output every input
+    -- spends. Until every input has its coin no signature can be checked,
+    -- so the input is not ready, and Bitcoin Core leaves it too.
+    (_, _, Nothing, _) -> return Nothing
+    -- Nobody can spend a coin whose output key is no point of the curve:
+    -- no signature verifies for it, and no control block commits to it
+    (_, _, _, Nothing) -> return Nothing
+    (Just signature, _, Just spent, Just outKey) -> do
       digest <- taprootSigHash tx spent i signature.hash Nothing Nothing
       unless (verifySchnorr outKey signature.sig (hashToMsg digest)) $
         Left "the key path signature does not verify"
       return (Just (B.empty, [encodeTaprootSig signature]))
-    Nothing -> do
-      -- A leaf finds its signature by a lookup, as it finds its record in
-      -- the signer: a walk through the signatures for each leaf would take
-      -- time by the product of two numbers that whoever wrote the PSBT
-      -- chooses
-      let signatureOf = Map.fromList [((exportXOnlyPubKey k, h), sig) | ((k, h), sig) <- scriptSigs]
-          candidates =
-            [ (leaf, leafKey, signature)
-            | leaf <- leaves,
-              Just leafKey <- [singleKeyLeaf leaf],
-              let hashOfLeaf = leafHash leaf.leafVersion leaf.script,
-              Just signature <- [Map.lookup (exportXOnlyPubKey leafKey, hashOfLeaf) signatureOf]
-            ]
-      case candidates of
-        [] -> return Nothing
-        (leaf, leafKey, signature) : _ -> do
-          spent <- maybe (Left "a Taproot signature needs the output every input spends") Right allCoins
-          unless (commitsLeaf outKey leaf) $
-            Left "the control block of the leaf does not commit it to the output key"
-          digest <- taprootSigHash tx spent i signature.hash Nothing (Just (leafHash leaf.leafVersion leaf.script, 0xffffffff))
-          unless (verifySchnorr leafKey signature.sig (hashToMsg digest)) $
-            Left "the script path signature does not verify"
-          return (Just (B.empty, [encodeTaprootSig signature, S.encode leaf.script, leaf.controlBlock]))
+    (Nothing, (leaf, leafKey, hashOfLeaf, signature) : _, Just spent, Just outKey) -> do
+      unless (commitsLeaf outKey leaf) $
+        Left "the control block of the leaf does not commit it to the output key"
+      digest <- taprootSigHash tx spent i signature.hash Nothing (Just (hashOfLeaf, 0xffffffff))
+      unless (verifySchnorr leafKey signature.sig (hashToMsg digest)) $
+        Left "the script path signature does not verify"
+      return (Just (B.empty, [encodeTaprootSig signature, S.encode leaf.script, leaf.controlBlock]))
