@@ -346,9 +346,9 @@ arbitrarySigningDataOf :: Network -> [(SigInput, [PrivateKey])] -> Gen (Tx, [Sig
 arbitrarySigningDataOf net sigis = do
   v <- arbitrary
   let uSigis = nubBy (\(a, _) (b, _) -> a.outpoint == b.outpoint) sigis
-  -- The signer refuses SIGHASH_SINGLE on a legacy input without an output
-  -- at its index, so every input gets an output when one asks for it
-  no <- choose (if any (legacySingle net . fst) uSigis then length uSigis else 1, 5)
+  -- The signer refuses SIGHASH_SINGLE on an input without an output at
+  -- its index, so every input gets an output when one asks for it
+  no <- choose (if any (isSigHashSingle . (.sighash) . fst) uSigis then length uSigis else 1, 5)
   inps <- forM uSigis $ \(s, _) -> TxIn s.outpoint BS.empty <$> arbitrary
   outs <- arbitraryOutputsWithin net (sum (map ((.value) . fst) uSigis)) no
   l <- arbitrary
@@ -359,7 +359,9 @@ arbitrarySigningDataOf net sigis = do
 
 -- | Whether the input is to be signed with SIGHASH_SINGLE over the legacy
 -- digest, which is the constant 1 when the input has no output at its
--- index. 'makeSignature' refuses to sign that.
+-- index. 'makeSignature' refuses to sign that. 'signTx' refuses
+-- SIGHASH_SINGLE on any input without an output at its index, so the
+-- generators here ask 'isSigHashSingle' alone.
 legacySingle :: Network -> SigInput -> Bool
 legacySingle net si =
   isSigHashSingle si.sighash && not (isSegwit si.script) && isNothing net.sigHashForkId
@@ -400,10 +402,10 @@ arbitraryPartialTxs net = do
   return (concatMap fst res, map snd res)
   where
     singleSig so val rdmM tx op prv = do
-      -- The signer refuses SIGHASH_SINGLE on a legacy input without an
-      -- output at its index
+      -- The signer refuses SIGHASH_SINGLE on an input without an output
+      -- at its index
       let index = fromMaybe 0 (findIndex ((== op) . (.outpoint)) tx.inputs)
-          refused sh = index >= length tx.outputs && legacySingle net (SigInput so val op sh rdmM)
+          refused sh = index >= length tx.outputs && isSigHashSingle sh
       sh <- arbitraryValidSigHash net `suchThat` (not . refused)
       let sigi = SigInput so val op sh rdmM
       return . fromRight (error "Could not decode transaction") $

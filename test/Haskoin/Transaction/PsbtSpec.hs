@@ -20,6 +20,7 @@ import Data.Aeson ((.:), (.:?), (.=))
 import Data.Aeson.Key qualified as Key
 import Data.Aeson qualified as Json
 import Data.Bits (xor)
+import Data.ByteArray (convert)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as B
 import Data.Bytes.Put (runPutS)
@@ -138,6 +139,7 @@ spec = do
   vectors <- runIO (readTestFile "psbt_bip174.json" :: IO Vectors)
   vectors370 <- runIO (readTestFile "psbt_bip370.json" :: IO Vectors370)
   vectors371 <- runIO (readTestFile "psbt_bip371.json" :: IO Vectors371)
+  vectors373 <- runIO (readTestFile "psbt_bip373.json" :: IO Vectors371)
   do
     vectorsSpec vectors
     vectors370Spec vectors370
@@ -148,12 +150,14 @@ spec = do
     signingSpec
     signerChecksSpec
     signerScopeSpec
+    inputByInputSpec
     coinsSpec
     version2FieldsSpec
     taprootChecksSpec vectors371
     taprootCostSpec
     decoderChecksSpec
     taprootSpec vectors371
+    musig2Spec vectors373
     complexSpec
     core32Spec
     coreSigningSpec
@@ -332,7 +336,7 @@ rolesSpec vectors =
 
     -- The updater's PSBT gives the coin of its second input, a P2SH-P2WSH
     -- one, as a witness output only, as BIP 174 did before CVE-2020-14199
-    -- was known. A signer that wants previous transactions refuses it.
+    -- was known.
     it "a signer that trusts witness outputs makes the first signer's PSBT of the BIP from the updater's, and the second signer's" $ do
       psbt <- psbtOfVector (updaterWithSigHash vectors)
       let master = fromJust (xPrvImport btcTest "tprv8ZgxMBicQKsPd9TeAdPADNnSyH9SSUUbTVeFszDE23Ki6TBB5nCefAdHkK8Fm3qMQR6sHwA56zqRmKmxnHk37JkiFzvncDqoKmPWubu7hDF")
@@ -340,8 +344,19 @@ rolesSpec vectors =
           holding paths = trusting {keyOfRecord = \public derivation -> if derivation.path `elem` paths then trusting.keyOfRecord public derivation else Nothing}
       (encodePsbt <$> signPsbt btcTest (holding ["m/0'/0'/0'", "m/0'/0'/2'"]) psbt) `shouldBe` Right (bytesOf (firstSigner vectors))
       (encodePsbt <$> signPsbt btcTest (holding ["m/0'/0'/1'", "m/0'/0'/3'"]) psbt) `shouldBe` Right (bytesOf (secondSigner vectors))
-      signPsbt btcTest (xPrvSigner master Nothing) psbt
-        `shouldBe` Left "Input 1: the coin is given as a witness output only, and the signer requires the previous transaction of a SegWit version 0 coin"
+
+    -- The master key of the BIP holds the two keys of each input. Input 0
+    -- has its previous transaction. Input 1 is the P2SH-P2WSH coin known
+    -- from its witness output only.
+    it
+      "a signer that wants previous transactions signs the input \
+      \of the updater's PSBT that has one, and leaves the other"
+      $ do
+        psbt <- psbtOfVector (updaterWithSigHash vectors)
+        let master = fromJust (xPrvImport btcTest "tprv8ZgxMBicQKsPd9TeAdPADNnSyH9SSUUbTVeFszDE23Ki6TBB5nCefAdHkK8Fm3qMQR6sHwA56zqRmKmxnHk37JkiFzvncDqoKmPWubu7hDF")
+        signed <- expectRight (signPsbt btcTest (xPrvSigner master Nothing) psbt)
+        mapM (fmap length . partialSignatures) signed.inputs `shouldBe` Right [2, 0]
+        inputAt 1 signed `shouldBe` inputAt 1 psbt
 
     -- The four cases the BIP lists under "Fails Signer checks", signed
     -- with the master key of the BIP. The input at fault never gains a
@@ -362,9 +377,12 @@ rolesSpec vectors =
         psbt <- failing 11
         counts psbt `shouldBe` Right [1, 1]
         (counts =<< signPsbt btcTest trusting psbt) `shouldBe` Right [1, 2]
+      -- The redeem script of input 1 does not hash to the coin. Input 0
+      -- is sound and is signed.
       it "a redeem script that does not match the coin, with the witness output" $ do
         psbt <- failing 12
-        signPsbt btcTest trusting psbt `shouldBe` Left "Input 1: the redeem script of the input does not hash to its coin"
+        counts psbt `shouldBe` Right [1, 1]
+        (counts =<< signPsbt btcTest trusting psbt) `shouldBe` Right [2, 1]
       -- The witness script of input 1 is no standard script. Input 0 is
       -- sound and is signed.
       it "a witness script that does not match the redeem script" $ do
@@ -1326,14 +1344,25 @@ signerChecksSpec =
         signed m = signPsbt btc signer (withInput (recordOf public m))
         signatureCount s = fmap length (partialSignatures (inputAt 0 s))
 
-    it "refuses to sign a legacy coin known from its witness output only, which only a witness signature may use" $
-      signed (insertWitnessUtxo coin Map.empty)
-        `shouldBe` Left "Input 0: the coin is given as a witness output only, which may not be signed with a non-witness signature"
+    -- BIP 174: "If a witness UTXO is provided, no non-witness signature
+    -- may be created"
+    it
+      "adds no signature to a legacy coin known from its witness \
+      \output only, which only a witness signature may use"
+      $ do
+        (signatureCount =<< signed (insertWitnessUtxo coin Map.empty)) `shouldBe` Right 0
+        let trusting = signer {requirePreviousTx = False}
+        (signatureCount =<< signPsbt btc trusting (withInput (insertWitnessUtxo coin Map.empty)))
+          `shouldBe` Right 0
 
-    it "takes the coin from the previous transaction first, and refuses a witness output that is not that output" $ do
+    -- The witness output beside the previous transaction claims 1 satoshi.
+    -- The coin holds 200,000,000. Bitcoin Core takes the previous
+    -- transaction and does not read the witness output then.
+    it "takes the coin from the previous transaction, and does not look at a witness output beside it" $ do
+      let claiming = insertWitnessUtxo (TxOut 1 coin.script) (insertNonWitnessUtxo parent Map.empty)
       (signatureCount =<< signed (insertWitnessUtxo coin (insertNonWitnessUtxo parent Map.empty))) `shouldBe` Right 1
-      signed (insertWitnessUtxo (TxOut 1 coin.script) (insertNonWitnessUtxo parent Map.empty))
-        `shouldBe` Left "Input 0: the witness output of the input is not the output of its previous transaction"
+      (signatureCount =<< signed claiming) `shouldBe` Right 1
+      inputCoins (withInput claiming) `shouldBe` Right [Just (InputCoin (TxOut 200000000 coin.script) True)]
 
     it "refuses a sighash type no node accepts, and one whose fork id flag does not fit the network" $ do
       signed (insertSigHashType 0 (insertNonWitnessUtxo parent Map.empty)) `shouldBe` Left "Input 0: the sighash type 0 is not one a node accepts"
@@ -1354,42 +1383,56 @@ signerChecksSpec =
 
     -- Two coins of the same script, spent by one transaction with one
     -- output: input 1 has no output at its index
-    it "refuses SIGHASH_SINGLE on a legacy coin whose input has no output at its index, and signs it on a SegWit coin" $ do
-      let witnessCoin = TxOut 200000000 (encodeSerial (PayWitnessPKHash (addressHash (encodeSerial public))))
-          parentOf c = Tx 1 [TxIn (OutPoint "e567952fb6cc33857f392efa3a46c995a28f69cca4bb1b37e0204dab1ec7a389" 1) "" 0xffffffff] [c, c] [] 0
-          spendingBoth p = Tx 2 [TxIn (OutPoint (txHash p) 0) "" 0xfffffffe, TxIn (OutPoint (txHash p) 1) "" 0xfffffffe] [TxOut 399999000 (hexBytes "76a914d0c59903c5bac2868760e90fd521a4665aa7652088ac")] [] 0
-          askingSingle p = recordOf public (insertSigHashType sigHashSingle (insertNonWitnessUtxo p Map.empty))
-          psbtOf p = Psbt Version0 (spendingBoth p) Map.empty [askingSingle p, askingSingle p] [Map.empty]
-          acceptingSingle = signer {acceptedSigHashes = [sigHashSingle]}
-      signPsbt btc acceptingSingle (psbtOf (parentOf coin)) `shouldBe` Left "Input 1: makeSignature: SIGHASH_SINGLE without an output at the input index"
-      -- The BIP 143 digest commits to the coin, so the SegWit signature is fine
-      (signatureCount =<< signPsbt btc acceptingSingle (psbtOf (parentOf witnessCoin))) `shouldBe` Right 1
-      (fmap length . partialSignatures . inputAt 1 =<< signPsbt btc acceptingSingle (psbtOf (parentOf witnessCoin))) `shouldBe` Right 1
+    it
+      "adds no SIGHASH_SINGLE signature to a legacy input that has no output at \
+      \its index, signs the input that has one, and signs both on SegWit coins"
+      $ do
+        let witnessCoin = TxOut 200000000 (encodeSerial (PayWitnessPKHash (addressHash (encodeSerial public))))
+            parentOf c = Tx 1 [TxIn (OutPoint "e567952fb6cc33857f392efa3a46c995a28f69cca4bb1b37e0204dab1ec7a389" 1) "" 0xffffffff] [c, c] [] 0
+            spendingBoth p = Tx 2 [TxIn (OutPoint (txHash p) 0) "" 0xfffffffe, TxIn (OutPoint (txHash p) 1) "" 0xfffffffe] [TxOut 399999000 (hexBytes "76a914d0c59903c5bac2868760e90fd521a4665aa7652088ac")] [] 0
+            askingSingle p = recordOf public (insertSigHashType sigHashSingle (insertNonWitnessUtxo p Map.empty))
+            psbtOf p = Psbt Version0 (spendingBoth p) Map.empty [askingSingle p, askingSingle p] [Map.empty]
+            acceptingSingle = signer {acceptedSigHashes = [sigHashSingle]}
+        signedLegacy <- expectRight (signPsbt btc acceptingSingle (psbtOf (parentOf coin)))
+        mapM (fmap length . partialSignatures) signedLegacy.inputs `shouldBe` Right [1, 0]
+        -- The BIP 143 digest commits to the coin, so the SegWit signature is fine
+        (signatureCount =<< signPsbt btc acceptingSingle (psbtOf (parentOf witnessCoin))) `shouldBe` Right 1
+        (fmap length . partialSignatures . inputAt 1 =<< signPsbt btc acceptingSingle (psbtOf (parentOf witnessCoin))) `shouldBe` Right 1
 
-    it "refuses a redeem script that does not hash to the coin, and one on a coin that is not pay-to-script-hash" $ do
-      let ms = PayMulSig [public, otherPublic] 1
-          msScript = either error id (encodeOutput ms)
-          wrongScript = either error id (encodeOutput (PayMulSig [otherPublic, public] 1))
-          (p2sh, _) = spendingPsbt (either error id (toP2SH msScript))
-          p2shParent = fromJust (either (const Nothing) id (nonWitnessUtxo (inputAt 0 p2sh)))
-          p2shInput m = withInputs [recordOf public (insertNonWitnessUtxo p2shParent m)] p2sh
-      (signatureCount =<< signPsbt btc signer (p2shInput (insertInputRedeemScript msScript Map.empty))) `shouldBe` Right 1
-      signPsbt btc signer (p2shInput (insertInputRedeemScript wrongScript Map.empty))
-        `shouldBe` Left "Input 0: the redeem script of the input does not hash to its coin"
-      signed (insertInputRedeemScript msScript (insertNonWitnessUtxo parent Map.empty))
-        `shouldBe` Left "Input 0: the input has a redeem script, but its coin is not pay-to-script-hash"
+    -- BIP 174: "If a redeemScript is provided, the scriptPubKey must be
+    -- for that redeemScript"
+    it
+      "adds no signature when the redeem script does not hash \
+      \to the coin, nor when the coin is not pay-to-script-hash"
+      $ do
+        let ms = PayMulSig [public, otherPublic] 1
+            msScript = either error id (encodeOutput ms)
+            wrongScript = either error id (encodeOutput (PayMulSig [otherPublic, public] 1))
+            (p2sh, _) = spendingPsbt (either error id (toP2SH msScript))
+            p2shParent = fromJust (either (const Nothing) id (nonWitnessUtxo (inputAt 0 p2sh)))
+            p2shInput m = withInputs [recordOf public (insertNonWitnessUtxo p2shParent m)] p2sh
+        (signatureCount =<< signPsbt btc signer (p2shInput (insertInputRedeemScript msScript Map.empty))) `shouldBe` Right 1
+        (signatureCount =<< signPsbt btc signer (p2shInput (insertInputRedeemScript wrongScript Map.empty)))
+          `shouldBe` Right 0
+        (signatureCount =<< signed (insertInputRedeemScript msScript (insertNonWitnessUtxo parent Map.empty)))
+          `shouldBe` Right 0
 
-    it "refuses a witness script that does not hash to the witness program" $ do
-      let ms = PayMulSig [public, otherPublic] 1
-          msScript = either error id (encodeOutput ms)
-          wrongScript = either error id (encodeOutput (PayMulSig [otherPublic, public] 1))
-          (p2wsh, _) = spendingPsbt (either error id (toP2WSH msScript))
-          p2wshInput m = withInputs [recordOf public (Map.union m (inputAt 0 p2wsh))] p2wsh
-      (signatureCount =<< signPsbt btc signer (p2wshInput (insertInputWitnessScript msScript Map.empty))) `shouldBe` Right 1
-      signPsbt btc signer (p2wshInput (insertInputWitnessScript wrongScript Map.empty))
-        `shouldBe` Left "Input 0: the witness script of the input does not hash to its witness program"
-      signed (insertInputWitnessScript msScript (insertNonWitnessUtxo parent Map.empty))
-        `shouldBe` Left "Input 0: the input has a witness script, but its coin is not pay-to-witness-script-hash"
+    -- BIP 174: "If a witnessScript is provided, the scriptPubKey or the
+    -- redeemScript must be for that witnessScript"
+    it
+      "adds no signature when the witness script does not hash to \
+      \the witness program, nor when the coin has no witness script"
+      $ do
+        let ms = PayMulSig [public, otherPublic] 1
+            msScript = either error id (encodeOutput ms)
+            wrongScript = either error id (encodeOutput (PayMulSig [otherPublic, public] 1))
+            (p2wsh, _) = spendingPsbt (either error id (toP2WSH msScript))
+            p2wshInput m = withInputs [recordOf public (Map.union m (inputAt 0 p2wsh))] p2wsh
+        (signatureCount =<< signPsbt btc signer (p2wshInput (insertInputWitnessScript msScript Map.empty))) `shouldBe` Right 1
+        (signatureCount =<< signPsbt btc signer (p2wshInput (insertInputWitnessScript wrongScript Map.empty)))
+          `shouldBe` Right 0
+        (signatureCount =<< signed (insertInputWitnessScript msScript (insertNonWitnessUtxo parent Map.empty)))
+          `shouldBe` Right 0
 
     it "leaves an input whose coin script is not standard as it is, and signs the others" $ do
       let weird = TxOut 1000 (runPutS (serialize (Script [OP_1])))
@@ -1418,28 +1461,29 @@ signerChecksSpec =
       (signatureCount =<< signPsbt btc (keySigner secret.key) (fst (spendingPsbt (PayPKHash (addressHash (encodeSerial otherPublic)))))) `shouldBe` Right 0
       coins `seq` return ()
 
-    it "the finalizer refuses a signature that is not a signature, one with another sighash type than the input asks, and one that does not verify" $ do
-      s <- expectRight (signed (insertNonWitnessUtxo parent Map.empty))
-      signature <- case either error id (partialSignatures (inputAt 0 s)) of
-        [(_, sig)] -> return sig
-        _ -> fail "one signature"
-      let withSig sig m = withInput (insertPartialSignature public sig m)
-          keyHex = show (encodeHex (encodeSerial public))
-      finalizePsbt btc (withSig "3045aa" (insertNonWitnessUtxo parent Map.empty))
-        `shouldBe` Left ("Input 0: the signature of the key " <> keyHex <> " is not a valid signature")
-      finalizePsbt btc (withSig signature (insertSigHashType sigHashNone (insertNonWitnessUtxo parent Map.empty)))
-        `shouldBe` Left ("Input 0: the signature of the key " <> keyHex <> " does not use the sighash type of the input")
-      -- The signature of the same key on another transaction
-      let sameKeyOther = withInputs [recordOf public (insertNonWitnessUtxo parent Map.empty)] (Psbt Version0 (Tx 2 psbt.unsignedTx.inputs [] [] 0) Map.empty psbt.inputs [])
-      elsewhere <- expectRight (signPsbt btc signer sameKeyOther)
-      foreignSig <- case either error id (partialSignatures (inputAt 0 elsewhere)) of
-        [(_, sig)] -> return sig
-        _ -> fail "one signature"
-      finalizePsbt btc (withSig foreignSig (insertNonWitnessUtxo parent Map.empty))
-        `shouldBe` Left ("Input 0: the signature of the key " <> keyHex <> " does not verify")
-      -- The right signature finalizes
-      f <- expectRight (finalizePsbt btc (withSig signature (insertNonWitnessUtxo parent Map.empty)))
-      isJust (finalScriptSig (inputAt 0 f)) `shouldBe` True
+    it
+      "the finalizer leaves alone an input whose signature is not a signature, \
+      \has another sighash type than the input asks, or does not verify"
+      $ do
+        s <- expectRight (signed (insertNonWitnessUtxo parent Map.empty))
+        signature <- case either error id (partialSignatures (inputAt 0 s)) of
+          [(_, sig)] -> return sig
+          _ -> fail "one signature"
+        let withSig sig m = withInput (insertPartialSignature public sig m)
+            leftAlone unsigned = finalizePsbt btc unsigned `shouldBe` Right unsigned
+        -- 3045aa01 ends with the byte of SIGHASH_ALL, and is no signature
+        leftAlone (withSig "\x30\x45\xaa\x01" (insertNonWitnessUtxo parent Map.empty))
+        leftAlone (withSig signature (insertSigHashType sigHashNone (insertNonWitnessUtxo parent Map.empty)))
+        -- The signature of the same key on another transaction
+        let sameKeyOther = withInputs [recordOf public (insertNonWitnessUtxo parent Map.empty)] (Psbt Version0 (Tx 2 psbt.unsignedTx.inputs [] [] 0) Map.empty psbt.inputs [])
+        elsewhere <- expectRight (signPsbt btc signer sameKeyOther)
+        foreignSig <- case either error id (partialSignatures (inputAt 0 elsewhere)) of
+          [(_, sig)] -> return sig
+          _ -> fail "one signature"
+        leftAlone (withSig foreignSig (insertNonWitnessUtxo parent Map.empty))
+        -- The right signature finalizes
+        f <- expectRight (finalizePsbt btc (withSig signature (insertNonWitnessUtxo parent Map.empty)))
+        isJust (finalScriptSig (inputAt 0 f)) `shouldBe` True
 
 {- Taproot -}
 
@@ -1466,6 +1510,104 @@ refusals371 =
     "is not a control block",
     "is not a control block"
   ]
+
+-- | Why each invalid PSBT of BIP 373 is refused, as the end of the reason.
+-- An x-only key has 32 bytes where the BIP wants a compressed key of 33.
+refusals373 :: [String]
+refusals373 =
+  [ "is not a compressed public key",
+    "is not a list of compressed public keys",
+    "is not a compressed public key",
+    "is not a list of compressed public keys",
+    "is not a participant key and an aggregate key, with a leaf hash or none",
+    "is not a participant key and an aggregate key, with a leaf hash or none",
+    "is not a public nonce of 66 bytes",
+    "is not a participant key and an aggregate key, with a leaf hash or none",
+    "is not a participant key and an aggregate key, with a leaf hash or none",
+    "is not a partial signature of 32 bytes"
+  ]
+
+-- The vectors live in data/psbt_bip373.json, copied from the BIP. The
+-- library keeps the MuSig2 fields and does not sign with them.
+musig2Spec :: Vectors371 -> Spec
+musig2Spec vectors =
+  describe "The MuSig2 fields of BIP 373" $ do
+    describe "the invalid PSBTs are refused, each for its reason" $
+      forM_ (zip vectors.refused371 refusals373) $ \(v, reason) ->
+        it v.vecCase $ decodePsbt (bytesOf v) `shouldSatisfy` either (reason `isSuffixOf`) (const False)
+
+    describe "the valid PSBTs are read, and written back byte for byte" $
+      forM_ vectors.accepted371 $ \v ->
+        it v.vecCase $ (encodePsbt <$> decodePsbt (bytesOf v)) `shouldBe` Right (bytesOf v)
+
+    it "there are 10 invalid PSBTs and 14 valid ones" $
+      (length vectors.refused371, length vectors.accepted371) `shouldBe` (10, 14)
+
+    -- The key is the type and a compressed key, 34 bytes (0x22). The value
+    -- is no key, then one key, then one key and a byte, then a key that
+    -- is no point of the curve.
+    it "reads participant keys that are compressed public keys, as many as there are, on an input and on an output" $
+      forM_ ["00", "21" <> aPoint, "42" <> aPoint <> aPoint] $ \value -> do
+        (encodePsbt <$> decodePsbt (tinyPsbt "" ("221a" <> aPoint <> value) ""))
+          `shouldBe` Right (tinyPsbt "" ("221a" <> aPoint <> value) "")
+        (encodePsbt <$> decodePsbt (tinyPsbt "" "" ("2208" <> aPoint <> value)))
+          `shouldBe` Right (tinyPsbt "" "" ("2208" <> aPoint <> value))
+
+    it "refuses participant keys that are not whole compressed public keys on the curve" $ do
+      let refusal what =
+            Left . mconcat $
+              [ what <> ": the value of the key 0x1a with the data " <> T.unpack aPoint,
+                " is not a list of compressed public keys"
+              ]
+      decodePsbt (tinyPsbt "" ("221a" <> aPoint <> "22" <> aPoint <> "00") "") `shouldBe` refusal "Input 0"
+      decodePsbt (tinyPsbt "" ("221a" <> aPoint <> "21" <> notAPoint) "") `shouldBe` refusal "Input 0"
+      decodePsbt (tinyPsbt "" ("221a" <> notAPoint <> "00") "")
+        `shouldBe` Left
+          ("Input 0: the key 0x1a with the data " <> T.unpack notAPoint <> " is not a compressed public key")
+
+    -- The generator of the curve as an uncompressed key of 65 bytes: with
+    -- the type, a key of 66 bytes (0x42)
+    it "refuses an aggregate key that is an uncompressed public key" $ do
+      let generator =
+            "0479be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\
+            \483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8"
+      decodePsbt (tinyPsbt "" ("421a" <> generator <> "00") "")
+        `shouldSatisfy` either ("is not a compressed public key" `isSuffixOf`) (const False)
+
+    -- The key is the type, a participant key and an aggregate key, 67 bytes
+    -- (0x43), or 99 (0x63) with a leaf hash. A nonce has 66 bytes (0x42)
+    -- and a partial signature 32 (0x20).
+    it "reads a public nonce and a partial signature, with a leaf hash or none" $ do
+      let nonce = "42" <> T.replicate 66 "ab"
+          partial = "20" <> T.replicate 32 "ab"
+          leafHash' = T.replicate 32 "cd"
+      let entries =
+            [ "431b" <> aPoint <> aPoint <> nonce,
+              "631b" <> aPoint <> aPoint <> leafHash' <> nonce,
+              "431c" <> aPoint <> aPoint <> partial,
+              "631c" <> aPoint <> aPoint <> leafHash' <> partial
+            ]
+      forM_ entries $ \entry ->
+        (encodePsbt <$> decodePsbt (tinyPsbt "" entry "")) `shouldBe` Right (tinyPsbt "" entry "")
+
+    it
+      "refuses a public nonce or a partial signature under a \
+      \key that is no point of the curve, or of another length"
+      $ do
+        let nonce = "42" <> T.replicate 66 "ab"
+            refused entry = decodePsbt (tinyPsbt "" entry "")
+              `shouldSatisfy` either (noSignerKey `isSuffixOf`) (const False)
+            noSignerKey = "is not a participant key and an aggregate key, with a leaf hash or none"
+        refused ("431b" <> notAPoint <> aPoint <> nonce)
+        refused ("431b" <> aPoint <> notAPoint <> nonce)
+        refused ("441b" <> aPoint <> aPoint <> "cd" <> nonce)
+        refused ("431c" <> aPoint <> notAPoint <> "20" <> T.replicate 32 "ab")
+
+    it "refuses a public nonce that has not 66 bytes, and a partial signature that has not 32" $ do
+      decodePsbt (tinyPsbt "" ("431b" <> aPoint <> aPoint <> "41" <> T.replicate 65 "ab") "")
+        `shouldSatisfy` either ("is not a public nonce of 66 bytes" `isSuffixOf`) (const False)
+      decodePsbt (tinyPsbt "" ("431c" <> aPoint <> aPoint <> "21" <> T.replicate 33 "ab") "")
+        `shouldSatisfy` either ("is not a partial signature of 32 bytes" `isSuffixOf`) (const False)
 
 taprootSpec :: Vectors371 -> Spec
 taprootSpec vectors =
@@ -1549,20 +1691,26 @@ taprootSpec vectors =
       records <- expectRight (outputTapDerivations (outputAt 0 psbt))
       length records `shouldBe` 4
 
-    it "read the script path signatures of a signed input, and finalize it with the first leaf that has one" $ do
-      psbt <- vectorAt 5
-      sigs <- expectRight (tapScriptSigs (inputAt 0 psbt))
-      map (\((k, h), s) -> (exportXOnlyPubKey k, h, B.length (encodeTaprootSig s))) sigs
-        `shouldBe` [ (hexBytes "2cb13ac68248de806aa6a3659cf3c03eb6821d09c8114a4e868febde865bb6d2", digest "cd970e15f53fc0c82f950fd560ffa919b76172be017368a89913af074f400b09", 64),
-                     (hexBytes "4320b0bf16f011b53ea7be615924aa7f27e5d29ad20ea1155d848676c3bad1b2", digest "115f2e490af7cc45c4f78511f36057ce5c5a5c56325a29fb44dfc203f356e1f8", 64),
-                     (hexBytes "fa0f7a3cef3b1d0c0a6ce7d26e17ada0b2e5c92d19efad48b41859cb8a451ca9", digest "6f7d62059e9497a1a4a267569d9876da60101aff38e3529b9b939ce7f91ae970", 64)
-                   ]
-      final <- expectRight (finalizePsbt btc psbt)
-      witness <- expectRight (finalScriptWitness (inputAt 0 final))
-      fmap (map B.length) witness `shouldBe` Just [64, 34, 97]
-      tx <- expectRight (psbtTransaction final)
-      let coin = TxOut 5000000000 (hexBytes "5120c2247efbfd92ac47f6f40b8d42d169175a19fa9fa10e4a25d7f35eb4dd85b692")
-      verifyStdTx btc tx [(either error id (decodeSerial coin.script), coin.value, (head tx.inputs).outpoint)] `shouldBe` True
+    -- The tree of the vector has one leaf at depth 1 and two at depth 2,
+    -- and all three are signed. A control block is 33 bytes and 32 for
+    -- each level: 65 bytes at depth 1, 97 at depth 2.
+    it
+      "read the script path signatures of a signed input, and finalize \
+      \it with the signed leaf that has the shortest control block"
+      $ do
+        psbt <- vectorAt 5
+        sigs <- expectRight (tapScriptSigs (inputAt 0 psbt))
+        map (\((k, h), s) -> (exportXOnlyPubKey k, h, B.length (encodeTaprootSig s))) sigs
+          `shouldBe` [ (hexBytes "2cb13ac68248de806aa6a3659cf3c03eb6821d09c8114a4e868febde865bb6d2", digest "cd970e15f53fc0c82f950fd560ffa919b76172be017368a89913af074f400b09", 64),
+                       (hexBytes "4320b0bf16f011b53ea7be615924aa7f27e5d29ad20ea1155d848676c3bad1b2", digest "115f2e490af7cc45c4f78511f36057ce5c5a5c56325a29fb44dfc203f356e1f8", 64),
+                       (hexBytes "fa0f7a3cef3b1d0c0a6ce7d26e17ada0b2e5c92d19efad48b41859cb8a451ca9", digest "6f7d62059e9497a1a4a267569d9876da60101aff38e3529b9b939ce7f91ae970", 64)
+                     ]
+        final <- expectRight (finalizePsbt btc psbt)
+        witness <- expectRight (finalScriptWitness (inputAt 0 final))
+        fmap (map B.length) witness `shouldBe` Just [64, 34, 65]
+        tx <- expectRight (psbtTransaction final)
+        let coin = TxOut 5000000000 (hexBytes "5120c2247efbfd92ac47f6f40b8d42d169175a19fa9fa10e4a25d7f35eb4dd85b692")
+        verifyStdTx btc tx [(either error id (decodeSerial coin.script), coin.value, (head tx.inputs).outpoint)] `shouldBe` True
 
     it "write the fields back as they were read" $
       forM_ [0 .. 5] $ \i -> do
@@ -1776,6 +1924,91 @@ decoderChecksSpec =
       decodePsbt (tinyPsbt "" "" ("2202" <> notAPoint <> "08d90c6a4f00000080"))
         `shouldBe` Left ("Output 0: the key 0x02 with the data " <> T.unpack notAPoint <> " is not a public key")
 
+    -- BIP 32: a master key has depth 0, no parent fingerprint and the child
+    -- number 0. Bitcoin Core reads no other extended key of depth 0. Here
+    -- the child number 1, then the parent fingerprint 00000001.
+    it "refuses an extended public key of depth 0 that has a child number or a parent fingerprint" $ do
+      let xpubWith parent child =
+            "4f01" <> "0488b21e" <> "00" <> parent <> child <> T.replicate 32 "00" <> aPoint <> "04d90c6a4f"
+      decodePsbt (tinyPsbt (xpubWith "00000000" "00000001") "" "")
+        `shouldSatisfy` either ("is not an extended public key" `isSuffixOf`) (const False)
+      decodePsbt (tinyPsbt (xpubWith "00000001" "00000000") "" "")
+        `shouldSatisfy` either ("is not an extended public key" `isSuffixOf`) (const False)
+
+    -- BIP 174 gives a redeem script and a witness script as bytes, and
+    -- Bitcoin Core reads any. 4c is OP_PUSHDATA1 without its length.
+    it "reads a redeem script and a witness script that are no list of opcodes, on an input and on an output" $ do
+      let withScript =
+            [ tinyPsbt "" "0104014c" "",
+              tinyPsbt "" "0105014c" "",
+              tinyPsbt "" "" "0100014c",
+              tinyPsbt "" "" "0101014c"
+            ]
+      forM_ withScript $ \bytes ->
+        (encodePsbt <$> decodePsbt bytes) `shouldBe` Right bytes
+      (inputRedeemScript . inputAt 0 <$> decodePsbt (tinyPsbt "" "0104014c" ""))
+        `shouldBe` Right (Left "The redeem script is not a script: it does not decode")
+
+    -- One leaf at depth 0 of the leaf version 0xc0, whose script of one
+    -- byte is 4c: four bytes in all
+    it "reads a script tree whose leaf script is no list of opcodes" $ do
+      (encodePsbt <$> decodePsbt (tinyPsbt "" "" "01060400c0014c")) `shouldBe` Right (tinyPsbt "" "" "01060400c0014c")
+      (outputTapTree . outputAt 0 <$> decodePsbt (tinyPsbt "" "" "01060400c0014c"))
+        `shouldBe` Right (Left "The script tree has a leaf whose script is not a script: it does not decode")
+
+    -- The key is the type and the hash of the empty string by the
+    -- algorithm of the field, 21 bytes (0x15) or 33 (0x21). The value is
+    -- the empty string.
+    let ripemd160OfEmpty = "9c1185a5c5e9fc54612808977ee8f548b2258d31"
+        sha256OfEmpty = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        hash160OfEmpty = "b472a266d0bd89c13706a4132ccfb16f7c3b9fcb"
+        hash256OfEmpty = "5df6e0e2761359d30a8275058e299fcc0381534545f55cf43e41983f5d4c9456"
+        preimageKeys =
+          [("150a", ripemd160OfEmpty), ("210b", sha256OfEmpty), ("150c", hash160OfEmpty), ("210d", hash256OfEmpty)]
+
+    it "reads a hash preimage under its hash, for RIPEMD160, SHA256, HASH160 and HASH256" $
+      forM_ preimageKeys $ \(start, hash) ->
+        (encodePsbt <$> decodePsbt (tinyPsbt "" (start <> hash <> "00") ""))
+          `shouldBe` Right (tinyPsbt "" (start <> hash <> "00") "")
+
+    -- BIP 174: the preimage "must equal the key when run through" the
+    -- algorithm. The value is one byte of zero, under the hash of the
+    -- empty string.
+    it "refuses a hash preimage that does not hash to its key" $ do
+      let refusal t hash =
+            Left . mconcat $
+              [ "Input 0: the value of the key 0x" <> t <> " with the data " <> T.unpack hash,
+                " is not the preimage of the hash in its key"
+              ]
+      decodePsbt (tinyPsbt "" ("150a" <> ripemd160OfEmpty <> "0100") "") `shouldBe` refusal "0a" ripemd160OfEmpty
+      decodePsbt (tinyPsbt "" ("210b" <> sha256OfEmpty <> "0100") "") `shouldBe` refusal "0b" sha256OfEmpty
+      decodePsbt (tinyPsbt "" ("150c" <> hash160OfEmpty <> "0100") "") `shouldBe` refusal "0c" hash160OfEmpty
+      decodePsbt (tinyPsbt "" ("210d" <> hash256OfEmpty <> "0100") "") `shouldBe` refusal "0d" hash256OfEmpty
+
+    -- RIPEMD160 and HASH160 give 20 bytes, SHA256 and HASH256 give 32. Each
+    -- key here has 5 bytes of data.
+    it "refuses a hash preimage whose key is not a hash of the size of its algorithm" $ do
+      decodePsbt (tinyPsbt "" "060a11111111110100" "")
+        `shouldBe` Left "Input 0: the key 0x0a with the data 1111111111 is not a hash of 20 bytes"
+      decodePsbt (tinyPsbt "" "060b11111111110100" "")
+        `shouldBe` Left "Input 0: the key 0x0b with the data 1111111111 is not a hash of 32 bytes"
+      decodePsbt (tinyPsbt "" "060c11111111110100" "")
+        `shouldBe` Left "Input 0: the key 0x0c with the data 1111111111 is not a hash of 20 bytes"
+      decodePsbt (tinyPsbt "" "060d11111111110100" "")
+        `shouldBe` Left "Input 0: the key 0x0d with the data 1111111111 is not a hash of 32 bytes"
+
+    -- BIP 371 gives a signature as 64 or 65 bytes, and Bitcoin Core reads
+    -- any bytes of that length. The last bytes 0x00 and 0x04 name no
+    -- sighash type that BIP 341 allows, so no witness is made of these.
+    -- 0x41 is 65 bytes, and the key of a script path signature is the type
+    -- and 64 bytes, also 0x41.
+    it "reads a Taproot signature of 65 bytes whatever its last byte, as a key path and as a script path signature" $
+      forM_ ["00", "04"] $ \lastByte -> do
+        let keyPath = "0113" <> "41" <> T.replicate 64 "ab" <> lastByte
+            scriptPath = "4114" <> T.replicate 64 "22" <> "41" <> T.replicate 64 "ab" <> lastByte
+        (encodePsbt <$> decodePsbt (tinyPsbt "" keyPath "")) `shouldBe` Right (tinyPsbt "" keyPath "")
+        (encodePsbt <$> decodePsbt (tinyPsbt "" scriptPath "")) `shouldBe` Right (tinyPsbt "" scriptPath "")
+
     -- The key is the type 0x01 and the 78 bytes of an extended key, 79 in
     -- all (0x4f): the version 0488b21e, depth 0, no parent, index 0, a chain
     -- code of zeros, and the public key
@@ -1854,7 +2087,6 @@ signerScopeSpec =
         parent = fromJust (either (const Nothing) id (nonWitnessUtxo (inputAt 0 psbt)))
         coin = head parent.outputs
         signatureCounts = mapM (fmap length . partialSignatures) . (.inputs)
-        keyHex = show (encodeHex (encodeSerial public))
 
     -- BIP 32 gives a key a depth of one byte, so no key is 256 steps below
     -- another
@@ -2057,22 +2289,24 @@ signerScopeSpec =
           asking = withInputs [inputAt 0 both, insertSigHashType (setAnyoneCanPay sigHashSingle) (inputAt 1 both)] both
       signPsbt btc signer asking `shouldBe` Left "Input 1: the sighash type 131 is not one the signer accepts"
 
-    it "refuses to sign a SegWit version 0 coin with an uncompressed key" $ do
+    -- No node relays the spend of such a coin, and Bitcoin Core does not
+    -- sign it
+    it "adds no signature of an uncompressed key to a SegWit version 0 coin" $ do
       let uncompressed = PublicKey public.point False
           (p2wpkh, _) = spendingPsbt (PayWitnessPKHash (addressHash (encodeSerial uncompressed)))
-      signPsbt btc signer p2wpkh `shouldBe` Left "Input 0: a SegWit version 0 coin may not be signed with an uncompressed key"
+      signPsbt btc signer p2wpkh `shouldBe` Right p2wpkh
 
-    -- The signature is a real one of key 1, on another coin. The finalizer
-    -- must refuse it for the form of the key, whatever it signs.
-    it "the finalizer refuses a signature of an uncompressed key on a SegWit version 0 coin" $ do
+    -- The signer of the library makes no such signature, so this one is
+    -- made here, as Bitcoin Core of an older version would have. It
+    -- verifies, and the input still may not be final.
+    it "the finalizer leaves alone a SegWit version 0 coin with a valid signature of an uncompressed key" $ do
       let uncompressed = PublicKey public.point False
           (p2wpkh, _) = spendingPsbt (PayWitnessPKHash (addressHash (encodeSerial uncompressed)))
-      signed <- expectRight (signPsbt btc signer psbt)
-      signature <- case partialSignatures (inputAt 0 signed) of
-        Right [(_, sig)] -> return sig
-        _ -> fail "one signature"
-      finalizePsbt btc (withInputs (insertPartialSignature uncompressed signature <$> p2wpkh.inputs) p2wpkh)
-        `shouldBe` Left ("Input 0: the signature of the key " <> show (encodeHex (encodeSerial uncompressed)) <> " is of an uncompressed key, which a SegWit version 0 coin may not be spent with")
+          scriptCode = forceRight (encodeOutput (PayPKHash (addressHash (encodeSerial uncompressed))))
+          digest = forceRight (txSigHashForkId btc p2wpkh.unsignedTx scriptCode 200000000 0 sigHashAll)
+          signature = encodeTxSig btc (TxSignature (signHash secretOne digest) sigHashAll)
+          claimed = withInputs (insertPartialSignature uncompressed signature <$> p2wpkh.inputs) p2wpkh
+      finalizePsbt btc claimed `shouldBe` Right claimed
 
     -- The second signature is the one of key 1, filed under key 2: it does
     -- not verify for key 2. The coin does not name key 2, so the finalizer
@@ -2088,11 +2322,11 @@ signerScopeSpec =
 
     -- Bitcoin Core takes SIGHASH_ALL for an input that names no sighash
     -- type, and gives no final script when a signature uses another
-    it "the finalizer refuses a SIGHASH_NONE signature on an input that names no sighash type" $ do
+    it "the finalizer leaves alone an input that names no sighash type and has a SIGHASH_NONE signature" $ do
       let acceptingNone = signer {acceptedSigHashes = [sigHashNone]}
       signed <- expectRight (signPsbt btc acceptingNone (withInputs (insertSigHashType sigHashNone <$> psbt.inputs) psbt))
-      finalizePsbt btc (withInputs (deleteSigHashType <$> signed.inputs) signed)
-        `shouldBe` Left ("Input 0: the signature of the key " <> keyHex <> " does not use SIGHASH_ALL, and the input names no sighash type")
+      let unnamed = withInputs (deleteSigHashType <$> signed.inputs) signed
+      finalizePsbt btc unnamed `shouldBe` Right unnamed
 
     it "the finalizer leaves alone a signed legacy coin that is known from its witness output only" $ do
       signed <- expectRight (signPsbt btc signer psbt)
@@ -2133,6 +2367,403 @@ signerScopeSpec =
       ((.unsignedTx.locktime) <$> decodePsbt (tinyPsbt2 "0111040065cd1d")) `shouldBe` Right 500000000
       decodePsbt (tinyPsbt2 "011104ff64cd1d") `shouldBe` Left "Input 0: the value of the key 0x11 is a time lock below 500000000"
 
+{- One input at a time -}
+
+-- Bitcoin Core signs and finalizes a PSBT one input at a time
+-- (SignPSBTInput). An input that it cannot sign or finalize stays as it
+-- is, and the others go on. Its signer refuses a whole PSBT for a sighash
+-- type only. Each case here was given to Bitcoin Core 32.1 on regtest.
+inputByInputSpec :: Spec
+inputByInputSpec =
+  describe "The signer and the finalizer take one input at a time" $ do
+    let public = compressedKey secretOne
+        uncompressed = PublicKey public.point False
+        publicTwo = compressedKey secretTwo
+        publicThree = compressedKey secretThree
+        signer = keySigner secretOne
+        ownPkh = PayPKHash (addressHash (encodeSerial public))
+        ownWpkh = PayWitnessPKHash (addressHash (encodeSerial public))
+        theirPkh = PayPKHash (addressHash (encodeSerial publicTwo))
+        signatureCounts = mapM (fmap length . partialSignatures) . (.inputs)
+        leftAlone psbt = finalizePsbt btc psbt `shouldBe` Right psbt
+        signatureOf key psbt = fromJust . lookup key <$> expectRight (partialSignatures (inputAt 0 psbt))
+        -- 64 bytes that are the signature of nobody
+        noSignature = B.replicate 64 0xab
+
+    {- The signer -}
+
+    -- Input 1 is a coin of key 2 with a signature of the type SIGHASH_NONE,
+    -- and asks for no type, so it is signed with SIGHASH_ALL, the type 1
+    it
+      "the signer refuses a PSBT in which an input has a signature \
+      \of another sighash type than the one it is signed with"
+      $ do
+        let both = spendingTwo (encodeSerial ownPkh) (encodeSerial theirPkh)
+            acceptingNone = (keySigner secretTwo) {acceptedSigHashes = sigHashNone : defaultSigHashes}
+        let askingNone = withInputs [inputAt 0 both, insertSigHashType sigHashNone (inputAt 1 both)] both
+        asking <- expectRight (signPsbt btc acceptingNone askingNone)
+        signatureCounts asking `shouldBe` Right [0, 1]
+        signPsbt btc signer (onInputs deleteSigHashType asking)
+          `shouldBe` Left "Input 1: a signature of the input does not use the sighash type 1"
+
+    -- A Taproot signature of 65 bytes names its type in its last byte. An
+    -- input that asks for no type is signed with SIGHASH_DEFAULT, the type
+    -- 0, whose signatures have 64 bytes.
+    it "the signer refuses a PSBT whose Taproot input has a signature of 65 bytes and asks for no sighash type" $ do
+      let (keyOnly, _) = spendingPsbt (taprootScriptOutput (TaprootOutput public.point Nothing))
+          asking = onInputs (insertSigHashType sigHashAll . insertInputTapInternalKey public.point) keyOnly
+      signed <- expectRight (signPsbt btc signer asking)
+      signPsbt btc signer (onInputs deleteSigHashType signed)
+        `shouldBe` Left "Input 0: a signature of the input does not use the sighash type 0"
+
+    -- BIP 370 has a signer change the flags of version 2 "if the Signer
+    -- added a signature". Both coins are of key 2, one signed with ECDSA and
+    -- one a Taproot coin, and the signer holds key 1.
+    it "the signer leaves the flags of a version 2 PSBT as they are when it adds no signature" $ do
+      let theirKeyPath = taprootScriptOutput (TaprootOutput publicTwo.point Nothing)
+      forM_ [theirPkh, theirKeyPath] $ \coin -> do
+        let open = withFlags (Modifiable True True False 0) (withVersion Version2 (fst (spendingPsbt coin)))
+        signPsbt btc signer open `shouldBe` Right open
+
+    -- The signature that is there is the one of key 2 for a coin of its
+    -- own, filed under key 1. Bitcoin Core does not sign again for a key
+    -- that has a signature.
+    it "the signer keeps the signature that an input has under its key already" $ do
+      theirs <-
+        signatureOf publicTwo =<< expectRight (signPsbt btc (keySigner secretTwo) (fst (spendingPsbt theirPkh)))
+      let already = onInputs (insertPartialSignature public theirs) (fst (spendingPsbt ownPkh))
+      signPsbt btc signer already `shouldBe` Right already
+
+    it
+      "the signer signs its coin that has its previous transaction, \
+      \and leaves its coin known from its witness output only"
+      $ do
+        let both = spendingTwo (encodeSerial ownWpkh) (encodeSerial ownWpkh)
+            witnessOutputOnly = insertWitnessUtxo (TxOut 200000000 (encodeSerial ownWpkh)) Map.empty
+            mixed = withInputs [inputAt 0 both, witnessOutputOnly] both
+        signed <- expectRight (signPsbt btc signer mixed)
+        signatureCounts signed `shouldBe` Right [1, 0]
+        inputAt 1 signed `shouldBe` inputAt 1 mixed
+
+    it "the signer signs a P2WSH multisig with its compressed key, and not with its uncompressed key" $ do
+      let multisig = forceRight (encodeOutput (PayMulSig [uncompressed, public, publicTwo] 2))
+          (p2wsh, _) = spendingPsbt (forceRight (toP2WSH multisig))
+      signed <- expectRight (signPsbt btc signer (onInputs (insertInputWitnessScript multisig) p2wsh))
+      (map fst <$> partialSignatures (inputAt 0 signed)) `shouldBe` Right [public]
+
+    -- The witness script of a P2WSH coin runs as a script: one that is a
+    -- witness program leaves two items, and no signature spends the coin
+    it
+      "the signer adds no signature to a P2WSH coin whose witness script \
+      \is a P2WPKH program, and the finalizer leaves a signed one alone"
+      $ do
+        let program = forceRight (encodeOutput ownWpkh)
+            (nested, _) = spendingPsbt (forceRight (toP2WSH program))
+            withScript = onInputs (insertInputWitnessScript program) nested
+        signPsbt btc signer withScript `shouldBe` Right withScript
+        signature <- signatureOf public =<< expectRight (signPsbt btc signer (fst (spendingPsbt ownWpkh)))
+        leftAlone (onInputs (insertPartialSignature public signature) withScript)
+
+    -- A multisig of 8 uncompressed keys is 3 + 8 × 66 = 531 bytes, over
+    -- the 520 bytes that a transaction can push, so nothing spends the
+    -- coin. Bitcoin Core adds a signature all the same, and makes no final
+    -- script of it. The library does not sign what cannot be spent, as
+    -- 'makeSignature' refuses it.
+    it "the signer adds no signature to a P2SH coin whose redeem script is longer than 520 bytes" $ do
+      let uncompressedTwo = PublicKey publicTwo.point False
+          long = forceRight (encodeOutput (PayMulSig (uncompressed : replicate 7 uncompressedTwo) 1))
+          (p2sh, _) = spendingPsbt (PayScriptHash (addressHash (runPutS (serialize long))))
+      B.length (runPutS (serialize long)) `shouldBe` 531
+      signPsbt btc signer (onInputs (insertInputRedeemScript long) p2sh)
+        `shouldBe` Right (onInputs (insertInputRedeemScript long) p2sh)
+
+    -- 2,100,000,000,000,000 satoshi are 21 million bitcoin, all there will
+    -- be. Bitcoin Core makes no SegWit version 0 signature above it.
+    it "the signer adds no signature to a SegWit version 0 coin that holds more than 21 million bitcoin" $ do
+      let (psbt, _) = spendingPsbt ownWpkh
+          trusting = signer {requirePreviousTx = False}
+          claiming amount = withInputs [insertWitnessUtxo (TxOut amount (encodeSerial ownWpkh)) Map.empty] psbt
+      (signatureCounts =<< signPsbt btc trusting (claiming 2100000000000000)) `shouldBe` Right [1]
+      signPsbt btc trusting (claiming 2100000000000001) `shouldBe` Right (claiming 2100000000000001)
+
+    -- 4c is OP_PUSHDATA1 without its length: a script that does not parse
+    it "the signer refuses a sighash type that it does not accept on an input whose coin script does not parse" $ do
+      let both = spendingTwo (encodeSerial ownPkh) "\x4c"
+          asking = withInputs [inputAt 0 both, insertSigHashType sigHashNone (inputAt 1 both)] both
+      (signatureCounts =<< signPsbt btc signer both) `shouldBe` Right [1, 0]
+      signPsbt btc signer asking `shouldBe` Left "Input 1: the sighash type 2 is not one the signer accepts"
+
+    {- The signer, on Taproot coins -}
+
+    -- A coin with the leaf of key 1 under the internal key of key 2, and
+    -- one with the same leaf under the internal key of key 1
+    let leaf = Script [opPushData (exportXOnlyPubKey public.point), OP_CHECKSIG]
+        other = Script [OP_RETURN]
+        treeUnder internal = onInputs fields psbt
+          where
+            tree = MASTBranch (MASTLeaf 0xc0 leaf) (MASTLeaf 0xc0 other)
+            output = TaprootOutput internal (Just tree)
+            control = encodeControlBlock (0xc0 + keyParity (taprootOutputKey output)) internal [leafHash 0xc0 other]
+            (psbt, _) = spendingPsbt (taprootScriptOutput output)
+            fields =
+              insertInputTapInternalKey internal
+                . insertInputTapMerkleRoot (mastCommitment tree)
+                . insertTapLeafScript (TapLeafScript control leaf 0xc0)
+        keyPathSigned = fmap isJust . tapKeySig . inputAt 0
+        leavesSigned = fmap length . tapScriptSigs . inputAt 0
+
+    it "the signer signs the leaf of its key on a Taproot coin whose internal key it does not hold" $ do
+      signed <- expectRight (signPsbt btc signer (treeUnder publicTwo.point))
+      (keyPathSigned signed, leavesSigned signed) `shouldBe` (Right False, Right 1)
+
+    it "the signer signs the key path alone when it holds the internal key and the key of a leaf" $ do
+      signed <- expectRight (signPsbt btc signer (treeUnder public.point))
+      (keyPathSigned signed, leavesSigned signed) `shouldBe` (Right True, Right 0)
+
+    it
+      "the signer signs no leaf of a Taproot input that has \
+      \a key path signature already, and keeps that signature"
+      $ do
+        let already = onInputs (Map.insert (Key 0x13 "") noSignature) (treeUnder publicTwo.point)
+        signPsbt btc signer already `shouldBe` Right already
+
+    it "the signer keeps the key path signature that a Taproot input has already, when it holds the internal key" $ do
+      let already = onInputs (Map.insert (Key 0x13 "") noSignature) (treeUnder public.point)
+      signPsbt btc signer already `shouldBe` Right already
+
+    it "the signer keeps the signature that a leaf has under its key already" $ do
+      let entry = Key 0x14 (exportXOnlyPubKey public.point <> convert (leafHash 0xc0 leaf))
+          already = onInputs (Map.insert entry noSignature) (treeUnder publicTwo.point)
+      signPsbt btc signer already `shouldBe` Right already
+
+    -- 5120 and the x coordinate of key 1: a coin whose output key is key 1
+    -- itself, as the descriptor rawtr() makes one
+    it
+      "the signer signs the key path of a Taproot coin whose output \
+      \key is its own key, when the input names no internal key"
+      $ do
+        let (raw, coins) = spendingPsbt (PayWitness 1 (exportXOnlyPubKey public.point))
+        tx <- expectRight (psbtTransaction =<< finalizePsbt btc =<< signPsbt btc signer raw)
+        verifyStdTx btc tx coins `shouldBe` True
+
+    -- Two coins of the signer and one output: input 1 has no output at its
+    -- index, and BIP 341 gives SIGHASH_SINGLE no digest there
+    it
+      "the signer signs the Taproot input that has an output at its \
+      \index for SIGHASH_SINGLE, and leaves the one that has none"
+      $ do
+        let coin = encodeSerial (PayWitness 1 (exportXOnlyPubKey public.point))
+            asking = onInputs (insertSigHashType sigHashSingle) (spendingTwo coin coin)
+        signed <- expectRight (signPsbt btc (signer {acceptedSigHashes = [sigHashSingle]}) asking)
+        mapM (fmap isJust . tapKeySig) signed.inputs `shouldBe` Right [True, False]
+        inputAt 1 signed `shouldBe` inputAt 1 asking
+
+    -- Bitcoin Cash has no SegWit and no Taproot: the script is one that
+    -- anyone can spend there
+    it
+      "on Bitcoin Cash, the signer and the finalizer leave \
+      \alone a coin whose script has the form of a Taproot output"
+      $ do
+        let (raw, _) = spendingPsbt (PayWitness 1 (exportXOnlyPubKey public.point))
+        signPsbt bch signer raw `shouldBe` Right raw
+        signedOnBitcoin <- expectRight (signPsbt btc signer raw)
+        finalizePsbt bch signedOnBitcoin `shouldBe` Right signedOnBitcoin
+
+    {- The finalizer -}
+
+    it
+      "the finalizer finalizes the input that is ready, and \
+      \leaves alone the input whose signature does not verify"
+      $ do
+        let both = spendingTwo (encodeSerial ownPkh) (encodeSerial ownPkh)
+        signed <- expectRight (signPsbt btc signer both)
+        first <- signatureOf public signed
+        -- The signature of input 0, on input 1
+        let swapped = withInputs [inputAt 0 signed, insertPartialSignature public first (inputAt 1 signed)] signed
+        final <- expectRight (finalizePsbt btc swapped)
+        map (isJust . finalScriptSig) final.inputs `shouldBe` [True, False]
+        inputAt 1 final `shouldBe` inputAt 1 swapped
+
+    -- A P2WSH coin of two signatures of the keys 1, 2 and 3, signed by all
+    -- three
+    let multisig = forceRight (encodeOutput (PayMulSig [public, publicTwo, publicThree] 2))
+        (twoOfThree, twoOfThreeCoins) = spendingPsbt (forceRight (toP2WSH multisig))
+        allThree = keysSigner [PrivateKey secretOne True, PrivateKey secretTwo True, PrivateKey secretThree True]
+        signedByAll = expectRight (signPsbt btc allThree (onInputs (insertInputWitnessScript multisig) twoOfThree))
+
+    -- Bitcoin Core takes the first signatures in the order of the keys of
+    -- the script, and does not try another choice when its witness fails
+    it
+      "the finalizer takes the signatures of the first keys of a multisig, \
+      \and leaves the input alone when one of them does not verify"
+      $ do
+        signed <- signedByAll
+        second <- signatureOf publicTwo signed
+        leftAlone (onInputs (insertPartialSignature public second) signed)
+
+    -- The witness of a P2WSH multisig: an empty item, the signatures, the
+    -- witness script
+    it "the finalizer does not look at a signature of a multisig that it does not use" $ do
+      signed <- signedByAll
+      first <- signatureOf public signed
+      second <- signatureOf publicTwo signed
+      final <- expectRight (finalizePsbt btc (onInputs (insertPartialSignature publicThree first) signed))
+      finalScriptWitness (inputAt 0 final) `shouldBe` Right (Just ["", first, second, runPutS (serialize multisig)])
+      (flip (verifyStdTx btc) twoOfThreeCoins <$> psbtTransaction final) `shouldBe` Right True
+
+    -- BIP 174 has the signer check the scripts of an input, and says
+    -- nothing of them to the finalizer. Bitcoin Core finalizes.
+    it
+      "the finalizer finalizes a P2WPKH coin that also has a redeem \
+      \script and a witness script, which such a coin does not use"
+      $ do
+        let (plain, coins) = spendingPsbt ownWpkh
+        signed <- expectRight (signPsbt btc signer plain)
+        let stray = onInputs (insertInputRedeemScript multisig . insertInputWitnessScript multisig) signed
+        tx <- expectRight (psbtTransaction =<< finalizePsbt btc stray)
+        verifyStdTx btc tx coins `shouldBe` True
+
+    -- The input asks for no type, so its signatures are of SIGHASH_ALL,
+    -- and a Taproot signature of 64 bytes is of SIGHASH_DEFAULT
+    it "the finalizer leaves alone a signed P2WPKH coin that also has a Taproot signature of 64 bytes" $ do
+      signed <- expectRight (signPsbt btc signer (fst (spendingPsbt ownWpkh)))
+      leftAlone (onInputs (Map.insert (Key 0x13 "") noSignature) signed)
+
+    -- BIP 174: the finalizer "must fail to finalize that input if any
+    -- signature does not match the specified sighash type"
+    it "the finalizer leaves alone an input that asks for the sighash type 0 and has a SIGHASH_ALL signature" $ do
+      signed <- expectRight (signPsbt btc signer (fst (spendingPsbt ownWpkh)))
+      leftAlone (onInputs (insertSigHashType sigHashDefault) signed)
+
+    -- The same rule on a Taproot coin. Its key path signature has 64 bytes,
+    -- so it is of the type 0. The partial signature is one of key 1 for
+    -- another coin, of the type SIGHASH_ALL. Bitcoin Core does not look at
+    -- it, and finalizes the input.
+    it "the finalizer leaves alone a Taproot input that asks for the sighash type 0 and has a partial signature" $ do
+      let (keyOnly, _) = spendingPsbt (taprootScriptOutput (TaprootOutput public.point Nothing))
+          asking = onInputs (insertSigHashType sigHashDefault . insertInputTapInternalKey public.point) keyOnly
+      signed <- expectRight (signPsbt btc signer asking)
+      -- Without the partial signature, the witness is the key path signature
+      (fmap (fmap length) . finalScriptWitness . inputAt 0 =<< finalizePsbt btc signed) `shouldBe` Right (Just 1)
+      stray <- signatureOf public =<< expectRight (signPsbt btc signer (fst (spendingPsbt ownPkh)))
+      leftAlone (onInputs (insertPartialSignature public stray) signed)
+
+    it "the finalizer clears the fields of the signers from an input that is final already" $ do
+      signed <- expectRight (signPsbt btc signer (fst (spendingPsbt ownPkh)))
+      final <- expectRight (finalizePsbt btc signed)
+      hasPartialSignatures (inputAt 0 final) `shouldBe` False
+      finalizePsbt btc (onInputs (Map.union (inputAt 0 signed)) final) `shouldBe` Right final
+
+    -- BIP 174 has the finalizer clear every field of an input but its coin
+    -- and the keys that the spec does not define. The types 0x0a to 0x0d
+    -- are the four hash preimages, and 0x1a to 0x1c the MuSig2 fields.
+    it "the finalizer clears the hash preimages and the MuSig2 fields from the input that it finalizes" $ do
+      signed <- expectRight (signPsbt btc signer (fst (spendingPsbt ownPkh)))
+      let extra = Map.fromList [(Key t "", "") | t <- [0x0a, 0x0b, 0x0c, 0x0d, 0x1a, 0x1b, 0x1c]]
+      final <- expectRight (finalizePsbt btc signed)
+      Map.keys (inputAt 0 final) `shouldBe` [Key 0x00 "", Key 0x07 ""]
+      finalizePsbt btc (onInputs (Map.union extra) signed) `shouldBe` Right final
+
+    {- The finalizer, on Taproot coins -}
+
+    -- A coin under the internal key of key 3. The leaf of key 1 is at depth
+    -- 1, with a control block of 65 bytes. The leaf of key 2 is at depth 2,
+    -- with one of 97 bytes. Both are signed.
+    let near = Script [opPushData (exportXOnlyPubKey public.point), OP_CHECKSIG]
+        far = Script [opPushData (exportXOnlyPubKey publicTwo.point), OP_CHECKSIG]
+        twoDepths =
+          MASTBranch (MASTLeaf 0xc0 near) (MASTBranch (MASTLeaf 0xc0 far) (MASTLeaf 0xc0 (Script [OP_RETURN])))
+        deepOutput = TaprootOutput publicThree.point (Just twoDepths)
+        controlOf script =
+          head
+            [ encodeControlBlock (0xc0 + keyParity (taprootOutputKey deepOutput)) publicThree.point proof
+            | (_, s, proof) <- getMerkleProofs twoDepths,
+              s == script
+            ]
+        (deep, _) = spendingPsbt (taprootScriptOutput deepOutput)
+        bothLeaves =
+          insertTapLeafScript (TapLeafScript (controlOf near) near 0xc0)
+            . insertTapLeafScript (TapLeafScript (controlOf far) far 0xc0)
+        bothKeys = keysSigner [PrivateKey secretOne True, PrivateKey secretTwo True]
+        signedLeaves = expectRight (signPsbt btc bothKeys (onInputs bothLeaves deep))
+        signatureOfLeaf point script psbt =
+          encodeTaprootSig . fromJust . lookup (point, leafHash 0xc0 script)
+            <$> expectRight (tapScriptSigs (inputAt 0 psbt))
+
+    -- Bitcoin Core takes the smallest witness
+    it "the finalizer spends a Taproot coin by the signed leaf that has the shortest control block" $ do
+      signed <- signedLeaves
+      signature <- signatureOfLeaf public.point near signed
+      (B.length (controlOf near), B.length (controlOf far)) `shouldBe` (65, 97)
+      final <- expectRight (finalizePsbt btc signed)
+      finalScriptWitness (inputAt 0 final)
+        `shouldBe` Right (Just [signature, runPutS (serialize near), controlOf near])
+
+    -- The leaf of key 1 is listed under a second control block, of 97
+    -- bytes, which commits it to no coin and comes first by its bytes.
+    -- Bitcoin Core takes the shortest control block of a leaf.
+    it "the finalizer takes the shortest control block of a leaf that the input lists under two" $ do
+      signed <- signedLeaves
+      signature <- signatureOfLeaf public.point near signed
+      let stray = B.cons 0xc0 (B.replicate 96 0)
+          listedTwice = Map.insert (Key 0x15 stray) (runPutS (serialize near) <> "\xc0")
+      (stray < controlOf near) `shouldBe` True
+      final <- expectRight (finalizePsbt btc (onInputs listedTwice signed))
+      finalScriptWitness (inputAt 0 final)
+        `shouldBe` Right (Just [signature, runPutS (serialize near), controlOf near])
+
+    -- The leaf of key 1 now has a control block of 65 bytes that commits
+    -- it to another tree. Bitcoin Core takes the smallest witness, which
+    -- fails, and does not try the other leaf.
+    it
+      "the finalizer does not try another leaf when the signed leaf \
+      \with the shortest control block is not committed to the coin"
+      $ do
+        signed <- signedLeaves
+        let stray = encodeControlBlock 0xc0 publicThree.point [leafHash 0xc0 (Script [OP_RETURN])]
+            moved =
+              Map.insert (Key 0x15 stray) (runPutS (serialize near) <> "\xc0")
+                . Map.delete (Key 0x15 (controlOf near))
+        leftAlone (onInputs moved signed)
+
+    it
+      "the finalizer leaves alone a Taproot input whose key path \
+      \signature does not verify, although a signed leaf would spend it"
+      $ do
+        signed <- signedLeaves
+        leftAlone (onInputs (Map.insert (Key 0x13 "") noSignature) signed)
+
+    -- 5 is the x coordinate of no point of the curve. A leaf that checks
+    -- such a key has the form of a leaf of one key, and Bitcoin Core takes
+    -- it when it has an entry of a signature and the shortest control
+    -- block.
+    it
+      "the finalizer does not try another leaf when the signed leaf \
+      \with the shortest control block checks a key that is no point"
+      $ do
+        let noPoint = B.replicate 31 0x00 <> "\x05"
+            noKeyLeaf = Script [opPushData noPoint, OP_CHECKSIG]
+            tree =
+              MASTBranch
+                (MASTLeaf 0xc0 noKeyLeaf)
+                (MASTBranch (MASTLeaf 0xc0 far) (MASTLeaf 0xc0 (Script [OP_RETURN])))
+            output = TaprootOutput publicThree.point (Just tree)
+            control script =
+              head
+                [ encodeControlBlock (0xc0 + keyParity (taprootOutputKey output)) publicThree.point proof
+                | (_, s, proof) <- getMerkleProofs tree,
+                  s == script
+                ]
+            (psbt, _) = spendingPsbt (taprootScriptOutput output)
+            entries =
+              insertTapLeafScript (TapLeafScript (control noKeyLeaf) noKeyLeaf 0xc0)
+                . insertTapLeafScript (TapLeafScript (control far) far 0xc0)
+            claimed = Map.insert (Key 0x14 (noPoint <> convert (leafHash 0xc0 noKeyLeaf))) noSignature
+        signed <- expectRight (signPsbt btc (keySigner secretTwo) (onInputs entries psbt))
+        (fmap length . tapScriptSigs . inputAt 0) signed `shouldBe` Right 1
+        (isJust <$>) . finalScriptWitness . inputAt 0 <$> finalizePsbt btc signed `shouldBe` Right (Right True)
+        leftAlone (onInputs claimed signed)
+
 {- The checks on Taproot signatures -}
 
 -- | The PSBT with each of its input maps changed
@@ -2170,37 +2801,44 @@ taprootChecksSpec vectors =
         -- built from an extended key does
         byRecord secret = (keySigner secret) {keyOfHash = const Nothing}
 
-    it "the finalizer refuses a key path signature that does not verify" $ do
-      psbt <- vectorAt 1
-      finalizePsbt btc (onInputs (onKeyType 0x13 flipValue) psbt)
-        `shouldBe` Left "Input 0: the key path signature does not verify"
+        leftAlone psbt = finalizePsbt btc psbt `shouldBe` Right psbt
+        witnessItems = fmap (fmap length) . finalScriptWitness . inputAt 0
 
-    it "the finalizer refuses a script path signature that does not verify" $ do
-      psbt <- vectorAt 5
-      finalizePsbt btc (onInputs (onKeyType 0x14 flipValue) psbt)
-        `shouldBe` Left "Input 0: the script path signature does not verify"
-
-    it "the finalizer refuses a leaf whose control block does not commit it to the output key" $ do
-      psbt <- vectorAt 5
-      finalizePsbt btc (onInputs (onKeyType 0x15 flipKeyData) psbt)
-        `shouldBe` Left "Input 0: the control block of the leaf does not commit it to the output key"
-
-    -- The signatures of both vectors are 64 bytes, which is SIGHASH_DEFAULT
-    it "the finalizer refuses a Taproot signature that does not use the sighash type the input names" $ do
+    -- A key path spend has one witness item, and the script path spend of
+    -- the vector three: the signature, the script and the control block
+    it "the finalizer finalizes the key path and the script path of the BIP 371 vectors" $ do
       keyPath <- vectorAt 1
       scriptPath <- vectorAt 5
-      finalizePsbt btc (onInputs (insertSigHashType sigHashAll) keyPath) `shouldBe` Left "Input 0: a Taproot signature does not use the sighash type of the input"
-      finalizePsbt btc (onInputs (insertSigHashType sigHashAll) scriptPath) `shouldBe` Left "Input 0: a Taproot signature does not use the sighash type of the input"
+      (witnessItems <$> finalizePsbt btc keyPath) `shouldBe` Right (Right (Just 1))
+      (witnessItems <$> finalizePsbt btc scriptPath) `shouldBe` Right (Right (Just 3))
+
+    it "the finalizer leaves alone an input whose key path signature does not verify" $ do
+      psbt <- vectorAt 1
+      leftAlone (onInputs (onKeyType 0x13 flipValue) psbt)
+
+    it "the finalizer leaves alone an input whose script path signature does not verify" $ do
+      psbt <- vectorAt 5
+      leftAlone (onInputs (onKeyType 0x14 flipValue) psbt)
+
+    it "the finalizer leaves alone a signed leaf whose control block does not commit it to the output key" $ do
+      psbt <- vectorAt 5
+      leftAlone (onInputs (onKeyType 0x15 flipKeyData) psbt)
+
+    -- The signatures of both vectors are 64 bytes, which is SIGHASH_DEFAULT
+    it "the finalizer leaves alone a Taproot input whose signature does not use the sighash type the input names" $ do
+      keyPath <- vectorAt 1
+      scriptPath <- vectorAt 5
+      leftAlone (onInputs (insertSigHashType sigHashAll) keyPath)
+      leftAlone (onInputs (insertSigHashType sigHashAll) scriptPath)
 
     -- Bitcoin Core takes SIGHASH_DEFAULT for a Taproot input that names no
     -- sighash type, and then wants every signature to be 64 bytes
-    it "the finalizer refuses a SIGHASH_ALL key path signature on an input that names no sighash type" $ do
+    it "the finalizer leaves alone an input that names no sighash type and has a SIGHASH_ALL key path signature" $ do
       let (keyOnly, _) = spendingPsbt (taprootScriptOutput (TaprootOutput internal Nothing))
           asking = onInputs (insertSigHashType sigHashAll . insertInputTapInternalKey internal) keyOnly
       signed <- expectRight (signPsbt btc (keySigner secretOne) asking)
       (fmap (fmap (.hash)) . tapKeySig . inputAt 0) signed `shouldBe` Right (Just sigHashAll)
-      finalizePsbt btc (onInputs deleteSigHashType signed)
-        `shouldBe` Left "Input 0: a Taproot signature does not use SIGHASH_DEFAULT, and the input names no sighash type"
+      leftAlone (onInputs deleteSigHashType signed)
 
     it "the signer refuses a Taproot coin that asks for a sighash type the signer does not accept" $ do
       let (keyOnly, _) = spendingPsbt (taprootScriptOutput (TaprootOutput internal Nothing))
@@ -2215,19 +2853,30 @@ taprootChecksSpec vectors =
       signed <- expectRight (signPsbt btc (byRecord secretOne) (onInputs (record . treeFields) withTree))
       (fmap isJust . tapKeySig . inputAt 0) signed `shouldBe` Right True
 
-    it "signs a leaf with the key of a record that lists that leaf, and not with one that lists another leaf" $ do
+    -- Bitcoin Core finds the key of a leaf by the record of the key, and
+    -- does not read the leaves that the record lists
+    it "signs a leaf with the key of a record of that key, whichever leaves the record lists" $ do
       let listing hashes = insertInputTapDerivation leafKey (TapDerivation hashes derivation)
           signatures f = fmap length . tapScriptSigs . inputAt 0 =<< signPsbt btc (byRecord secretTwo) (onInputs (f . treeFields) withTree)
       signatures (listing [leafHash 0xc0 leaf]) `shouldBe` Right 1
-      signatures (listing [leafHash 0xc0 (Script [OP_RETURN])]) `shouldBe` Right 0
+      signatures (listing [leafHash 0xc0 (Script [OP_RETURN])]) `shouldBe` Right 1
+      signatures (listing []) `shouldBe` Right 1
+      signatures id `shouldBe` Right 0
 
     -- The leaf is in no tree of the coin: its control block names another
-    -- internal key
-    it "signs no leaf whose control block does not commit it to the coin" $ do
-      let stray = encodeControlBlock 0xc0 leafKey [leafHash 0xc0 (Script [OP_RETURN])]
-          fields = insertInputTapInternalKey internal . insertInputTapMerkleRoot (mastCommitment tree) . insertTapLeafScript (TapLeafScript stray leaf 0xc0)
-      signed <- expectRight (signPsbt btc (keySigner secretTwo) (onInputs fields withTree))
-      (fmap length . tapScriptSigs . inputAt 0) signed `shouldBe` Right 0
+    -- internal key. Bitcoin Core signs each leaf that an input lists and
+    -- does not read the control block. The signature is for this input and
+    -- this leaf alone, so it spends nothing, and the finalizer makes no
+    -- witness of it.
+    it
+      "signs a leaf that the input lists whatever its control \
+      \block commits to, and the finalizer leaves that input alone"
+      $ do
+        let stray = encodeControlBlock 0xc0 leafKey [leafHash 0xc0 (Script [OP_RETURN])]
+            fields = insertInputTapInternalKey internal . insertInputTapMerkleRoot (mastCommitment tree) . insertTapLeafScript (TapLeafScript stray leaf 0xc0)
+        signed <- expectRight (signPsbt btc (keySigner secretTwo) (onInputs fields withTree))
+        (fmap length . tapScriptSigs . inputAt 0) signed `shouldBe` Right 1
+        leftAlone signed
 
     -- A signer written by a caller may answer with a key that is not the
     -- one asked for. Its signature would verify for no key of the coin.
@@ -2277,12 +2926,14 @@ taprootChecksSpec vectors =
       (scriptSignatures =<< signPsbt btc (byRecord secretTwo) (leafOfVersion 0xc0 0xc0 0xc0)) `shouldBe` Right 1
       (scriptSignatures =<< signPsbt btc (byRecord secretTwo) (leafOfVersion 0xc2 0xc2 0xc2)) `shouldBe` Right 0
 
-    -- A spend takes the leaf version of the control block. In the first
-    -- case the leaf of the entry, of version 0xc0, is not in the tree. In
-    -- the second it is, and its control block spends a leaf that is not.
-    it "signs no leaf whose leaf version is not the one of its control block" $ do
-      (scriptSignatures =<< signPsbt btc (byRecord secretTwo) (leafOfVersion 0xc2 0xc2 0xc0)) `shouldBe` Right 0
-      (scriptSignatures =<< signPsbt btc (byRecord secretTwo) (leafOfVersion 0xc0 0xc2 0xc0)) `shouldBe` Right 0
+    -- Bitcoin Core signs the leaf of the value, of version 0xc0, and does
+    -- not read the control block. A spend takes the leaf version of the
+    -- control block: in the first case the leaf of the entry is not in the
+    -- tree, in the second it is and its control block spends a leaf that
+    -- is not. The finalizer makes no witness of either.
+    it "signs a leaf by the leaf version of its value, whatever leaf version its control block has" $ do
+      (scriptSignatures =<< signPsbt btc (byRecord secretTwo) (leafOfVersion 0xc2 0xc2 0xc0)) `shouldBe` Right 1
+      (scriptSignatures =<< signPsbt btc (byRecord secretTwo) (leafOfVersion 0xc0 0xc2 0xc0)) `shouldBe` Right 1
 
     -- The witness would spend the leaf of version 0xc2: one that nodes do
     -- not relay in the first case, and that is not in the tree in the
@@ -2421,11 +3072,13 @@ coinsSpec =
 
     -- BIP 174: "The Signer may choose to fail to sign a segwit input if a
     -- non-witness UTXO is not provided."
-    it "a signer refuses a SegWit version 0 coin known from its witness output only, and signs it with its previous transaction" $ do
-      signPsbt btc signer witnessOnly
-        `shouldBe` Left "Input 0: the coin is given as a witness output only, and the signer requires the previous transaction of a SegWit version 0 coin"
-      (signatureCounts =<< signPsbt btc signer psbt) `shouldBe` Right [1]
-      (signatureCounts =<< signPsbt btc signer (withInputs [insertWitnessUtxo output (inputAt 0 psbt)] psbt)) `shouldBe` Right [1]
+    it
+      "a signer leaves unsigned a SegWit version 0 coin known from its \
+      \witness output only, and signs it with its previous transaction"
+      $ do
+        signPsbt btc signer witnessOnly `shouldBe` Right witnessOnly
+        (signatureCounts =<< signPsbt btc signer psbt) `shouldBe` Right [1]
+        (signatureCounts =<< signPsbt btc signer (withInputs [insertWitnessUtxo output (inputAt 0 psbt)] psbt)) `shouldBe` Right [1]
 
     it "a signer told to trust witness outputs signs a SegWit version 0 coin known from its witness output only" $
       (signatureCounts =<< signPsbt btc (signer {requirePreviousTx = False}) witnessOnly) `shouldBe` Right [1]
@@ -2435,11 +3088,13 @@ coinsSpec =
     -- second. A signature of each input commits to the amount of that input
     -- alone, so the signature of the second input would be valid in a
     -- transaction that burns the 10 BTC of difference as fee.
-    it "a signer refuses a PSBT that states the amounts of its SegWit version 0 coins without their previous transactions" $ do
-      let both = spendingTwo (encodeSerial program) (encodeSerial program)
-          claimed = withInputs [insertWitnessUtxo (TxOut 500000000 (encodeSerial program)) Map.empty, insertWitnessUtxo (TxOut 2000000000 (encodeSerial program)) Map.empty] both
-      signPsbt btc signer claimed
-        `shouldBe` Left "Input 0: the coin is given as a witness output only, and the signer requires the previous transaction of a SegWit version 0 coin"
+    it
+      "a signer signs no SegWit version 0 coin of a PSBT that \
+      \states the amounts without the previous transactions"
+      $ do
+        let both = spendingTwo (encodeSerial program) (encodeSerial program)
+            claimed = withInputs [insertWitnessUtxo (TxOut 500000000 (encodeSerial program)) Map.empty, insertWitnessUtxo (TxOut 2000000000 (encodeSerial program)) Map.empty] both
+        signPsbt btc signer claimed `shouldBe` Right claimed
 
     -- A Taproot signature commits to the amount of every coin (BIP 341)
     it "a signer signs a Taproot coin known from its witness output only" $ do

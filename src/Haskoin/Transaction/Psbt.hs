@@ -38,17 +38,24 @@
 -- either version has its unsigned transaction, 'unsignedTx': the one of
 -- the global map, or the one the fields describe.
 --
+-- __The order of the rules.__ Where the BIPs decide, the module does what
+-- they say. Where they are silent or leave a choice open, it does what
+-- Bitcoin Core does, checked against Bitcoin Core 32.1 on regtest. Where
+-- neither decides, it takes the safer choice for the user. The few places
+-- where it does not do as Bitcoin Core are named where they are: in
+-- 'decodePsbt', 'signPsbt', 'finalizePsbt', 'combinePsbt' and
+-- 'psbtTransaction'.
+--
 -- The maps are kept as they are read, byte for byte, so that every field
--- passes through, known or not. A map is written with its keys in order, as
--- Bitcoin Core writes it. A PSBT that breaks the spec is refused when it is
--- read: a key out of shape, a key twice in a map, a value that does not
--- decode, a field of the other version, a field version 2 requires
--- missing, bytes after the last map. So is what Bitcoin Core refuses when
--- it reads a PSBT: a key type that is not a compact size integer in its
--- shortest form, a public key that is not a point of the curve, a partial
--- signature that is not in the encoding of BIP 66 with a defined sighash
--- byte, a previous transaction that is not the one its input spends, and
--- a script tree that is not whole.
+-- passes through, known or not. A map is written with its keys in the
+-- order of their bytes, the type first. BIP 174 fixes no order, and
+-- Bitcoin Core writes another one, so the two write the same PSBT with
+-- other bytes, and each reads the bytes of the other. 'decodePsbt' tells
+-- what is refused when a PSBT is read.
+--
+-- The signer and the finalizer take one input at a time, as Bitcoin Core
+-- does: an input that cannot be signed or finalized stays as it is, and
+-- the others go on. 'signPsbt' and 'finalizePsbt' give the rules.
 --
 -- The amounts a PSBT states are claims of whoever wrote it, unless the
 -- input carries its previous transaction. 'inputCoins' tells which coins
@@ -60,6 +67,10 @@
 -- The fields the spec defines are read and written with the functions
 -- below, with the Taproot fields of
 -- [BIP 371](https://github.com/bitcoin/bips/blob/master/bip-0371.mediawiki).
+-- The hash preimages of BIP 174 and the MuSig2 fields of
+-- [BIP 373](https://github.com/bitcoin/bips/blob/master/bip-0373.mediawiki)
+-- are checked when a PSBT is read, and kept: the module does not sign with
+-- them.
 -- The roles of the spec are here too: a creator ('psbtOf'), a
 -- constructor ('addInput', 'addOutput'), a combiner ('combinePsbt'), a
 -- signer ('signPsbt'), a finalizer ('finalizePsbt') and a transaction
@@ -185,7 +196,8 @@ module Haskoin.Transaction.Psbt
 where
 
 import Control.DeepSeq (NFData)
-import Control.Monad (ap, forM, forM_, guard, replicateM, unless, when, zipWithM)
+import Control.Applicative ((<|>))
+import Control.Monad (ap, forM, forM_, guard, mfilter, replicateM, unless, when, zipWithM)
 import Crypto.Hash (Digest, SHA256, digestFromByteString)
 import Crypto.Secp256k1 (PubKey, SecKey, derivePubKey, exportXOnlyPubKey, importPubKey, importXOnlyPubKey, signSchnorr, verifySchnorr)
 import Data.Base64.Types (extractBase64)
@@ -196,16 +208,15 @@ import Data.ByteString (ByteString)
 import Data.ByteString qualified as B
 import Data.ByteString.Base64 (decodeBase64Untyped, encodeBase64')
 import Data.Char (toUpper)
-import Data.List (find, nubBy, stripPrefix)
+import Data.List (find, minimumBy, nubBy, stripPrefix)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Ord (comparing)
 import Data.Maybe (catMaybes, fromMaybe, isJust, isNothing, listToMaybe, mapMaybe, maybeToList)
 import Data.Serialize qualified as S
-import Data.Set (Set)
-import Data.Set qualified as Set
 import Data.Word (Word32, Word64, Word8)
 import GHC.Generics (Generic)
-import Haskoin.Crypto.Hash (Hash160, addressHash)
+import Haskoin.Crypto.Hash (Hash160, addressHash, doubleSHA256, ripemd160, sha256)
 import Haskoin.Crypto.Keys.Common
 import Haskoin.Crypto.Keys.Extended
 import Haskoin.Crypto.Signature (hashToMsg, verifyHashSig)
@@ -238,8 +249,12 @@ data Key = Key
   deriving (Eq, Ord, Show, Read, Generic)
   deriving anyclass (NFData)
 
--- | A map of a PSBT. It is written with its keys in order, the type first,
--- as Bitcoin Core writes it.
+-- | A map of a PSBT. It is written with its keys in the order of their
+-- bytes, the type first. BIP 174 fixes no order. Bitcoin Core writes
+-- another one: the fields in the order of its code, a partial signature
+-- by the hash of its key, the fields of version 2 after the Taproot
+-- fields. So the bytes of the library and those of Bitcoin Core differ
+-- for the same PSBT.
 type PsbtMap = Map Key ByteString
 
 -- | The version of a PSBT: 0, the version of BIP 174, whose global map
@@ -368,6 +383,10 @@ psbtId psbt = txHash $ case psbt.version of
 -- | The PSBT with the fields of both, as the combiner of the spec makes
 -- it. Both must be of the same version and of the same transaction. A
 -- field both have, with different values, keeps the value of the first.
+-- Every field of both is kept, as BIP 174 asks: "The resulting PSBT must
+-- contain all of the key-value pairs from each of the PSBTs". Bitcoin Core
+-- drops the fields of the signers from an input that is final, which
+-- 'finalizePsbt' does here.
 -- The flags of version 2 are combined as Bitcoin Core combines them:
 -- inputs and outputs stay modifiable only when both say so, and a
 -- SIGHASH_SINGLE signature of either is kept.
@@ -399,6 +418,9 @@ combinePsbt a b = do
 -- scriptSigs and scriptWitnesses" first, and Bitcoin Core gives no
 -- transaction otherwise (@FinalizeAndExtractPSBT@), so an input that is
 -- not final is refused here. 'psbtPartialTransaction' takes such a PSBT.
+-- The check is the one of BIP 174, "by checking for the presence of" the
+-- final fields: an input needs no coin for it. Bitcoin Core also wants
+-- the coin of each input, to run its final script.
 --
 -- The final scripts are taken as they are: nothing runs them. Finalize
 -- with 'finalizePsbt', which verifies the signatures it uses, or verify
@@ -553,6 +575,16 @@ inTapDerivationType = 0x16
 inTapInternalKeyType = 0x17
 tapMerkleRootType = 0x18
 
+-- The preimages of BIP 174, and the MuSig2 fields of BIP 373
+ripemd160Type, sha256Type, hash160Type, hash256Type, inMusigParticipantsType, musigNonceType, musigPartialSigType :: Word8
+ripemd160Type = 0x0a
+sha256Type = 0x0b
+hash160Type = 0x0c
+hash256Type = 0x0d
+inMusigParticipantsType = 0x1a
+musigNonceType = 0x1b
+musigPartialSigType = 0x1c
+
 prevTxidType, outputIndexType, sequenceType, requiredTimeType, requiredHeightType :: Word8
 prevTxidType = 0x0e
 outputIndexType = 0x0f
@@ -569,6 +601,10 @@ outScriptType = 0x04
 outTapInternalKeyType = 0x05
 outTapTreeType = 0x06
 outTapDerivationType = 0x07
+
+-- The MuSig2 field of an output, of BIP 373
+outMusigParticipantsType :: Word8
+outMusigParticipantsType = 0x08
 
 -- | The types of the fields of version 2, which version 0 excludes, by
 -- map
@@ -632,7 +668,45 @@ word64le :: Word64 -> ByteString
 word64le = S.runPut . S.putWord64le
 
 -- | The PSBT the bytes hold, or why they hold none: not a PSBT, or one that
--- breaks the spec
+-- breaks the spec.
+--
+-- __What is refused.__ A key out of shape, a key twice in a map, a value
+-- that does not decode, a field of the other version, a field that
+-- version 2 requires and that is missing, bytes after the last map. The
+-- fields checked are those of BIP 174, BIP 370, BIP 371 and BIP 373. And
+-- what Bitcoin Core refuses when it reads a PSBT: a key type that is not a
+-- compact size integer in its shortest form, a public key that is not a
+-- point of the curve, a partial signature that is not in the encoding of
+-- BIP 66 with a defined sighash byte, a previous transaction that is not
+-- the one its input spends, a script tree that is not whole, and an
+-- extended key of depth 0 that has a child number or a parent fingerprint,
+-- which BIP 32 gives to no master key.
+--
+-- __What is read as bytes.__ Where a BIP gives a field as bytes, any bytes
+-- are read, as Bitcoin Core reads them, and the function that gives the
+-- field refuses those that it cannot use: a redeem script, a witness
+-- script or a leaf script that is no list of opcodes ('inputRedeemScript',
+-- 'tapLeafScripts', 'outputTapTree'), an x-only key that is no point of
+-- the curve, and a Taproot signature of 65 bytes whose last byte is no
+-- sighash type of BIP 341 ('tapKeySig'). The signer and the finalizer
+-- leave such an input as it is.
+--
+-- __Where a BIP is stricter than Bitcoin Core,__ the BIP is followed, and
+-- Bitcoin Core reads what is refused here:
+--
+-- * a hash preimage that does not hash to its key. BIP 174: the preimage
+--   "must equal the key when run through" the algorithm of the field;
+-- * a control block of more than 128 nodes, the most BIP 341 allows;
+-- * an extended key with a path that is not as deep as the key. BIP 174:
+--   "The number of 32 bit unsigned integer indexes must match the depth
+--   provided in the extended public key".
+--
+-- __A PSBT of version 2 without a lock time.__ When some inputs require a
+-- height and others a time, no lock time fits them all, and the PSBT has
+-- no transaction. BIP 370 lists such a PSBT with the note that its lock
+-- time "cannot be computed", and Bitcoin Core reads it and gives no
+-- transaction. A t'Psbt' here always has its unsigned transaction, so
+-- such a PSBT is refused. Nobody can sign it.
 decodePsbt :: ByteString -> Either String Psbt
 decodePsbt = parseAll psbtParser "the last map"
 
@@ -910,9 +984,20 @@ maxShownKeyData = 40
 {- The shapes of the spec -}
 
 -- | The data of a key of the spec: none, a public key, an extended public
--- key, an x-only public key, an x-only public key with a leaf hash, or a
--- control block
-data KeyShape = NoData | PublicKeyData | XpubData | XOnlyKeyData | KeyAndLeafData | ControlBlockData
+-- key, an x-only public key, an x-only public key with a leaf hash, a
+-- control block, a hash of some bytes, a compressed public key, or the
+-- compressed keys of a MuSig2 participant and of the aggregate with a leaf
+-- hash or none
+data KeyShape
+  = NoData
+  | PublicKeyData
+  | XpubData
+  | XOnlyKeyData
+  | KeyAndLeafData
+  | ControlBlockData
+  | HashData Int
+  | CompressedKeyData
+  | MusigSignerData
 
 -- | A field the spec defines: the shape of its key, the versions of the
 -- PSBT that may hold it, and a check of its value given the data of the
@@ -959,6 +1044,11 @@ checkShape shape key = case shape of
   XOnlyKeyData -> unless (B.length key.keyData == 32) $ Left ("the key " <> showKey key <> " is not an x-only public key")
   KeyAndLeafData -> unless (B.length key.keyData == 64) $ Left ("the key " <> showKey key <> " is not an x-only public key and a leaf hash")
   ControlBlockData -> unless (isControlBlockLength (B.length key.keyData)) $ Left ("the key " <> showKey key <> " is not a control block")
+  HashData size -> unless (B.length key.keyData == size) $ Left ("the key " <> showKey key <> " is not a hash of " <> show size <> " bytes")
+  CompressedKeyData -> unless (isCompressedKeyBytes key.keyData) $ Left ("the key " <> showKey key <> " is not a compressed public key")
+  MusigSignerData ->
+    unless (B.length key.keyData `elem` [66, 98] && all isCompressedKeyBytes [B.take 33 key.keyData, B.take 33 (B.drop 33 key.keyData)]) $
+      Left ("the key " <> showKey key <> " is not a participant key and an aggregate key, with a leaf hash or none")
 
 -- | Whether a control block may have the length: 33 bytes plus 32 per
 -- node, with at most 'maxControlBlockNodes' nodes
@@ -978,12 +1068,20 @@ isPublicKeyBytes bytes = shaped && isJust (importPubKey bytes)
       [0x04] -> B.length bytes == 65
       _ -> False
 
+-- | Whether the bytes are a compressed public key: 33 bytes that are a
+-- point of the curve
+isCompressedKeyBytes :: ByteString -> Bool
+isCompressedKeyBytes bytes = B.length bytes == 33 && isPublicKeyBytes bytes
+
 -- | Whether the bytes are an extended public key as BIP 32 serializes
--- one: 78 bytes that end with a compressed public key
+-- one: 78 bytes that end with a compressed public key. A key of depth 0 is
+-- a master key, which has no parent fingerprint and the child number 0:
+-- Bitcoin Core reads no other key of depth 0 (@CExtPubKey::Decode@).
 isXpubBytes :: ByteString -> Bool
-isXpubBytes bytes = B.length bytes == 78 && B.length key == 33 && isPublicKeyBytes key
+isXpubBytes bytes = B.length bytes == 78 && isCompressedKeyBytes (B.drop 45 bytes) && (depth /= 0 || B.all (== 0) parentAndChild)
   where
-    key = B.drop 45 bytes
+    depth = B.index bytes 4
+    parentAndChild = B.take 8 (B.drop 5 bytes)
 
 -- | Whether the bytes are a signature as a script holds one: in the
 -- encoding BIP 66 requires, with its sighash byte last. This is
@@ -1050,17 +1148,27 @@ inputFields =
       (witnessUtxoType, plain txOutValue),
       (partialSigType, Field PublicKeyData [Version0, Version2] (const partialSigValue)),
       (sigHashTypeType, plain word32Value),
-      (inRedeemScriptType, plain scriptValue),
-      (inWitnessScriptType, plain scriptValue),
+      -- BIP 174 gives the two scripts as bytes, and Bitcoin Core reads
+      -- any. 'inputRedeemScript' and 'inputWitnessScript' refuse bytes that
+      -- are no list of opcodes.
+      (inRedeemScriptType, plain anyValue),
+      (inWitnessScriptType, plain anyValue),
       (inDerivationType, Field PublicKeyData [Version0, Version2] (const derivationValue)),
       (finalScriptSigType, plain anyValue),
       (finalScriptWitnessType, plain witnessValue),
+      (ripemd160Type, preimageOf 20 (S.encode . ripemd160)),
+      (sha256Type, preimageOf 32 (S.encode . sha256)),
+      (hash160Type, preimageOf 20 (S.encode . addressHash)),
+      (hash256Type, preimageOf 32 (S.encode . doubleSHA256)),
       (tapKeySigType, plain tapSigValue),
       (tapScriptSigType, Field KeyAndLeafData [Version0, Version2] (const tapSigValue)),
       (tapLeafScriptType, Field ControlBlockData [Version0, Version2] (const leafScriptValue)),
       (inTapDerivationType, Field XOnlyKeyData [Version0, Version2] (const tapDerivationValue)),
       (inTapInternalKeyType, plain xOnlyKeyValue),
       (tapMerkleRootType, plain hashValue),
+      (inMusigParticipantsType, Field CompressedKeyData [Version0, Version2] (const compressedKeysValue)),
+      (musigNonceType, Field MusigSignerData [Version0, Version2] (const (sizedValue 66 "is not a public nonce of 66 bytes"))),
+      (musigPartialSigType, Field MusigSignerData [Version0, Version2] (const (sizedValue 32 "is not a partial signature of 32 bytes"))),
       (prevTxidType, plain2 txHashValue),
       (outputIndexType, plain2 word32Value),
       (sequenceType, plain2 word32Value),
@@ -1068,6 +1176,11 @@ inputFields =
       (requiredHeightType, plain2 heightLockValue)
     ]
   where
+    -- BIP 174: the preimage "must equal the key when run through" the
+    -- algorithm of the field. Bitcoin Core checks the size of the key only.
+    preimageOf size hash = Field (HashData size) [Version0, Version2] $ \keyData value ->
+      unless (hash value == keyData) $ Left "is not the preimage of the hash in its key"
+    sizedValue size refusal value = unless (B.length value == size) $ Left refusal
     txValue value = () <$ (decodeTx value :: Either String Tx)
     -- Bitcoin Core checks a partial signature with the flags DERSIG and
     -- STRICTENC when it reads a PSBT: the encoding of BIP 66, and a sighash
@@ -1090,20 +1203,33 @@ inputFields =
 outputFields :: Fields
 outputFields =
   Map.fromList
-    [ (outRedeemScriptType, plain scriptValue),
-      (outWitnessScriptType, plain scriptValue),
+    [ (outRedeemScriptType, plain anyValue),
+      (outWitnessScriptType, plain anyValue),
       (outDerivationType, Field PublicKeyData [Version0, Version2] (const derivationValue)),
       (amountType, plain2 amountValue),
       (outScriptType, plain2 anyValue),
       (outTapInternalKeyType, plain xOnlyKeyValue),
       (outTapTreeType, plain tapTreeValue),
-      (outTapDerivationType, Field XOnlyKeyData [Version0, Version2] (const tapDerivationValue))
+      (outTapDerivationType, Field XOnlyKeyData [Version0, Version2] (const tapDerivationValue)),
+      (outMusigParticipantsType, Field CompressedKeyData [Version0, Version2] (const compressedKeysValue))
     ]
   where
     amountValue value = () <$ decodeWord64le value
 
+-- | A Taproot signature as BIP 371 gives it and as Bitcoin Core reads it:
+-- 64 or 65 bytes. The last byte of 65 is not looked at: 'tapKeySig' and
+-- 'tapScriptSigs' refuse one that is no sighash type of BIP 341, and
+-- 'finalizePsbt' makes no witness of it.
 tapSigValue :: ByteString -> Either String ()
-tapSigValue value = () <$ first ("is not a Taproot signature: " <>) (decodeTaprootSig value)
+tapSigValue value =
+  unless (B.length value `elem` [64, 65]) $
+    () <$ first ("is not a Taproot signature: " <>) (decodeTaprootSig value)
+
+-- | The compressed public keys of the participants of a MuSig2 aggregate
+-- key (BIP 373), one after the other, each a point of the curve
+compressedKeysValue :: ByteString -> Either String ()
+compressedKeysValue value =
+  unless (all isCompressedKeyBytes (chunksOf 33 value)) $ Left "is not a list of compressed public keys"
 
 leafScriptValue :: ByteString -> Either String ()
 leafScriptValue value = when (B.null value) $ Left "has no leaf version"
@@ -1120,9 +1246,12 @@ hashValue value = unless (B.length value == 32) $ Left "is not a 32-byte hash"
 -- | A script tree as Bitcoin Core accepts one when it reads a PSBT: not
 -- empty, no leaf deeper than 128, every leaf version even, and the leaves
 -- those of one whole tree in depth-first order
+--
+-- The script of a leaf is read as bytes, as BIP 371 gives it: only
+-- 'outputTapTree' asks that it is a list of opcodes.
 tapTreeValue :: ByteString -> Either String ()
 tapTreeValue value = do
-  leaves <- decodeTapTree value
+  leaves <- parseTapTree (const (Right (Script []))) value
   when (null leaves) $ Left "is an empty script tree"
   when (any ((> maxControlBlockNodes) . fromIntegral . (.depth)) leaves) $
     Left ("has a leaf deeper than " <> show maxControlBlockNodes)
@@ -1137,9 +1266,6 @@ anyValue _ = Right ()
 
 derivationValue :: ByteString -> Either String ()
 derivationValue value = () <$ decodeDerivation value
-
-scriptValue :: ByteString -> Either String ()
-scriptValue value = () <$ decodeScript value
 
 decodeTx :: ByteString -> Either String Tx
 decodeTx = decodeFully "is not a transaction: it"
@@ -1384,17 +1510,6 @@ tapScriptSigs m =
     signature <- first (("The value of the key " <> showKey key <> " ") <>) (decodeTaprootSig value)
     return ((leafKey, leaf), signature)
 
--- | The script path signatures of a Taproot input, each by the data of
--- its key as it is in the map: the 32 bytes of the x-only key, then the
--- leaf hash. The finalizer looks a signature up by these bytes. Unlike
--- 'tapScriptSigs', it does not ask that the 32 bytes are a point of the
--- curve: 'decodePsbt' reads a signature under any 32 bytes, as Bitcoin
--- Core does, and such a signature is one that no leaf asks for.
-tapScriptSigsByKeyData :: PsbtMap -> Either String [(ByteString, TaprootSignature)]
-tapScriptSigsByKeyData m =
-  forM [(key, value) | (key, value) <- Map.toAscList m, key.keyType == tapScriptSigType] $ \(key, value) ->
-    (key.keyData,) <$> first (("The value of the key " <> showKey key <> " ") <>) (decodeTaprootSig value)
-
 insertTapScriptSig :: PubKey -> Digest SHA256 -> TaprootSignature -> PsbtMap -> PsbtMap
 insertTapScriptSig leafKey leaf signature =
   Map.insert (Key tapScriptSigType (exportXOnlyPubKey leafKey <> BA.convert leaf)) (encodeTaprootSig signature)
@@ -1533,7 +1648,12 @@ insertOutputTapTree leaves = insertPlainField outTapTreeType (B.concat (encodeLe
 -- | A script tree: for each leaf, its depth, its leaf version and its
 -- script after its length
 decodeTapTree :: ByteString -> Either String [TapLeaf]
-decodeTapTree = parseAll leaves "a script tree"
+decodeTapTree = parseTapTree (first ("has a leaf whose script " <>) . decodeScript)
+
+-- | The leaves of a script tree, with the script of each leaf read from
+-- its bytes by the function given
+parseTapTree :: (ByteString -> Either String Script) -> ByteString -> Either String [TapLeaf]
+parseTapTree scriptOf = parseAll leaves "a script tree"
   where
     leaves = do
       rest <- restOf
@@ -1544,7 +1664,7 @@ decodeTapTree = parseAll leaves "a script tree"
           depth <- B.head <$> bytesOf 1 "a script tree"
           version <- B.head <$> bytesOf 1 "a script tree"
           scriptBytes <- sizedBytes "a script tree"
-          script <- either refuse return (decodeScript scriptBytes)
+          script <- either refuse return (scriptOf scriptBytes)
           (TapLeaf depth version script :) <$> leaves
 
 -- | A 32-byte hash as a digest
@@ -1747,172 +1867,222 @@ xPrvSigner xprv originM =
       | otherwise = Nothing
 
 -- | Sign every input the signer has keys for, as the signer of the spec
--- does. An input is signed against the coin it spends, from its previous
--- transaction, whose id must be the one the input spends, or from its
--- witness output alone, which only a witness signature may use, as BIP
--- 174 requires.
+-- does. An input is signed against the coin it spends: the output of its
+-- previous transaction, whose id must be the one the input spends, or,
+-- without that transaction, its witness output, which only a witness
+-- signature may use, as BIP 174 requires. A witness output beside the
+-- previous transaction is not read, as Bitcoin Core does not read it.
 --
--- The keys are those the script that is signed names: the script of the
--- coin, its redeem script or its witness script. The signer is asked for
--- the key of a derivation record only when that script names the key of
--- the record, and for the key of each hash the script names. A key that
--- the script does not name gets no signature, whatever the records say,
--- and a P2SH coin without its redeem script or a P2WSH coin without its
--- witness script gets none either, as BIP 174 has it: "If a Signer cannot
--- sign a transaction, it must not add a Partial Signature."
+-- __One input at a time.__ The parties of a transaction fill a PSBT in
+-- turn, so an input that this signer cannot sign is the normal case and
+-- not a fault. BIP 174 names one case in which a signer must fail, the
+-- sighash type, and for the rest says "If a Signer cannot sign a
+-- transaction, it must not add a Partial Signature." So the signer does as
+-- Bitcoin Core does (@SignPSBTInput@): it refuses the whole PSBT for a
+-- sighash type only, and an input that it cannot or may not sign stays as
+-- it is while the other inputs are signed. The cost of that choice is that
+-- the result does not say why an input has no signature: compare the
+-- inputs before and after.
 --
--- The sighash is the one the input asks for. When it asks for none it is
--- SIGHASH_ALL, with the fork id flag on a network that has one. A type no
--- node accepts, or one the signer does not accept ('acceptedSigHashes'),
--- is refused on any input that has its coin, as Bitcoin Core refuses a
--- PSBT with a sighash type the caller did not ask for.
+-- __What refuses the PSBT.__ The sighash type of an input is the one it
+-- asks for. When it asks for none it is SIGHASH_ALL, with the fork id flag
+-- on a network that has one, and SIGHASH_DEFAULT for a Taproot coin. On
+-- any input that has its coin and is not final, whoever it belongs to:
 --
--- An input the signer holds a key for is refused, with the reason, when:
+-- * a type that no node accepts for the kind of coin, or that the signer
+--   does not accept ('acceptedSigHashes'). BIP 174: "If a sighash type is
+--   provided, the signer must check that the sighash is acceptable. If
+--   unacceptable, they must fail";
+-- * a signature that the input already has and that is of another type,
+--   as Bitcoin Core checks it: a partial signature by its last byte, a
+--   Taproot signature by its length and its last byte.
 --
--- * its redeem script does not hash to the coin, or its witness script to
---   the witness program;
--- * it is a legacy coin known from its witness output only;
--- * it is a SegWit version 0 coin known from its witness output only and
---   the signer wants the previous transaction ('requirePreviousTx');
--- * the key is uncompressed and the coin is a SegWit version 0 one, which
---   no node relays and Bitcoin Core does not sign;
--- * it is a legacy coin asked to sign SIGHASH_SINGLE with no output at its
---   index, as 'makeSignature' explains.
+-- A previous transaction that is not the one its input spends refuses the
+-- PSBT too. 'decodePsbt' does not read such a PSBT.
 --
--- A Taproot coin is signed by its key path when the input names its
--- internal key, the signer holds that key and it gives the coin, and by
--- each of its leaf scripts that is a single key check (@<key>
--- OP_CHECKSIG@ of the leaf version 0xc0), that its control block commits
--- to the output key with that leaf version, and whose key the signer
--- holds, with 'sigHashDefault' when the input asks for no sighash.
+-- __What leaves an input as it is.__ An input without its coin, or final
+-- already, and an input for which the signer holds no key. And, although
+-- the signer holds a key:
 --
--- No BIP says what a signer does with a Taproot input that it cannot sign,
--- so the signer does as Bitcoin Core does: only the sighash type refuses
--- the PSBT, and such an input is left as it is while the other inputs are
--- signed. That is:
+-- * a redeem script that does not hash to the coin, or a witness script
+--   that does not hash to the witness program, and either script on a coin
+--   that has none. BIP 174 has a signer check both before it signs.
+--   Bitcoin Core signs a coin that carries a script it does not use;
+-- * a P2SH coin without its redeem script, a P2WSH coin without its
+--   witness script, and a coin, redeem script or witness script that is no
+--   standard template;
+-- * a P2SH coin whose redeem script has more than 'maxRedeemScriptSize'
+--   bytes, which no transaction can spend. Bitcoin Core adds a signature
+--   to it, which serves nothing;
+-- * a legacy coin known from its witness output only: "If a witness UTXO
+--   is provided, no non-witness signature may be created";
+-- * a SegWit version 0 coin known from its witness output only, when the
+--   signer wants the previous transaction ('requirePreviousTx');
+-- * a SegWit version 0 coin of more than 'maxSatoshi', which Bitcoin Core
+--   does not sign;
+-- * a legacy coin asked to sign SIGHASH_SINGLE with no output at its
+--   index, as 'makeSignature' explains, and a Taproot coin in that case,
+--   for which BIP 341 defines no digest.
 --
--- * every Taproot input while another input of the PSBT lacks its coin,
---   since the BIP 341 digest commits to the output that every input
---   spends;
--- * the key path of an input whose internal key does not give, with the
---   Merkle root of the input, the output key of the coin. When its
---   wallet holds that key, Bitcoin Core adds a signature there, which
---   verifies for no coin. The signer adds none: BIP 174 has a signer make
---   only valid signatures;
--- * a Taproot input for which the signer holds no key, whatever its
---   Taproot fields hold.
+-- An uncompressed key gets no signature on a SegWit version 0 coin, which
+-- no node relays and Bitcoin Core does not sign, and the other keys of
+-- that coin are still signed with. A key that has a signature on the input
+-- already is not signed with again: the signature that is there stays, as
+-- in Bitcoin Core.
 --
--- 'decodePsbt' reads, as Bitcoin Core does, an internal key, a record or a
--- control block whose 32 bytes are no point of the curve, and a leaf script
--- that is not a list of opcodes. Such an entry gives the signer no key: it
--- is skipped, and the other entries of the input are still signed. So is a
--- leaf script entry that names another leaf version in its value than in
--- its control block, which is not an entry of BIP 371.
+-- __The keys.__ They are those that the script that is signed names: the
+-- script of the coin, its redeem script or its witness script. The signer
+-- is asked for the key of a derivation record only when that script names
+-- the key of the record, and for the key of each hash the script names. A
+-- key that the script does not name gets no signature, whatever the
+-- records say.
 --
--- A PSBT that another party wrote can hold thousands of leaf scripts and
--- of derivation records on one input, and thousands of leaves in one
--- record, at no cost to its writer. The signer finds the record of the key
--- of a leaf, and a leaf among those a record lists, by a lookup. So the
--- time it takes to find the keys of an input grows with the size of the
--- input, and not with the product of two of those numbers.
+-- __Taproot.__ A Taproot coin is signed only when every input of the PSBT
+-- has its coin, since the BIP 341 digest commits to the output that every
+-- input spends. It is signed by its key path when the signer holds the
+-- internal key that the input names and that key gives the coin, or when
+-- it holds the output key of the coin itself. Otherwise it is signed by
+-- each of its leaf scripts that is the check of one key (@\<key\>
+-- OP_CHECKSIG@ of the leaf version 0xc0) that the signer holds. As in
+-- Bitcoin Core (@SignTaproot@):
 --
--- An input without its coin, with a final script already, with a coin,
--- redeem script or witness script that is no standard template, or for
--- which the signer holds no key, is left as it is.
+-- * an input that has a key path signature, or gets one, gets no leaf
+--   signature;
+-- * a leaf is signed by the leaf version in the value of its entry,
+--   whatever its control block holds, and whether or not the control block
+--   commits the leaf to the coin. Such a signature is for this input and
+--   this leaf alone, so it spends nothing, and 'finalizePsbt' makes a
+--   witness only of a leaf that its control block commits;
+-- * the key of a leaf is found by the record of that key, whichever leaves
+--   the record lists.
+--
+-- In one case the signer does not do as Bitcoin Core: an internal key that
+-- does not give, with the Merkle root of the input, the output key of the
+-- coin. Bitcoin Core signs with it when its wallet holds it, and that
+-- signature verifies for no coin and then stops the owner of the input,
+-- whose finalizer takes the key path signature first. The signer adds
+-- none: BIP 174 has a signer make only valid signatures.
+--
+-- A field that cannot be used gives no key and refuses nothing: an
+-- internal key that is no point of the curve, a Merkle root that is not a
+-- hash, a record that does not decode. On a network without SegWit a
+-- script of the form of a Taproot output is no Taproot coin.
+--
+-- __Cost.__ A PSBT that another party wrote can hold thousands of leaf
+-- scripts and of derivation records on one input, and thousands of leaves
+-- in one record, at no cost to its writer. The signer asks for the key of
+-- each leaf script once, however many entries have that script, and finds
+-- the record of a key by a lookup. So the time it takes grows with the
+-- size of the input, and not with the product of two of those numbers.
 signPsbt :: Network -> Signer -> Psbt -> Either String Psbt
 signPsbt net signer psbt = do
   coins <- spentOutputs psbt
   let allCoins = mapM (fmap fst) coins
   signed <- forM (zip3 [0 ..] (zip tx.inputs psbt.inputs) coins) $ \(i, (input, m), coinM) ->
     first (("Input " <> show i <> ": ") <>) $ case coinM of
-      Just (coin, witnessOnly)
-        | not (isFinal m),
-          Right coinScript <- decodeSerial coin.script -> do
-            sighashM <- sigHashType m
-            if isTaprootCoin coinScript
-              then signTaproot i m coinScript sighashM allCoins
-              else signEcdsa i input m coin coinScript witnessOnly sighashM
+      Just (coin, witnessOnly) | not (isFinal m) -> do
+        sighash <- fromMaybe (defaultSigHash net coin) <$> sigHashType m
+        checkSigHash net coin sighash
+        unless (acceptsSigHash signer sighash) $
+          Left (notAcceptedSigHash sighash)
+        unless (signaturesUse sighash m) $
+          Left ("a signature of the input does not use the sighash type " <> show (fromIntegral sighash :: Word32))
+        return . fromMaybe (m, []) $
+          if isTaprootCoin net coin
+            then signTaproot signer tx allCoins i m coin sighash
+            else signEcdsa net signer tx i input m coin witnessOnly sighash
       _ -> return (m, [])
   return $ foldr afterSignature (Psbt psbt.version tx psbt.globals (fst <$> signed) psbt.outputs) (concatMap snd signed)
   where
     tx = psbt.unsignedTx
 
-    -- A signature per key the signer holds among those the script names,
-    -- for a coin signed with ECDSA
-    signEcdsa i input m coin coinScript witnessOnly sighashM = do
-      let sighash = fromMaybe (defaultEcdsaSigHash net) sighashM
-      checkEcdsaSigHash net sighash
-      unless (acceptsSigHash signer sighash) $
-        Left (notAcceptedSigHash sighash)
-      scriptsM <- inputScripts coinScript m
-      case scriptsM of
-        Nothing -> return (m, [])
-        Just scripts -> do
-          keys <- heldKeys m (maybe [] scriptKeyHashes scripts.signedScript)
-          if null keys
-            then return (m, [])
-            else do
-              forM_ scripts.mismatch Left
-              let witnessCoin = isSegwit scripts.program
-              when (witnessOnly && not witnessCoin) $
-                Left "the coin is given as a witness output only, which may not be signed with a non-witness signature"
-              when (witnessOnly && witnessCoin && signer.requirePreviousTx) $
-                Left "the coin is given as a witness output only, and the signer requires the previous transaction of a SegWit version 0 coin"
-              when (witnessCoin && not (all (.compress) keys)) $
-                Left "a SegWit version 0 coin may not be signed with an uncompressed key"
-              let sigInput = signingInput input coin sighash scripts
-              signatures <- forM keys $ \key -> do
-                signature <- makeSignature net tx i sigInput key
-                return (derivePublicKey key, encodeTxSig net signature)
-              return (foldr (\(public, sig) -> insertPartialSignature public sig) m signatures, [sighash])
+-- | An input with a signature of each key that the signer holds among
+-- those the script names, for a coin signed with ECDSA, and the sighash
+-- type used. 'Nothing' when no signature is added: the input is left as it
+-- is, for each reason that 'signPsbt' lists.
+signEcdsa :: Network -> Signer -> Tx -> Int -> TxIn -> PsbtMap -> TxOut -> Bool -> SigHash -> Maybe (PsbtMap, [SigHash])
+signEcdsa net signer tx i input m coin witnessOnly sighash = do
+  spend <- inputSpend coin m
+  let witnessCoin = isSegwit spend.program
+  -- BIP 174 has the signer check the scripts that the input provides
+  guard (not spend.strayScript)
+  -- Only a witness signature may rely on a witness output, and a signer
+  -- may want the previous transaction for that one too
+  guard (not witnessOnly || (witnessCoin && not signer.requirePreviousTx))
+  guard (not witnessCoin || coin.value <= net.maxSatoshi)
+  let sigInput = signingInput input coin sighash spend
+      signatures =
+        [ (public, encodeTxSig net signature)
+        | key <- heldKeys signer m (scriptKeyHashes spend.naming),
+          key.compress || not witnessCoin,
+          let public = derivePublicKey key,
+          Map.notMember (Key partialSigType (encodeSerial public)) m,
+          Right signature <- [makeSignature net tx i sigInput key]
+        ]
+  guard (not (null signatures))
+  return (foldr (uncurry insertPartialSignature) m signatures, [sighash])
 
-    -- The keys the signer holds among those whose hashes the script that
-    -- is signed names. The signer is asked for the key of a derivation
-    -- record only when the hash of the key of the record is one of them,
-    -- so the work it does is bounded by the script, however many records
-    -- the PSBT carries. A key the signer gives is kept only when it is the
-    -- key that was asked for.
-    heldKeys :: PsbtMap -> [Hash160] -> Either String [PrivateKey]
-    heldKeys m named = do
-      let namedRecords = [(key, value) | (key, value) <- Map.toAscList m, key.keyType == inDerivationType, addressHash key.keyData `elem` named]
-      recordKeys <- forM namedRecords $ \(key, value) -> do
-        public <- first (const ("The key " <> showKey key <> " is not a public key")) (decodeSerial key.keyData)
-        derivation <- first (("The value of the key " <> showKey key <> " ") <>) (decodeDerivation value)
-        return [PrivateKey secret public.compress | Just secret <- [signer.keyOfRecord public derivation], derivePubKey secret == public.point]
-      let hashKeys = [key | h <- named, Just key <- [signer.keyOfHash h], addressHash (encodeSerial (derivePublicKey key)) == h]
-      return $ nubBy (\a b -> derivePublicKey a == derivePublicKey b) (concat recordKeys <> hashKeys)
+-- | The keys the signer holds among those whose hashes the script that is
+-- signed names. The signer is asked for the key of a derivation record
+-- only when the hash of the key of the record is one of them, so the work
+-- it does is bounded by the script, however many records the PSBT carries.
+-- A key the signer gives is kept only when it is the key that was asked
+-- for. A record that does not decode names no key.
+heldKeys :: Signer -> PsbtMap -> [Hash160] -> [PrivateKey]
+heldKeys signer m named = nubBy (\a b -> derivePublicKey a == derivePublicKey b) (recordKeys <> hashKeys)
+  where
+    recordKeys =
+      [ PrivateKey secret public.compress
+      | (key, value) <- Map.toAscList m,
+        key.keyType == inDerivationType,
+        addressHash key.keyData `elem` named,
+        Right public <- [decodeSerial key.keyData :: Either String PublicKey],
+        Right derivation <- [decodeDerivation value],
+        Just secret <- [signer.keyOfRecord public derivation],
+        derivePubKey secret == public.point
+      ]
+    hashKeys = [key | h <- named, Just key <- [signer.keyOfHash h], addressHash (encodeSerial (derivePublicKey key)) == h]
 
-    -- A key path signature, and one per leaf that is a single key check,
-    -- for a Taproot coin. Only the sighash type refuses the PSBT, as BIP
-    -- 174 asks. An input that the signer cannot sign is left as it is, as
-    -- Bitcoin Core leaves it: one it holds no key for, whatever its
-    -- Taproot fields hold, and any Taproot input while another input lacks
-    -- its coin, since the BIP 341 digest commits to the output that every
-    -- input spends.
-    signTaproot i m coinScript sighashM allCoins = do
-      let sighash = fromMaybe sigHashDefault sighashM
-      unless (isTaprootSigHash sighash) $
-        Left ("the sighash type " <> show (fromIntegral sighash :: Word32) <> " is not one a Taproot signature may use")
-      unless (acceptsSigHash signer sighash) $
-        Left (notAcceptedSigHash sighash)
-      program <- taprootProgram coinScript
-      let held = heldTaprootKeys signer program m
-      case allCoins of
-        Just spent | isJust held.keyPathKey || not (null held.leafKeys) -> do
-          let signatureFor secret leafM = do
-                h <- taprootSigHash tx spent i sighash Nothing ((,0xffffffff) <$> leafM)
-                taprootSignature (signSchnorr secret (hashToMsg h)) sighash
-          keySig <- forM (maybeToList held.keyPathKey) $ \tweaked ->
-            insertTapKeySig <$> signatureFor tweaked Nothing
-          scriptSigs <- forM held.leafKeys $ \(leafKey, hashOfLeaf, secret) ->
-            insertTapScriptSig leafKey hashOfLeaf <$> signatureFor secret (Just hashOfLeaf)
-          return (foldr ($) m (keySig <> scriptSigs), [sighash])
-        _ -> return (m, [])
+-- | An input with a key path signature, or else one signature for each
+-- leaf that is the check of a key the signer holds, for a Taproot coin,
+-- and the sighash type used. 'Nothing' when no signature is added: while
+-- another input lacks its coin, since the BIP 341 digest commits to the
+-- output that every input spends, when the signer holds no key, and when
+-- the digest does not exist (SIGHASH_SINGLE with no output at the index).
+--
+-- As Bitcoin Core (@SignTaproot@): a signature that the input has stays,
+-- and an input that has or gets a key path signature gets no leaf
+-- signature.
+signTaproot :: Signer -> Tx -> Maybe [TxOut] -> Int -> PsbtMap -> TxOut -> SigHash -> Maybe (PsbtMap, [SigHash])
+signTaproot signer tx allCoins i m coin sighash = do
+  spent <- allCoins
+  let held = heldTaprootKeys signer (taprootProgram coin) m
+      signatureFor secret leafM = eitherToMaybe $ do
+        h <- taprootSigHash tx spent i sighash Nothing ((,0xffffffff) <$> leafM)
+        taprootSignature (signSchnorr secret (hashToMsg h)) sighash
+      hasKeySig = Map.member (Key tapKeySigType B.empty) m
+      keySig =
+        [ insertTapKeySig signature
+        | not hasKeySig,
+          Just secret <- [held.keyPathKey],
+          Just signature <- [signatureFor secret Nothing]
+        ]
+      leafSigs =
+        [ insertTapScriptSig leafKey hashOfLeaf signature
+        | not hasKeySig,
+          null keySig,
+          (leafKey, hashOfLeaf, secret) <- held.leafKeys,
+          Map.notMember (tapScriptSigKey (exportXOnlyPubKey leafKey) hashOfLeaf) m,
+          Just signature <- [signatureFor secret (Just hashOfLeaf)]
+        ]
+      added = keySig <> leafSigs
+  guard (not (null added))
+  return (foldr ($) m added, [sighash])
 
 -- | The secret keys a signer holds for a Taproot input
 data TaprootKeys = TaprootKeys
-  { -- | the secret key of the output key of the coin, which signs its key
-    -- path: the secret key of the internal key, tweaked
+  { -- | the secret key that signs the key path of the coin: the secret
+    -- key of the internal key, tweaked, or the one of the output key
     keyPathKey :: Maybe SecKey,
     -- | for each leaf the signer can sign: the key of the leaf, the hash
     -- of the leaf, and the secret key
@@ -1920,70 +2090,58 @@ data TaprootKeys = TaprootKeys
   }
 
 -- | The keys a signer holds for a Taproot input whose coin has the witness
--- program: the key of its key path, when the signer holds the internal key
--- the input names, and the key of each leaf script that is a single key
--- check and that its control block commits to the coin.
+-- program: the key of its key path, and the key of each leaf script that
+-- is the check of one key ('singleKeyLeaves').
 --
--- Only a key that can sign for the coin counts, as BIP 174 has a signer
--- make only valid signatures. An internal key signs the key path only
--- when it gives, with the Merkle root of the input, the output key of the
--- coin. Bitcoin Core signs with an internal key that does not, and that
--- signature verifies for no coin.
+-- The key path has two keys, tried in the order of Bitcoin Core. First the
+-- internal key that the input names, when the signer holds it. It counts
+-- only when it gives, with the Merkle root of the input, the output key of
+-- the coin, as BIP 174 has a signer make only valid signatures: Bitcoin
+-- Core signs with an internal key that does not, and that signature
+-- verifies for no coin. Then the output key of the coin itself, for a coin
+-- that pays to a key with no tweak.
+--
+-- A leaf counts whatever its control block holds, as in Bitcoin Core.
 --
 -- A field that cannot be used gives no key and no refusal: an internal key
--- or a control block whose key is no point of the curve, a Merkle root
--- that is not a hash, a leaf script that is not a list of opcodes, a
--- record that does not decode. A signer holds no key for such a field,
--- and the input may belong to another party, whose fields are not the
--- signer's to judge.
+-- that is no point of the curve, a Merkle root that is not a hash, a
+-- record that does not decode. A signer holds no key for such a field, and
+-- the input may belong to another party, whose fields are not the signer's
+-- to judge.
 heldTaprootKeys :: Signer -> ByteString -> PsbtMap -> TaprootKeys
 heldTaprootKeys signer program m =
   TaprootKeys
-    { keyPathKey = do
-        internal <- either (const Nothing) id (inputTapInternalKey m)
-        commitment <- fmap MASTCommitment <$> eitherToMaybe (inputTapMerkleRoot m)
-        guard (exportXOnlyPubKey (taprootOutputKey (TaprootOutput internal commitment)) == program)
-        -- Any record of the internal key will do: BIP 371 lists in a
-        -- record the leaves the key is in, and the internal key may be in
-        -- a leaf too
-        secret <- held (const True) internal
-        taprootOutputSecKey secret commitment,
+    { keyPathKey = ofInternalKey <|> (importXOnlyPubKey program >>= held),
       leafKeys =
-        [ (leafKey, hashOfLeaf, secret)
-        | Just outKey <- [importXOnlyPubKey program],
-          Right leaf <- tapLeafScriptEntries m,
-          Just leafKey <- [singleKeyLeaf leaf],
-          -- Only a leaf of the coin is signed: its control block must
-          -- commit it to the output key
-          commitsLeaf outKey leaf,
-          let hashOfLeaf = leafHash leaf.leafVersion leaf.script,
-          Just secret <- [held (Set.member hashOfLeaf) leafKey]
+        [ (leafKey, leafHashBytes tapscriptLeafVersion script, secret)
+        | script <- Map.keys (singleKeyLeaves m),
+          Just leafKey <- [importXOnlyPubKey (leafKeyBytes script)],
+          Just secret <- [held leafKey]
         ]
     }
   where
-    -- The record of each x-only key, by the 32 bytes of the key, with the
-    -- leaves it lists as a set. An input has at most one record for a key,
-    -- since the key is the key of the entry in its map. A leaf finds its
-    -- record and its hash here by a lookup: a walk through the records
-    -- for each leaf, or through the leaves of a record for each place of
-    -- a leaf in the tree, would take time by the product of two numbers
-    -- that whoever wrote the PSBT chooses.
-    recordOf =
-      Map.fromList
-        [ (key.keyData, (d.derivation, Set.fromList d.leafHashes))
-        | (key, value) <- Map.toAscList m,
-          key.keyType == inTapDerivationType,
-          Right d <- [decodeTapDerivation value]
-        ]
-    -- The secret key of an x-only key, by the record of that key when the
-    -- test accepts the leaves it lists, or by the hash of the key. A key
-    -- the signer gives is kept only when it is the key that was asked for.
-    held :: (Set (Digest SHA256) -> Bool) -> PubKey -> Maybe SecKey
-    held accepts public =
+    ofInternalKey = do
+      internal <- either (const Nothing) id (inputTapInternalKey m)
+      commitment <- fmap MASTCommitment <$> eitherToMaybe (inputTapMerkleRoot m)
+      guard (exportXOnlyPubKey (taprootOutputKey (TaprootOutput internal commitment)) == program)
+      secret <- held internal
+      taprootOutputSecKey secret commitment
+    -- The record of each x-only key, by the 32 bytes of the key. An input
+    -- has at most one record for a key, since the key is the key of the
+    -- entry in its map. A key finds its record here by a lookup: a walk
+    -- through the records for each leaf would take time by the product of
+    -- two numbers that whoever wrote the PSBT chooses. Any record of a key
+    -- will do, whichever leaves it lists: Bitcoin Core finds a key by its
+    -- record and does not read the list.
+    recordOf = Map.fromList [(key.keyData, value) | (key, value) <- Map.toAscList m, key.keyType == inTapDerivationType]
+    -- The secret key of an x-only key, by the record of that key or by the
+    -- hash of the key. A key the signer gives is kept only when it is the
+    -- key that was asked for.
+    held :: PubKey -> Maybe SecKey
+    held public =
       listToMaybe . filter (sameX public . derivePubKey) . catMaybes $
-        [ signer.keyOfRecord (PublicKey candidate True) derivation
-        | Just (derivation, listed) <- [Map.lookup (exportXOnlyPubKey public) recordOf],
-          accepts listed,
+        [ signer.keyOfRecord (PublicKey candidate True) record.derivation
+        | Just (Right record) <- [decodeTapDerivation <$> Map.lookup (exportXOnlyPubKey public) recordOf],
           candidate <- bothParities public
         ]
           <> [ (.key) <$> signer.keyOfHash (addressHash (encodeSerial (PublicKey candidate True)))
@@ -2014,35 +2172,67 @@ scriptKeyHashes = \case
   PayMulSig publics _ -> map (addressHash . encodeSerial) publics
   _ -> []
 
--- | The leaf key of a leaf script that is a single key check, @<key>
--- OP_CHECKSIG@ of leaf version 0xc0
-singleKeyLeaf :: TapLeafScript -> Maybe PubKey
-singleKeyLeaf leaf = case leaf.script.ops of
-  [OP_PUSHDATA keyBytes OPCODE, OP_CHECKSIG]
-    | leaf.leafVersion == tapscriptLeafVersion -> importXOnlyPubKey keyBytes
-  _ -> Nothing
+-- | The leaf scripts of a Taproot input that are the check of one key,
+-- @\<key\> OP_CHECKSIG@ of the leaf version 0xc0, which is the leaf that
+-- the signer signs and the finalizer spends: the bytes of each script,
+-- with the control blocks of its entries. One script has an entry for each
+-- place it has in the tree.
+--
+-- The entry is read as Bitcoin Core reads it: the leaf version is the one
+-- of its value, and nothing is asked of the control block, nor of the 32
+-- bytes of the key. BIP 342 gives the script its meaning for the leaf
+-- version 0xc0 only.
+singleKeyLeaves :: PsbtMap -> Map ByteString [ByteString]
+singleKeyLeaves m =
+  Map.fromListWith
+    (<>)
+    [ (B.init value, [key.keyData])
+    | (key, value) <- Map.toAscList m,
+      key.keyType == tapLeafScriptType,
+      -- The push of 32 bytes, OP_CHECKSIG, and the leaf version
+      B.length value == 35,
+      B.head value == 0x20,
+      B.index value 33 == 0xac,
+      B.last value == tapscriptLeafVersion
+    ]
 
--- | Whether the control block of a leaf script commits the leaf to the
--- output key of the coin. The entry must name one leaf version
--- ('namesOneLeafVersion').
-commitsLeaf :: PubKey -> TapLeafScript -> Bool
-commitsLeaf outKey leaf = case decodeControlBlock leaf.controlBlock of
-  Right (v, internalKey, proof) ->
-    let path = ScriptPathData Nothing [] leaf.script (odd v) (v .&. 0xfe) internalKey proof Nothing
-     in namesOneLeafVersion leaf && verifyScriptPathData outKey path
-  Left _ -> False
+-- | The 32 bytes of the key of a script of 'singleKeyLeaves'
+leafKeyBytes :: ByteString -> ByteString
+leafKeyBytes = B.take 32 . B.drop 1
 
--- | Whether a leaf script entry names one leaf version. BIP 371 has the
--- leaf version in the value of the entry, and the key of the entry is "the
--- control block for this leaf", whose first byte holds the leaf version
--- too (BIP 341), the one that a spend takes. An entry that names two is
--- not an entry of BIP 371: a signature for the leaf of its value is of no
--- use in a spend of the leaf of its control block. The signer and the
--- finalizer pass over it.
-namesOneLeafVersion :: TapLeafScript -> Bool
-namesOneLeafVersion leaf = case B.uncons leaf.controlBlock of
-  Just (first, _) -> first .&. 0xfe == leaf.leafVersion
-  Nothing -> False
+-- | The key of the entry of a script path signature: PSBT_IN_TAP_SCRIPT_SIG
+-- with the 32 bytes of the x-only key and the leaf hash
+tapScriptSigKey :: ByteString -> Digest SHA256 -> Key
+tapScriptSigKey keyBytes leaf = Key tapScriptSigType (keyBytes <> BA.convert leaf)
+
+-- | Whether a control block commits a leaf script of the leaf version 0xc0
+-- to the output key of the coin, with that leaf version. A spend takes the
+-- leaf version from the first byte of the control block (BIP 341): one
+-- that holds another version spends another leaf, which is not the one
+-- that was signed.
+commitsLeaf :: PubKey -> ByteString -> ByteString -> Bool
+commitsLeaf outKey control scriptBytes = case decodeControlBlock control of
+  Right (v, internalKey, proof)
+    | v .&. 0xfe == tapscriptLeafVersion ->
+        verifyScriptPathData outKey $
+          ScriptPathData Nothing [] (Script []) (odd v) tapscriptLeafVersion internalKey proof (Just scriptBytes)
+  _ -> False
+
+-- | Whether every signature of an input is of the sighash type, as Bitcoin
+-- Core checks it before it signs or finalizes an input (@SignPSBTInput@),
+-- by the bytes alone: a Taproot signature of 64 bytes is of
+-- SIGHASH_DEFAULT, one of 65 bytes of the type of its last byte, and a
+-- partial signature of the type of its last byte. For SIGHASH_DEFAULT,
+-- which no ECDSA signature has, Bitcoin Core does not look at the partial
+-- signatures.
+signaturesUse :: SigHash -> PsbtMap -> Bool
+signaturesUse sighash m
+  | sighash == sigHashDefault = all ((== 64) . B.length) taprootSignatures
+  | otherwise = all (\value -> B.length value == 65 && ofType value) taprootSignatures && all ofType (valuesOf [partialSigType])
+  where
+    valuesOf types = [value | (key, value) <- Map.toAscList m, key.keyType `elem` types]
+    taprootSignatures = valuesOf [tapKeySigType, tapScriptSigType]
+    ofType value = not (B.null value) && fromIntegral (B.last value) == sighash
 
 -- | The error for a sighash type the signer does not accept
 notAcceptedSigHash :: SigHash -> String
@@ -2061,14 +2251,31 @@ checkEcdsaSigHash net sighash = do
   when (isNothing net.sigHashForkId && hasForkIdFlag sighash) $
     Left "the sighash type has a fork id flag the network does not use"
 
--- | Whether a coin is a Taproot output, and its program
-isTaprootCoin :: ScriptOutput -> Bool
-isTaprootCoin = either (const False) (const True) . taprootProgram
+-- | The sighash type of an input that asks for none: SIGHASH_DEFAULT for a
+-- Taproot coin, and that of 'defaultEcdsaSigHash' for any other
+defaultSigHash :: Network -> TxOut -> SigHash
+defaultSigHash net coin
+  | isTaprootCoin net coin = sigHashDefault
+  | otherwise = defaultEcdsaSigHash net
 
-taprootProgram :: ScriptOutput -> Either String ByteString
-taprootProgram = \case
-  PayWitness 1 program | B.length program == 32 -> Right program
-  _ -> Left "not a Taproot output"
+-- | A sighash type a signature of the coin may carry on the network
+checkSigHash :: Network -> TxOut -> SigHash -> Either String ()
+checkSigHash net coin sighash
+  | isTaprootCoin net coin =
+      unless (isTaprootSigHash sighash) $
+        Left ("the sighash type " <> show (fromIntegral sighash :: Word32) <> " is not one a Taproot signature may use")
+  | otherwise = checkEcdsaSigHash net sighash
+
+-- | Whether a coin is a Taproot output: a witness program of version 1 and
+-- 32 bytes, on a network that has SegWit. The bytes of the script tell, as
+-- in Bitcoin Core (@IsPayToTaproot@). On a network without SegWit the same
+-- bytes are a script that anyone can spend, and no Taproot rule applies.
+isTaprootCoin :: Network -> TxOut -> Bool
+isTaprootCoin net coin = net.segWit && B.length coin.script == 34 && B.take 2 coin.script == "\x51\x20"
+
+-- | The witness program of a Taproot coin: the 32 bytes of its output key
+taprootProgram :: TxOut -> ByteString
+taprootProgram coin = B.drop 2 coin.script
 
 -- | The PSBT after a signature with the sighash was added, as the signer
 -- of BIP 370 leaves the flags of version 2: inputs may no longer be added
@@ -2112,8 +2319,8 @@ data InputCoin = InputCoin
 
 -- | The coin every input of a PSBT spends, 'Nothing' for an input that
 -- carries none. A previous transaction must be the one its input spends
--- and have the output it spends, and a witness output given with it must
--- be that output.
+-- and have the output it spends. It gives the coin, and a witness output
+-- beside it is not read, as in Bitcoin Core.
 --
 -- An amount with 'fromPreviousTx' is checked. Another is only checked by a
 -- signature that commits to it: a SegWit version 0 signature commits to
@@ -2149,91 +2356,100 @@ spentOutputs psbt =
 
 -- | The output an input spends, from the fields of the input: the output
 -- of its previous transaction, which must be the transaction the input
--- spends from, or else its witness output alone. With both, the witness
--- output must be that output. The flag tells when the witness output
--- alone is known, which only a witness signature may rely on.
+-- spends from, or else its witness output alone. The flag tells when the
+-- witness output alone is known, which only a witness signature may rely
+-- on. With both, the previous transaction gives the coin and the witness
+-- output is not read, as in Bitcoin Core (@PSBTInput::GetUTXO@): the id of
+-- the previous transaction is checked, and a witness output is a claim.
 spentOutput :: TxIn -> PsbtMap -> Either String (Maybe (TxOut, Bool))
 spentOutput input m = do
-  witnessM <- witnessUtxo m
   parentM <- nonWitnessUtxo m
-  case (parentM, witnessM) of
-    (Just parent, _) -> do
-      output <- previousOutput input parent
-      forM_ witnessM $ \witnessCoin ->
-        unless (witnessCoin == output) $
-          Left "the witness output of the input is not the output of its previous transaction"
-      return (Just (output, False))
-    (Nothing, Just output) -> return (Just (output, True))
-    (Nothing, Nothing) -> return Nothing
+  case parentM of
+    Just parent -> (\output -> Just (output, False)) <$> previousOutput input parent
+    Nothing -> fmap (,True) <$> witnessUtxo m
 
--- | What the scripts of an input say about how its coin is signed
-data InputScripts = InputScripts
+-- | How a coin signed with ECDSA is spent, from its script and the redeem
+-- and witness scripts of its input
+data Spend = Spend
   { -- | the script the coin is signed against: the script of the coin, or
     -- the witness program its redeem script is when it is nested in P2SH
     program :: ScriptOutput,
     -- | the script that names the keys: the script of the coin, its
-    -- redeem script or its witness script. 'Nothing' when the input does
-    -- not have the redeem or witness script its coin needs.
-    signedScript :: Maybe ScriptOutput,
-    -- | why a redeem or witness script of the input does not fit its coin
-    mismatch :: Maybe String
+    -- redeem script or its witness script. It is a P2PK, P2PKH or multisig
+    -- script, or the P2WPKH program itself.
+    naming :: ScriptOutput,
+    -- | the redeem script of a P2SH coin
+    redeemScript :: Maybe Script,
+    -- | the witness script of a P2WSH coin, nested in P2SH or not
+    witnessScript :: Maybe Script,
+    -- | whether the input has a redeem script or a witness script that is
+    -- not the one of its coin
+    strayScript :: Bool
   }
 
--- | The scripts of an input, from the script of its coin and its redeem
--- and witness scripts. A redeem script must hash to the coin, and a
--- witness script to the witness program, as BIP 174 requires of a signer:
--- one that does not is reported in 'mismatch'. 'Nothing' when the script
--- that names the keys is no standard template: the library cannot sign or
--- finalize such an input, and leaves it to others.
-inputScripts :: ScriptOutput -> PsbtMap -> Either String (Maybe InputScripts)
-inputScripts coinScript m = do
-  redeemM <- inputRedeemScript m
-  witnessM <- inputWitnessScript m
-  let redeemOutM = decodeOutput <$> redeemM
-      witnessOutM = decodeOutput <$> witnessM
-      -- A SegWit coin, nested in P2SH or not, is signed against its witness
-      -- program; any other against its own script
-      program = case redeemOutM of
-        Just (Right redeem) | not (isSegwit coinScript), isSegwit redeem -> redeem
-        _ -> coinScript
-      redeemMismatch = case redeemM of
-        Just redeem
-          | not (isPayScriptHash coinScript) -> Just "the input has a redeem script, but its coin is not pay-to-script-hash"
-          | toP2SH redeem /= Right coinScript -> Just "the redeem script of the input does not hash to its coin"
-        _ -> Nothing
-      witnessMismatch = case witnessM of
-        Just witness
-          | not (isPayWitnessScriptHash program) -> Just "the input has a witness script, but its coin is not pay-to-witness-script-hash"
-          | toP2WSH witness /= Right program -> Just "the witness script of the input does not hash to its witness program"
-        _ -> Nothing
-      -- The script that names the keys, as it decodes
-      naming = case program of
-        PayWitnessScriptHash _ -> witnessOutM
-        PayScriptHash _ -> redeemOutM
-        _ -> Just (Right program)
-  return $ case naming of
-    Just (Left _) -> Nothing
-    _ ->
-      Just
-        InputScripts
-          { program = program,
-            signedScript = naming >>= eitherToMaybe,
-            mismatch = listToMaybe (catMaybes [redeemMismatch, witnessMismatch])
-          }
+-- | How the coin of an input is spent, as Bitcoin Core solves it
+-- (@ProduceSignature@). A redeem script serves only when it hashes to the
+-- P2SH coin, and a witness script only when it hashes to the witness
+-- program, which is what BIP 174 has a signer check. 'Nothing' for a coin
+-- that the library cannot sign or finalize, which is left to others:
+--
+-- * a coin without the script it commits to, or with one that does not
+--   parse;
+-- * a redeem script of more than 'maxRedeemScriptSize' bytes, or a
+--   witness script of more than 'maxWitnessScriptSize': no transaction
+--   can spend the coin. Bitcoin Core adds a signature to such a coin, and
+--   makes no final script of it;
+-- * a script that names the keys and is no standard template;
+-- * a script hash or a witness program where none may be: a P2SH script as
+--   redeem script, or a P2SH script or a witness program as witness
+--   script. Such a script is run as a script and not as a commitment, so
+--   no signature spends the coin.
+inputSpend :: TxOut -> PsbtMap -> Maybe Spend
+inputSpend coin m = do
+  coinScript <- eitherToMaybe (decodeSerial coin.script)
+  let given field = either (const Nothing) id (field m)
+      redeemM = mfilter ((== Right coinScript) . toP2SH) (given inputRedeemScript)
+  program <- case coinScript of
+    PayScriptHash _ -> do
+      redeem <- redeemM >>= eitherToMaybe . decodeOutput
+      return (if isSegwit redeem then redeem else coinScript)
+    _ -> Just coinScript
+  let witnessM = mfilter ((== Right program) . toP2WSH) (given inputWitnessScript)
+  naming <- case program of
+    PayWitnessScriptHash _ -> witnessM >>= eitherToMaybe . decodeOutput >>= keyScript
+    PayScriptHash _ -> redeemM >>= eitherToMaybe . decodeOutput >>= keyScript
+    PayWitnessPKHash _ -> Just program
+    _ -> keyScript program
+  return
+    Spend
+      { program = program,
+        naming = naming,
+        redeemScript = redeemM,
+        witnessScript = witnessM,
+        strayScript =
+          (Map.member (Key inRedeemScriptType B.empty) m && isNothing redeemM)
+            || (Map.member (Key inWitnessScriptType B.empty) m && isNothing witnessM)
+      }
+  where
+    keyScript out = case out of
+      PayPK _ -> Just out
+      PayPKHash _ -> Just out
+      PayMulSig _ _ -> Just out
+      _ -> Nothing
 
 -- | What an input is signed against, as 'makeSignature' wants it: the
 -- script of its coin or its witness program, with the redeem script of a
 -- P2SH coin or the witness script of a P2WSH coin
-signingInput :: TxIn -> TxOut -> SigHash -> InputScripts -> SigInput
-signingInput input output sighash scripts =
+signingInput :: TxIn -> TxOut -> SigHash -> Spend -> SigInput
+signingInput input output sighash spend =
   SigInput
-    { script = scripts.program,
+    { script = spend.program,
       value = output.value,
       outpoint = input.outpoint,
       sighash = sighash,
-      redeem = case scripts.program of
-        PayWitnessScriptHash _ -> scripts.signedScript
-        PayScriptHash _ -> scripts.signedScript
+      redeem = case spend.program of
+        PayWitnessScriptHash _ -> Just spend.naming
+        PayScriptHash _ -> Just spend.naming
         _ -> Nothing
     }
 
@@ -2242,154 +2458,158 @@ signingInput input output sighash scripts =
 -- | Finalize every input whose signatures suffice for the coin it spends,
 -- as the finalizer of the spec does: the final script and witness go in
 -- the input, and its partial signatures, sighash type, redeem script,
--- witness script, derivation records and Taproot fields go, as Bitcoin
--- Core clears them. Its coin and the keys the spec does not define stay.
+-- witness script, derivation records, hash preimages, Taproot fields and
+-- MuSig2 fields go, as Bitcoin Core drops them. Its coin and the keys the
+-- library does not define stay. An input that is final already loses
+-- those fields too.
 --
--- Only the signatures of the keys the script of the coin names are
--- looked at. Each one is verified first, against the digest of the coin,
--- which is computed once per sighash type. A signature that does not
--- verify, or is of an uncompressed key on a SegWit version 0 coin, is
--- refused, as @PSBTInputSignedAndVerified@ and the standard script flags
--- refuse it in Bitcoin Core. Every signature of the input must use the
--- sighash type the input names, and SIGHASH_ALL when it names none
--- (SIGHASH_DEFAULT for a Taproot coin, and with the fork id flag on a
--- network that has one), as Bitcoin Core requires.
+-- __One input at a time.__ BIP 174: "For each input, the Input Finalizer
+-- determines if the input has enough data to pass validation." An input
+-- that does not is left as it is, and the others are finalized, as in
+-- Bitcoin Core (@FinalizePSBT@), which refuses nothing. The only refusal
+-- here is for a previous transaction that is not the one its input spends,
+-- which 'decodePsbt' does not read either. 'psbtTransaction' tells whether
+-- every input is final.
 --
--- A Taproot input of a PSBT that another party wrote can hold thousands
--- of leaf scripts and of script path signatures, at no cost to its writer.
--- A leaf finds its signature by a lookup, so the time such an input takes
--- grows with its size, and not with the product of the two numbers.
+-- __The final script.__ The finalizer makes the one script that Bitcoin
+-- Core would make, and then checks it. When it does not pass, the input is
+-- left, and no other choice of signatures is tried:
+--
+-- * a multisig takes the signatures of the first keys, in the order of the
+--   script, that have one, as many as it requires;
+-- * a Taproot coin takes its key path signature when it has one, and
+--   otherwise the signed leaf whose witness is smallest: the one with the
+--   shortest control block, since the leaves are the check of one key.
+--
+-- Each signature that is used must verify against the digest of the coin
+-- and be one that nodes relay: no high S, and no uncompressed key on a
+-- SegWit version 0 coin. A leaf must be committed to the coin by its
+-- control block, with the leaf version 0xc0. A signature that is not used
+-- is not verified, so it cannot stop an input that is ready.
+--
+-- __The sighash type.__ Every signature of the input, used or not, must be
+-- of the type the input names: BIP 174 has the finalizer "fail to finalize
+-- that input if any signature does not match the specified sighash type".
+-- When the input names none, Bitcoin Core wants SIGHASH_ALL, with the fork
+-- id flag on a network that has one, and SIGHASH_DEFAULT for a Taproot
+-- coin, where it does not look at partial signatures.
+--
+-- __What is left as it is.__ Besides an input without enough signatures:
+-- one without its coin, one whose scripts are no standard template, a
+-- legacy coin known from its witness output only, a Taproot coin whose
+-- output key is no point of the curve, which nobody can spend, and a
+-- signed Taproot coin while another input of the PSBT lacks its coin,
+-- since the digest of a Taproot signature commits to the output every
+-- input spends and the signature cannot be verified before.
+--
+-- A redeem script or a witness script on a coin that has none does not
+-- stop the finalizer, as it does not stop Bitcoin Core: BIP 174 gives that
+-- check to the signer.
 --
 -- The coins finalized are those of P2PK, P2PKH and multisig scripts, P2SH
 -- coins with their redeem script, P2WPKH coins, P2WSH coins with their
 -- witness script, nested in P2SH or not, and Taproot coins by their key
--- path signature or by a leaf script that is a single key check. Any
--- other input stays as it is: one without enough signatures, one whose
--- scripts are no standard template, a legacy coin known from its witness
--- output only, a Taproot coin whose output key is no point of the curve,
--- which nobody can spend, and a signed Taproot coin while another input of
--- the PSBT lacks its coin, since the digest of a Taproot signature commits
--- to the output every input spends and the signature cannot be verified
--- before. Bitcoin Core does not finalize these either.
+-- path signature or by a leaf script that is the check of one key.
 --
--- A leaf script or a script path signature of a Taproot input that cannot
--- be used is passed over, and does not stop the finalizer: a leaf script
--- that is not a list of opcodes, a control block whose internal key is no
--- point of the curve, a signature under a key that is no point, and a leaf
--- script entry that names another leaf version in its value than in its
--- control block. Bitcoin Core does not finalize an input with these alone
--- either.
+-- __Cost.__ A Taproot input of a PSBT that another party wrote can hold
+-- thousands of leaf scripts and of script path signatures, at no cost to
+-- its writer. A leaf finds its signature by a lookup, so the time such an
+-- input takes grows with its size, and not with the product of the two
+-- numbers.
 finalizePsbt :: Network -> Psbt -> Either String Psbt
 finalizePsbt net psbt = do
   coins <- spentOutputs psbt
   let allCoins = mapM (fmap fst) coins
   inputs <- forM (zip3 [0 ..] (zip tx.inputs psbt.inputs) coins) $ \(i, (input, m), coinM) ->
     first (("Input " <> show i <> ": ") <>) $ case coinM of
-      Just (output :: TxOut, witnessOnly)
-        | not (isFinal m),
-          Right coinScript <- decodeSerial output.script -> do
-            finals <-
-              if isTaprootCoin coinScript
-                then finalTaprootScripts tx allCoins i m coinScript
-                else finalScripts net tx i input output witnessOnly coinScript m
-            return $ case finals of
-              Just (scriptSig, stack) ->
-                foldr ($) (cleared m) $
-                  [insertFinalScriptSig scriptSig | not (B.null scriptSig)]
-                    <> [insertFinalScriptWitness stack | not (null stack)]
-              Nothing -> m
-      _ -> return m
+      _ | isFinal m -> return (cleared m)
+      Nothing -> return m
+      Just (coin, witnessOnly) -> do
+        sighashM <- sigHashType m
+        let sighash = fromMaybe (defaultSigHash net coin) sighashM
+            finals
+              -- BIP 174 asks it of every signature when the input names a
+              -- type, also for the type 0, which no partial signature has
+              | not (signaturesUse sighash m) || (sighashM == Just sigHashDefault && hasPartialSignatures m) = Nothing
+              | isTaprootCoin net coin = finalTaproot tx allCoins i m coin
+              | otherwise = finalEcdsa net tx i input m coin witnessOnly sighash
+        return (maybe m (finalized m) finals)
   return $ Psbt psbt.version tx psbt.globals inputs psbt.outputs
   where
     tx = psbt.unsignedTx
+    finalized m (scriptSig, stack) =
+      foldr ($) (cleared m) $
+        [insertFinalScriptSig scriptSig | not (B.null scriptSig)]
+          <> [insertFinalScriptWitness stack | not (null stack)]
     cleared = Map.filterWithKey (\key _ -> key.keyType `notElem` clearedTypes)
     clearedTypes =
-      [partialSigType, sigHashTypeType, inRedeemScriptType, inWitnessScriptType, inDerivationType, tapKeySigType, tapScriptSigType, tapLeafScriptType, inTapDerivationType, inTapInternalKeyType, tapMerkleRootType]
+      [ partialSigType,
+        sigHashTypeType,
+        inRedeemScriptType,
+        inWitnessScriptType,
+        inDerivationType,
+        ripemd160Type,
+        sha256Type,
+        hash160Type,
+        hash256Type,
+        tapKeySigType,
+        tapScriptSigType,
+        tapLeafScriptType,
+        inTapDerivationType,
+        inTapInternalKeyType,
+        tapMerkleRootType,
+        inMusigParticipantsType,
+        musigNonceType,
+        musigPartialSigType
+      ]
 
 -- | The final script and witness of an input signed with ECDSA, from the
--- partial signatures of the keys its script names, when they suffice.
--- Each of those signatures is verified first.
-finalScripts :: Network -> Tx -> Int -> TxIn -> TxOut -> Bool -> ScriptOutput -> PsbtMap -> Either String (Maybe (ByteString, WitnessStack))
-finalScripts net tx i input output witnessOnly coinScript m = do
-  sighashM <- sigHashType m
-  scriptsM <- inputScripts coinScript m
-  case scriptsM of
-    Nothing -> return Nothing
-    Just scripts
-      -- Only a witness signature may rely on a witness output
-      | witnessOnly && not (isSegwit scripts.program) -> return Nothing
-      | otherwise -> do
-          forM_ scripts.mismatch Left
-          let asked = fromMaybe (defaultEcdsaSigHash net) sighashM
-              otherType keyBytes =
-                Left $
-                  "the signature of the key " <> quoted keyBytes <> case sighashM of
-                    Just _ -> " does not use the sighash type of the input"
-                    Nothing -> " does not use SIGHASH_ALL, and the input names no sighash type"
-              sigInput = signingInput input output asked scripts
-              named = maybe [] (namedSignatures m) scripts.signedScript
-          -- The signatures of the keys the script names: each is a
-          -- signature, of the sighash type asked, by a key the coin may be
-          -- spent with
-          checked <- forM named $ \(public, bytes) -> do
-            (sig, sh) <- case decodeTxSig net bytes of
-              Right (TxSignature sig sh) -> return (sig, sh)
-              _ -> Left ("the signature of the key " <> quoted (encodeSerial public) <> " is not a valid signature")
-            unless (sh == asked) $ otherType (encodeSerial public)
-            when (isSegwit scripts.program && not public.compress) $
-              Left ("the signature of the key " <> quoted (encodeSerial public) <> " is of an uncompressed key, which a SegWit version 0 coin may not be spent with")
-            return (public, sig)
-          -- Every other signature of the input uses that sighash type too:
-          -- its last byte tells, and nothing else of it is looked at
-          forM_ [(key, sig) | (key, sig) <- Map.toAscList m, key.keyType == partialSigType] $ \(key, sig) ->
-            unless (not (B.null sig) && B.last sig == fromIntegral (asked .&. 0xff)) $ otherType key.keyData
-          if null checked
-            then return Nothing
-            else do
-              -- One digest serves every signature, since all use one type
-              digest <- makeSigHash net tx i sigInput.script output.value asked sigInput.redeem
-              forM_ checked $ \(public, sig) ->
-                unless (verifyHashSig digest sig public.point) $
-                  Left ("the signature of the key " <> quoted (encodeSerial public) <> " does not verify")
-              return (assemble scripts named)
+-- partial signatures that its script takes, when they suffice and each of
+-- them verifies. 'Nothing' leaves the input as it is.
+finalEcdsa :: Network -> Tx -> Int -> TxIn -> PsbtMap -> TxOut -> Bool -> SigHash -> Maybe (ByteString, WitnessStack)
+finalEcdsa net tx i input m coin witnessOnly sighash = do
+  spend <- inputSpend coin m
+  let witnessCoin = isSegwit spend.program
+      sigInput = signingInput input coin sighash spend
+  -- Only a witness signature may rely on a witness output
+  guard (witnessCoin || not witnessOnly)
+  used <- usedSignatures spend.naming (namedSignatures m spend.naming)
+  digest <- eitherToMaybe (makeSigHash net tx i sigInput.script coin.value sighash sigInput.redeem)
+  -- One digest serves every signature: all are of the sighash type, by
+  -- 'signaturesUse'
+  forM_ used $ \(public, bytes) -> do
+    TxSignature signature _ <- eitherToMaybe (decodeTxSig net bytes)
+    guard (public.compress || not witnessCoin)
+    guard (verifyHashSig digest signature public.point)
+  let items = case spend.naming of
+        PayPK _ -> map snd used
+        PayMulSig _ _ -> B.empty : map snd used
+        _ -> concat [[signature, encodeSerial public] | (public, signature) <- used]
+      redeemItem = S.encode <$> maybeToList spend.redeemScript
+      witnessItem = S.encode <$> maybeToList spend.witnessScript
+      pushes = S.encode . Script . map opPushData
+  return $
+    if witnessCoin
+      then (pushes redeemItem, items <> witnessItem)
+      else (pushes (items <> redeemItem), [])
+
+-- | The signatures that a script takes, among those of the keys it names:
+-- the one of its key, or for a multisig those of its first keys that have
+-- one, in the order of the script and as many as it requires, which is
+-- the choice of Bitcoin Core (@SignStep@). 'Nothing' when they do not
+-- suffice.
+usedSignatures :: ScriptOutput -> [(PublicKey, ByteString)] -> Maybe [(PublicKey, ByteString)]
+usedSignatures naming named = case naming of
+  PayPK public -> (: []) . (public,) <$> lookup public named
+  PayPKHash h -> (: []) <$> ofHash h
+  PayWitnessPKHash h -> (: []) <$> ofHash h
+  PayMulSig keys n
+    | length found >= n -> Just (take n found)
+    where
+      found = [(key, signature) | key <- keys, Just signature <- [lookup key named]]
+  _ -> Nothing
   where
-    quoted = show . encodeHex
-    -- The final script and witness, from the signatures of the keys the
-    -- script names
-    assemble :: InputScripts -> [(PublicKey, ByteString)] -> Maybe (ByteString, WitnessStack)
-    assemble scripts named = case coinScript of
-      PayScriptHash _ -> do
-        redeem <- either (const Nothing) id (inputRedeemScript m)
-        if isSegwit scripts.program
-          then (scriptOf [S.encode redeem],) <$> witnessOf scripts named
-          else (\found -> (scriptOf (found <> [S.encode redeem]), [])) <$> (items named =<< scripts.signedScript)
-      _
-        | isSegwit coinScript -> (B.empty,) <$> witnessOf scripts named
-        | otherwise -> (\found -> (scriptOf found, [])) <$> (items named =<< scripts.signedScript)
-    -- The witness of a SegWit coin: the items of its program, with the
-    -- witness script last for P2WSH
-    witnessOf :: InputScripts -> [(PublicKey, ByteString)] -> Maybe [ByteString]
-    witnessOf scripts named = case scripts.program of
-      PayWitnessScriptHash _ -> do
-        witnessScript <- either (const Nothing) id (inputWitnessScript m)
-        (<> [S.encode witnessScript]) <$> (items named =<< scripts.signedScript)
-      _ -> items named =<< scripts.signedScript
-    -- The items a script is spent with: the pushes of an input script,
-    -- or the items of a witness
-    items :: [(PublicKey, ByteString)] -> ScriptOutput -> Maybe [ByteString]
-    items named = \case
-      PayPK public -> (: []) <$> lookup public named
-      PayPKHash h -> withKey <$> ofHash named h
-      PayMulSig keys n -> (B.empty :) <$> enough named keys n
-      PayWitnessPKHash h -> withKey <$> ofHash named h
-      _ -> Nothing
-    ofHash :: [(PublicKey, ByteString)] -> Hash160 -> Maybe (PublicKey, ByteString)
-    ofHash named h = listToMaybe [(public, signature) | (public, signature) <- named, addressHash (encodeSerial public) == h]
-    enough :: [(PublicKey, ByteString)] -> [PublicKey] -> Int -> Maybe [ByteString]
-    enough named keys n = let found = mapMaybe (`lookup` named) keys in if length found >= n then Just (take n found) else Nothing
-    withKey :: (PublicKey, ByteString) -> [ByteString]
-    withKey (public, signature) = [signature, encodeSerial public]
-    scriptOf = S.encode . Script . map opPushData
+    ofHash h = find ((== h) . addressHash . encodeSerial . fst) named
 
 -- | The partial signatures of an input whose keys the script names, in
 -- the order of the map. A key is named by a script of public keys when it
@@ -2407,55 +2627,50 @@ namedSignatures m script =
     named = scriptKeyHashes script
 
 -- | The final witness of a Taproot input: its key path signature, or the
--- signature of the first leaf script that is a single key check with the
--- script and its control block. Every signature is verified first,
--- against the output key and the digest of its leaf. A signature must
--- use the sighash type the input names, and SIGHASH_DEFAULT when it names
--- none, as Bitcoin Core requires. 'Nothing' for an input without a
--- signature it can use, and for one whose signature cannot be verified yet
--- because another input lacks its coin.
-finalTaprootScripts :: Tx -> Maybe [TxOut] -> Int -> PsbtMap -> ScriptOutput -> Either String (Maybe (ByteString, WitnessStack))
-finalTaprootScripts tx allCoins i m coinScript = do
-  program <- taprootProgram coinScript
-  sighashM <- sigHashType m
-  keySigM <- tapKeySig m
-  scriptSigs <- tapScriptSigsByKeyData m
-  let sameType :: TaprootSignature -> Either String ()
-      sameType signature = case sighashM of
-        Just asked -> unless (signature.hash == asked) $ Left "a Taproot signature does not use the sighash type of the input"
-        Nothing -> unless (signature.hash == sigHashDefault) $ Left "a Taproot signature does not use SIGHASH_DEFAULT, and the input names no sighash type"
-  -- Every signature of the input, used or not, as Bitcoin Core checks them
-  mapM_ sameType (maybeToList keySigM <> map snd scriptSigs)
-  -- A leaf finds its signature by a lookup, as it finds its record in the
-  -- signer: a walk through the signatures for each leaf would take time by
-  -- the product of two numbers that whoever wrote the PSBT chooses
-  let signatureOf = Map.fromList scriptSigs
-      signedLeaves =
-        [ (leaf, leafKey, hashOfLeaf, signature)
-        | Right leaf <- tapLeafScriptEntries m,
-          namesOneLeafVersion leaf,
-          Just leafKey <- [singleKeyLeaf leaf],
-          let hashOfLeaf = leafHash leaf.leafVersion leaf.script,
-          Just signature <- [Map.lookup (exportXOnlyPubKey leafKey <> BA.convert hashOfLeaf) signatureOf]
-        ]
-  case (keySigM, signedLeaves, allCoins, importXOnlyPubKey program) of
-    (Nothing, [], _, _) -> return Nothing
-    -- The digest of a Taproot signature commits to the output every input
-    -- spends. Until every input has its coin no signature can be checked,
-    -- so the input is not ready, and Bitcoin Core leaves it too.
-    (_, _, Nothing, _) -> return Nothing
-    -- Nobody can spend a coin whose output key is no point of the curve:
-    -- no signature verifies for it, and no control block commits to it
-    (_, _, _, Nothing) -> return Nothing
-    (Just signature, _, Just spent, Just outKey) -> do
-      digest <- taprootSigHash tx spent i signature.hash Nothing Nothing
-      unless (verifySchnorr outKey signature.sig (hashToMsg digest)) $
-        Left "the key path signature does not verify"
-      return (Just (B.empty, [encodeTaprootSig signature]))
-    (Nothing, (leaf, leafKey, hashOfLeaf, signature) : _, Just spent, Just outKey) -> do
-      unless (commitsLeaf outKey leaf) $
-        Left "the control block of the leaf does not commit it to the output key"
-      digest <- taprootSigHash tx spent i signature.hash Nothing (Just (hashOfLeaf, 0xffffffff))
-      unless (verifySchnorr leafKey signature.sig (hashToMsg digest)) $
-        Left "the script path signature does not verify"
-      return (Just (B.empty, [encodeTaprootSig signature, S.encode leaf.script, leaf.controlBlock]))
+-- signature of a leaf script that is the check of one key, with the
+-- script and its control block. The witness is the one Bitcoin Core makes
+-- (@SignTaproot@): the key path signature when the input has one, and
+-- otherwise the leaf of 'smallestSignedLeaf'. 'Nothing' leaves the input
+-- as it is: when it has no signature to use, when the signature does not
+-- verify or the control block does not commit the leaf to the coin, when
+-- the output key is no point of the curve, and while another input lacks
+-- its coin, since the signature cannot be verified before.
+finalTaproot :: Tx -> Maybe [TxOut] -> Int -> PsbtMap -> TxOut -> Maybe (ByteString, WitnessStack)
+finalTaproot tx allCoins i m coin = do
+  spent <- allCoins
+  outKey <- importXOnlyPubKey (taprootProgram coin)
+  let verified public leafM bytes = do
+        signature <- eitherToMaybe (decodeTaprootSig bytes)
+        digest <- eitherToMaybe (taprootSigHash tx spent i signature.hash Nothing ((,0xffffffff) <$> leafM))
+        guard (verifySchnorr public signature.sig (hashToMsg digest))
+  (B.empty,) <$> case plainField tapKeySigType m of
+    Just bytes -> [bytes] <$ verified outKey Nothing bytes
+    Nothing -> do
+      (script, control, bytes) <- smallestSignedLeaf m
+      leafKey <- importXOnlyPubKey (leafKeyBytes script)
+      guard (commitsLeaf outKey control script)
+      [bytes, script, control] <$ verified leafKey (Just (leafHashBytes tapscriptLeafVersion script)) bytes
+
+-- | The signed leaf of a Taproot input that Bitcoin Core spends
+-- (@SignTaproot@): its script, its control block and its signature. A leaf
+-- is signed when the input has a signature entry for its key and its leaf
+-- hash. Bitcoin Core takes each leaf with its shortest control block, and
+-- among the leaves the one whose witness is smallest. The leaves of
+-- 'singleKeyLeaves' have scripts of one size, and all the signatures of an
+-- input have one size ('signaturesUse'), so that is the leaf with the
+-- shortest control block. Among equals the first counts: by the bytes of
+-- the script for the leaves, and by the bytes for the control blocks.
+--
+-- A leaf finds its signature by a lookup: a walk through the signatures
+-- for each leaf would take time by the product of two numbers that whoever
+-- wrote the PSBT chooses.
+smallestSignedLeaf :: PsbtMap -> Maybe (ByteString, ByteString, ByteString)
+smallestSignedLeaf m
+  | null signed = Nothing
+  | otherwise = Just (minimumBy (comparing (\(_, control, _) -> B.length control)) signed)
+  where
+    signed =
+      [ (script, minimumBy (comparing B.length <> compare) controls, signature)
+      | (script, controls) <- Map.toAscList (singleKeyLeaves m),
+        Just signature <- [Map.lookup (tapScriptSigKey (leafKeyBytes script) (leafHashBytes tapscriptLeafVersion script)) m]
+      ]
