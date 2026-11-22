@@ -147,6 +147,142 @@ Bitcoin testnet3 is deprecated and still works.
 
 ### Changed
 
+- **`signPsbt` and `finalizePsbt` take one input at a time, as BIP 174 and
+  Bitcoin Core do.** They used to refuse a whole PSBT, with a reason, for
+  many faults of one input. The parties of a transaction fill a PSBT in
+  turn, so an input that one party cannot sign or finalize is the normal
+  case. BIP 174 says "If a Signer cannot sign a transaction, it must not add
+  a Partial Signature" and "For each input, the Input Finalizer determines
+  if the input has enough data to pass validation". Each rule below was
+  compared with Bitcoin Core 32.1 on regtest. The order followed is: the
+  BIPs, then Bitcoin Core, then the safer choice. A caller that relied on a
+  refusal now finds the input without a signature, or not final: compare
+  the inputs before and after, or call `psbtTransaction`, which tells
+  whether every input is final.
+  - **What still refuses a PSBT.** In `signPsbt`, a sighash type: one that
+    no node accepts or that the signer does not accept
+    (`acceptedSigHashes`), on any input that has its coin and is not final,
+    as BIP 174 asks. New, as in Bitcoin Core: a signature already on an
+    input that is of another type than the one the input is signed with
+    ("a signature of the input does not use the sighash type 1"). In both
+    functions, a previous transaction that is not the one its input spends,
+    which `decodePsbt` does not read either. `finalizePsbt` refuses nothing
+    else.
+  - **What `signPsbt` now leaves unsigned instead of refusing.** A redeem
+    script or a witness script that does not hash to the coin, or that the
+    coin has no use for (BIP 174 has the signer check both; Bitcoin Core
+    signs a coin that carries a script it does not use). A legacy coin
+    known from its witness output only. A SegWit version 0 coin known from
+    its witness output only, when the signer wants the previous transaction
+    (`requirePreviousTx`, still the default). A legacy input asked to sign
+    `SIGHASH_SINGLE` with no output at its index, and a Taproot input in
+    that case. An uncompressed key on a SegWit version 0 coin gets no
+    signature, and the other keys of that coin are still signed with.
+  - **What `finalizePsbt` now leaves not final instead of refusing.** A
+    signature that it would use and that does not verify, is no signature,
+    has a high S or is of an uncompressed key on a SegWit version 0 coin. A
+    signature of another sighash type than the input names, or than
+    `SIGHASH_ALL` (`SIGHASH_DEFAULT` on a Taproot coin) when it names none.
+    A Taproot leaf whose control block does not commit it to the coin.
+  - **The coin of an input is the output of its previous transaction when
+    the input has one.** A witness output beside it is not read, as Bitcoin
+    Core does not read it. `signPsbt`, `finalizePsbt`, `inputCoins` and
+    `psbtFee` used to refuse a witness output that was not that output.
+  - **`signPsbt` keeps the signatures that an input has.** It used to sign
+    again and replace them. A key that has a partial signature is not
+    signed with again. A Taproot input that has a key path signature gets
+    no other signature, and a leaf keeps the signature under its key.
+  - **A Taproot input gets a key path signature or leaf signatures, not
+    both.** When the signer holds the internal key and the key of a leaf,
+    it signs the key path alone, as Bitcoin Core does.
+  - **`signPsbt` signs the key path of a Taproot coin whose output key is
+    the key of the signer,** when the input names no internal key that
+    gives the coin. Such a coin pays to a key with no tweak, as the
+    descriptor `rawtr()` of Bitcoin Core makes one.
+  - **`signPsbt` signs a Taproot leaf as Bitcoin Core does:** by the leaf
+    version in the value of its entry, whatever its control block holds,
+    and with the key of any record of that key, whichever leaves the record
+    lists. It used to want a control block that commits the leaf to the
+    coin, and a record that lists the leaf. A signature of a leaf that is
+    not in the tree of the coin spends nothing, and `finalizePsbt` makes a
+    witness only of a leaf that its control block commits.
+  - **`finalizePsbt` builds the final script that Bitcoin Core would build,
+    and verifies the signatures that it uses.** A multisig takes the
+    signatures of its first keys that have one. A Taproot coin takes its key
+    path signature, or else the signed leaf with the shortest control
+    block, where it took the first signed leaf. A signature that the final
+    script does not use is no longer verified, so it cannot stop an input
+    that is ready. When the script that Bitcoin Core would build does not
+    pass, the input is left: no other choice of signatures is tried.
+  - **`finalizePsbt` no longer looks at a redeem script or a witness script
+    that the coin has no use for,** as Bitcoin Core does not: BIP 174 gives
+    that check to the signer.
+  - **`finalizePsbt` clears the fields of the signers from an input that is
+    final already,** as it does from the inputs that it finalizes.
+  - **Edge cases closed.** `signPsbt` signed a P2WSH coin whose witness
+    script is a witness program, and `finalizePsbt` then refused that
+    signature: no signature spends such a coin, and both now leave it.
+    `signPsbt` signed a SegWit version 0 coin of more than 21 million
+    bitcoin, which Bitcoin Core does not. On a network without SegWit, a
+    script of the form of a Taproot output was handled as a Taproot coin.
+    `signPsbt` did not check the sighash type of an input whose coin script
+    does not parse.
+  - **Where the library does not do as Bitcoin Core, and why.** BIP 174
+    decides: `signPsbt` leaves an input with a script that its coin has no
+    use for; `signPsbt` refuses a sighash type that it does not accept on a
+    coin that anyone can spend, which Bitcoin Core counts as signed;
+    `finalizePsbt` leaves an input that asks for the sighash type 0 and has
+    a partial signature; `psbtTransaction` extracts a final input that has
+    no coin; `combinePsbt` keeps every entry of a final input. BIP 174 lets
+    the signer choose: it wants the previous transaction of a SegWit
+    version 0 coin by default. Bitcoin Core has a problem: `signPsbt` adds
+    no key path signature with an internal key that does not give the coin,
+    and none with `SIGHASH_SINGLE` on a legacy input without an output at
+    its index. The library has a limit: it signs no leaf of more than one
+    key, no script that is not a standard template, no P2SH coin whose
+    redeem script is over 520 bytes, and it knows no descriptor, so it
+    finds an internal key or a redeem script in the PSBT only.
+
+- **`decodePsbt` follows the BIPs field by field, and Bitcoin Core where
+  they are silent.** The decoder and `decodepsbt` of Bitcoin Core 32.1 were
+  compared on the 168 PSBTs of the BIPs and of the tests of Bitcoin Core,
+  and on 89 hand-made cases. They now give another verdict for one PSBT of
+  the 168, where they did for 19.
+  - **Read now, as Bitcoin Core reads them.** A redeem script or a witness
+    script, of an input or of an output, and a leaf script of the script
+    tree of an output, that are no list of opcodes: BIP 174 and BIP 371
+    give them as bytes. A Taproot signature of 65 bytes whatever its last
+    byte: BIP 371 gives its length only. The function that gives the field
+    refuses such bytes (`inputRedeemScript`, `outputTapTree`, `tapKeySig`),
+    and `signPsbt` and `finalizePsbt` leave the input as it is.
+  - **Refused now, as Bitcoin Core refuses them.** A MuSig2 field of BIP
+    373 that is out of shape: an aggregate key or a participant key that
+    is no compressed public key on the curve, a public nonce that has not
+    66 bytes, a partial signature that has not 32. The ten invalid PSBTs
+    of BIP 373 were read. A hash preimage under a key that is not a hash
+    of the size of its algorithm. A global extended key of depth 0 that
+    has a child number or a parent fingerprint, which BIP 32 gives to no
+    master key.
+  - **Refused now, by BIP 174 alone.** A hash preimage that does not hash
+    to its key: the preimage "must equal the key when run through" the
+    algorithm of its field. Bitcoin Core reads it.
+  - **`finalizePsbt` clears the hash preimages and the MuSig2 fields** of
+    an input that it finalizes, as Bitcoin Core drops them.
+  - **Where the decoder still does not do as Bitcoin Core.** A BIP is
+    stricter, and Bitcoin Core reads what is refused here: the preimage
+    above, a control block of more than 128 nodes (BIP 341), and an
+    extended key whose path is not as deep as the key (BIP 174). And one
+    case stays open: a PSBT of version 2 whose inputs require lock times
+    that no transaction can have. Bitcoin Core reads it and gives no
+    transaction. A `Psbt` always has its transaction, so it is refused.
+  - The library keeps the MuSig2 fields and the preimages, and does not
+    sign with them. The vectors of BIP 373 are in `data/psbt_bip373.json`.
+  - The documentation said that a map is written "as Bitcoin Core writes
+    it". It is written with its keys in the order of their bytes. BIP 174
+    fixes no order, and Bitcoin Core writes another one, so the bytes of
+    the two can differ for the same PSBT. Each reads the bytes of the
+    other.
+
 - **Bitcoin Cash testnet3 is `bchTest3`.** The value `bchTest` is now
   `bchTest3`, and its `name`, the one `netByName` reads, is `bchtest3` instead
   of `bchtest`, in the way of `bchTest4` and `bchtest4`. With a number on both
@@ -276,17 +412,16 @@ Bitcoin testnet3 is deprecated and still works.
   finds the input not final. A sighash type that the signer does not accept
   still refuses the whole PSBT, on any input that has its coin, as BIP 174
   asks of a signer and as Bitcoin Core does.
-- **`signPsbt` and `finalizePsbt` want one leaf version in a leaf script
-  entry of a Taproot input.** The entry names the leaf version twice: in its
-  value, and in its control block, which is the one a spend takes. When the
-  two differed, the signer signed the leaf of the value, and the finalizer
+- **`finalizePsbt` wants one leaf version in a leaf script entry of a
+  Taproot input.** The entry names the leaf version twice: in its value,
+  and in its control block, which is the one a spend takes. When the two
+  differed, the signer signed the leaf of the value, and the finalizer
   wrote a witness that spends the leaf of the control block: a leaf that
   nodes do not relay, or one that is not in the tree. BIP 371 defines the
   entry with one leaf version, and Bitcoin Core writes the same version in
-  both places. The signer and the finalizer now pass over an entry that
-  names two, as they pass over an entry that they cannot read: the signer
-  adds no signature for it, and the finalizer leaves the input not final,
-  as Bitcoin Core does.
+  both places. The finalizer now leaves not final an input whose signed
+  leaf names two, as Bitcoin Core does. The signer signs the leaf of the
+  value, as Bitcoin Core does.
 - **Two rules of the Taproot signer of `signPsbt` have a test now.** No
   code changed for them: a key that a `Signer` gives is used only when it is
   the key that was asked for, on the key path and on a leaf, and a leaf

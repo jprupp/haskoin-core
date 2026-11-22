@@ -173,8 +173,9 @@ Read a file before any work on what its line names.
   or on Bitcoin Cash (EDA, DAA, aserti3-2d), and the tests of those rules.
 - `claude-notes/protocol.md`: the protocol machines of the reference nodes
   (`Haskoin.Network.Protocol`), their report in `doc/protocol/` and citations.
-- `claude-notes/psbt.md`: the PSBT signer and finalizer (`signPsbt`,
-  `finalizePsbt`), what they refuse and when, their cost and their tests.
+- `claude-notes/psbt.md`: the PSBT decoder, signer and finalizer
+  (`decodePsbt`, `signPsbt`, `finalizePsbt`): what they refuse and when,
+  where they differ from Bitcoin Core, their cost and their tests.
 - `claude-notes/slip39.md`: SLIP-39 shares (`Haskoin.Crypto.Keys.Slip39`),
   their tests and where the literal values of the tests come from.
 - `claude-notes/test-helpers.md`: `testIdentity` and the five identity tests
@@ -204,9 +205,9 @@ Read a file before any work on what its line names.
 
 - A type and a constructor of the same name: write `t'Name'` in Haddock, or
   the check of `haskell-dev docs` counts it as ambiguous.
-- The check of `haskell-dev docs` reports 146 problems at 2.0.1, all older
-  than the script: 94 ambiguous names, 27 names out of scope, 19 slashes and
-  6 links. Keep the lines after `Documentation check` in a file before the
+- The check of `haskell-dev docs` reports 145 problems, all older than the
+  script: 94 ambiguous names, 27 names out of scope, 19 slashes and 5
+  links. Keep the lines after `Documentation check` in a file before the
   change, and `diff` after it without the line numbers, which an edit
   moves. The count is the same on each run.
 - A spec that becomes the longest share of `haskell-dev test`: add its module
@@ -224,6 +225,7 @@ Read a file before any work on what its line names.
 - The seconds that `haskell-dev test` prints change with the load of the
   machine: 3 to 9 for one spec. To time examples, run the built `spec` of
   `.stack-work/dist` with `--match "/Module/" --times`.
-- The long-line check prints 978 lines at 2.0.1, most of them test vectors
-  and `CHANGELOG.md`. With `grep -c` in place of `grep -n` it counts them for
-  each file: compare the counts before and after the change.
+- The long-line check prints about 1450 lines, most of them test vectors,
+  `doc/protocol/` and `CHANGELOG.md`. With `grep -c` in place of `grep -n`
+  it counts them for each file: compare the counts before and after the
+  change.

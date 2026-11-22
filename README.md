@@ -654,19 +654,31 @@ Some other useful functions:
 - `xPrvSigner` signs from an extended private key, following the derivation
   records of the inputs.
 - `combinePsbt` merges the copies that different signers return.
-- `signPsbt` signs the inputs that the signer holds a key for and leaves the
-  others as they are, so each party can sign before the others have added their
-  coins and scripts. An input that asks for a sighash type the signer does not
-  accept still stops it, as BIP 174 asks. A Taproot signature commits to the coin
-  of every input, so `signPsbt` leaves every Taproot input unsigned until each
-  input has its coin, as Bitcoin Core does. `finalizePsbt` leaves an input that
-  is not ready as it is.
+- `signPsbt` and `finalizePsbt` take one input at a time, as BIP 174 and Bitcoin
+  Core do. `signPsbt` signs the inputs that the signer holds a key for. It leaves
+  as it is an input that it cannot or may not sign, so each party can sign before
+  the others have added their coins and scripts. It keeps the signatures that an
+  input already has. To see what was signed, compare the inputs before and after.
+- `signPsbt` refuses a whole PSBT for a sighash type only: a type that the signer
+  does not accept, as BIP 174 asks, or a signature already on an input that is of
+  another type than the one the input is signed with, as in Bitcoin Core.
+- A Taproot signature commits to the coin of every input, so `signPsbt` leaves
+  every Taproot input unsigned until each input has its coin, as Bitcoin Core
+  does.
+- `finalizePsbt` finalizes the inputs that are ready and leaves the others as
+  they are. It builds the one final script that Bitcoin Core would build, and
+  verifies the signatures that this script uses.
+- `decodePsbt` checks the fields of BIP 174, BIP 370, BIP 371 and BIP 373. It
+  keeps the hash preimages and the MuSig2 fields, and nothing here signs with
+  them. A PSBT written here and the same PSBT written by Bitcoin Core can differ
+  in the order of their keys, which BIP 174 leaves open: each side reads the
+  other.
 - `insertWitnessUtxo` attaches a coin without the transaction that paid it. That
   is enough for a Taproot coin. For a SegWit version 0 coin, the amount is then a
   claim that the signature does not cover for the other inputs, and a signer can
   be led to burn coins as fee (CVE-2020-14199). `keySigner` and `xPrvSigner`
-  therefore refuse such a coin. Set `requirePreviousTx = False` on the `Signer`
-  to accept it.
+  therefore leave such a coin unsigned. Set `requirePreviousTx = False` on the
+  `Signer` to sign it.
 - `psbtFee` and `inputCoins` give the fee and the coins as the signer checks
   them. Show those to the user, not amounts read from the fields yourself.
 - `psbtTransaction` refuses a PSBT whose inputs are not all final.
