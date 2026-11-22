@@ -878,20 +878,37 @@ verificationSpec =
       -- The same coins hold less than the outputs spend
       verifyStdTx btc signed [(PayPKHash h, 70000, op) | op <- ops] `shouldBe` False
 
-    it "signs SIGHASH_SINGLE on a legacy input with an output at its index and on a SegWit input, but refuses it on a legacy input without one" $ do
+    -- Bitcoin Core signs no input with SIGHASH_SINGLE that has no output at
+    -- its index, whatever the coin (SignTransaction: "Only sign
+    -- SIGHASH_SINGLE if there's a corresponding output"). The transaction
+    -- has one output, so input 0 has one at its index and input 1 has none.
+    it "signs SIGHASH_SINGLE on an input with an output at its index, and refuses it on an input without one" $ do
       let (k, p) = fixedKey 1
       let h = fromJust (addressHash160 (pubKeyAddr p))
-          ops = [coinOf 0, coinOf 1]
-          -- one output, so input 1 has none at its index
-          tx = buildTx ops [(PayPKHash h, 150000)]
-          legacy op = SigInput (PayPKHash h) 100000 op sigHashSingle Nothing
-          segwit op = SigInput (PayWitnessPKHash h) 100000 op sigHashSingle Nothing
-      signedFirst <- either fail return (signTx btc tx [legacy (coinOf 0)] [k.key])
-      verifyStdInput btc signedFirst [(PayPKHash h, 100000, coinOf 0)] 0 `shouldBe` True
-      signTx btc tx [legacy (coinOf 1)] [k.key] `shouldBe` Left "makeSignature: SIGHASH_SINGLE without an output at the input index"
-      -- The BIP 143 digest commits to the coin even without an output
-      signedWitness <- either fail return (signTx btc tx [segwit (coinOf 1)] [k.key])
-      verifyStdInput btc signedWitness [(PayWitnessPKHash h, 100000, coinOf 1)] 1 `shouldBe` True
+          tx = buildTx [coinOf 0, coinOf 1] [(PayPKHash h, 150000)]
+          single coin op = SigInput coin 100000 op sigHashSingle Nothing
+          noOutput = Left "signInput: SIGHASH_SINGLE without an output at the input index"
+      forM_ [PayPKHash h, PayWitnessPKHash h] $ \coin -> do
+        signedFirst <- either fail return (signTx btc tx [single coin (coinOf 0)] [k.key])
+        verifyStdInput btc signedFirst [(coin, 100000, coinOf 0)] 0 `shouldBe` True
+        signTx btc tx [single coin (coinOf 1)] [k.key] `shouldBe` noOutput
+      -- A SegWit coin nested in P2SH, and a coin of Bitcoin Cash, whose
+      -- digest is the one of BIP 143 too
+      signNestedWitnessTx btc tx [single (PayWitnessPKHash h) (coinOf 1)] [k.key] `shouldBe` noOutput
+      signTx bch tx [single (PayPKHash h) (coinOf 1)] [k.key] `shouldBe` noOutput
+
+    -- makeSignature is the step below signInput, and signPsbt uses it. It
+    -- refuses the digest that commits to nothing: the constant 1 of a legacy
+    -- input. The BIP 143 digest commits to the coin, and the PSBT signer of
+    -- Bitcoin Core signs it.
+    it "makeSignature refuses SIGHASH_SINGLE without an output on a legacy input, and signs a SegWit input" $ do
+      let (k, p) = fixedKey 1
+      let h = fromJust (addressHash160 (pubKeyAddr p))
+          tx = buildTx [coinOf 0, coinOf 1] [(PayPKHash h, 150000)]
+          single coin = SigInput coin 100000 (coinOf 1) sigHashSingle Nothing
+      makeSignature btc tx 1 (single (PayPKHash h)) k
+        `shouldBe` Left "makeSignature: SIGHASH_SINGLE without an output at the input index"
+      ((.hash) <$> makeSignature btc tx 1 (single (PayWitnessPKHash h)) k) `shouldBe` Right sigHashSingle
 
     -- A node accepts the signature over the constant digest 1 that a
     -- legacy SIGHASH_SINGLE input without an output has, so the verifier

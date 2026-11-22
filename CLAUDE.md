@@ -190,6 +190,9 @@ Read a file before any work on what its line names.
   `src/Haskoin/Util/Arbitrary/` holds the generators, and its `Util.hs` holds
   `testIdentity`, `testSerial` and `testJson`. A change there is a change of
   the public API. The helpers of one spec are at the top of its file.
+- A new refusal of `signTx` or `signInput`: the generators of
+  `Util/Arbitrary/Transaction.hs` and `Spelling.hs` sign with them, and the
+  property tests then fail with an `ErrorCall`. Make the generators avoid it.
 - `test/BitcoinCore.hs` is the one helper module of the test suite: it needs
   podman-test, which the library must not. It runs Bitcoin Core for `PsbtSpec`.
 - Calls to Bitcoin Core in the tests are positional: check the order in the

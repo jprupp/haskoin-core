@@ -134,6 +134,9 @@ instance FromJSON SigInput where
 -- (@SCRIPT_VERIFY_WITNESS_PUBKEYTYPE@ in Bitcoin Core), although a block
 -- may hold it. 'signInput' signs with the key it is given, in the form it
 -- is given.
+--
+-- An input signed with 'SIGHASH_SINGLE' needs an output at its index, or
+-- the whole call fails: see 'signInput'.
 signTx ::
   Network ->
   -- | transaction to sign
@@ -224,6 +227,15 @@ signTaprootInput tx spent i sh secret = do
 -- that no node accepts. The key is used in the form given, compressed or
 -- not. That is the way to spend a SegWit coin of an uncompressed key on
 -- purpose, which 'signTx' refuses.
+--
+-- An input signed with 'SIGHASH_SINGLE' at an index that has no output is
+-- refused, whatever its coin. That signature commits to no output, as one
+-- of 'SIGHASH_NONE' does. No BIP has a rule for a signer here, and the
+-- transaction signer of Bitcoin Core makes no such signature
+-- (@SignTransaction@: "Only sign SIGHASH_SINGLE if there's a corresponding
+-- output"), nor does the one of Bitcoin Cash Node. 'makeSignature' gives
+-- the signature of a SegWit coin and of a coin of Bitcoin Cash to a caller
+-- that wants it.
 signInput ::
   Network ->
   Tx ->
@@ -232,9 +244,11 @@ signInput ::
   (SigInput, Bool) ->
   PrivateKey ->
   Either String Tx
-signInput net tx i (sigIn@(SigInput so val _ _ rdmM), nest) key = do
+signInput net tx i (sigIn@(SigInput so val _ sh rdmM), nest) key = do
   when (isTaprootOutput so) $
     Left "signInput: a Taproot input is signed with signTaprootInput"
+  when (isSigHashSingle sh && i >= length tx.outputs) $
+    Left "signInput: SIGHASH_SINGLE without an output at the input index"
   let pub = derivePublicKey key
   unless (keyOfCoin so rdmM pub) $
     Left "signInput: the key is not a key of the coin"
@@ -470,7 +484,9 @@ parseExistingSigs net tx so i = insSigs <> witSigs
 -- in @SignatureHash@, and so does 'txSigHash', since a node must verify
 -- such signatures; a signer has no reason to make one. The BIP 143 digest
 -- of a SegWit input and the fork id digest of Bitcoin Cash commit to the
--- coin in that case, so those are signed.
+-- coin in that case, so those are signed here, as the PSBT signer of
+-- Bitcoin Core signs them. 'signInput' and 'signTx' refuse them too, as
+-- its transaction signer does.
 --
 -- The key is not checked against the coin here: 'signInput' does that.
 makeSignature :: Network -> Tx -> Int -> SigInput -> PrivateKey -> Either String TxSignature

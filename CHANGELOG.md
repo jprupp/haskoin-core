@@ -283,6 +283,21 @@ Bitcoin testnet3 is deprecated and still works.
     the two can differ for the same PSBT. Each reads the bytes of the
     other.
 
+- **`signTx`, `signNestedWitnessTx`, `signInput` and `signNestedInput`
+  refuse `SIGHASH_SINGLE` on any input that has no output at its index.**
+  They refused it on a legacy input only, where the digest is the constant
+  1, and signed a SegWit input and an input of Bitcoin Cash. That
+  signature commits to no output, as one of `SIGHASH_NONE` does. No BIP has
+  a rule for a signer here. The transaction signer of Bitcoin Core makes no
+  such signature for any kind of input (`SignTransaction`: "Only sign
+  SIGHASH_SINGLE if there's a corresponding output"; run on regtest with
+  `signrawtransactionwithwallet`), nor does the one of Bitcoin Cash Node.
+  The error is `signInput: SIGHASH_SINGLE without an output at the input
+  index`, also for a legacy input, where it named `makeSignature`.
+  `makeSignature` is unchanged: it refuses the legacy case and signs the
+  others, which the PSBT signer of Bitcoin Core signs too, so `signPsbt`
+  is unchanged.
+
 - **Bitcoin Cash testnet3 is `bchTest3`.** The value `bchTest` is now
   `bchTest3`, and its `name`, the one `netByName` reads, is `bchtest3` instead
   of `bchtest`, in the way of `bchTest4` and `bchtest4`. With a number on both
