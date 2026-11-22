@@ -166,6 +166,9 @@ Read a file before any work on what its line names.
   (`Haskoin.Network.Protocol`), their report in `doc/protocol/` and citations.
 - `claude-notes/slip39.md`: SLIP-39 shares (`Haskoin.Crypto.Keys.Slip39`),
   their tests and where the literal values of the tests come from.
+- `claude-notes/test-helpers.md`: `testIdentity` and the five identity tests
+  (`Haskoin.Util.Arbitrary.Util`), their spec, and a test of any helper that
+  makes a `Spec`.
 
 ## Working notes
 

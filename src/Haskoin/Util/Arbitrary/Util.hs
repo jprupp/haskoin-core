@@ -32,7 +32,7 @@ module Haskoin.Util.Arbitrary.Util
   )
 where
 
-import Control.Monad (forM_, (<=<))
+import Control.Monad (forM_, unless)
 import qualified Data.Aeson as A
 import qualified Data.Aeson.Encoding as A
 import qualified Data.Aeson.Types as A
@@ -173,20 +173,34 @@ testRead gen =
     proxy :: Gen a -> Proxy a
     proxy = const Proxy
 
--- | Generate binary identity tests
+-- | Generate binary identity tests: a value that 'serialize' writes must
+-- come back from 'deserialize' as itself, with the strict and the lazy
+-- runners of both. The bytes must hold the value and nothing else, the rule
+-- of 'decodeSerial': a codec that writes a byte that it does not read
+-- fails, since that byte would shift every value after it in a stream.
 testSerial ::
   (Eq a, Show a, T.Typeable a, Serial a) => Gen a -> Spec
 testSerial gen =
   prop ("Binary encoding/decoding identity for " <> name) $
     forAll gen $ \x -> do
-      (runGetL deserialize . runPutL . serialize) x `shouldBe` x
-      (runGetL deserialize . fromStrict . runPutS . serialize) x `shouldBe` x
-      (runGetS deserialize . runPutS . serialize) x `shouldBe` Right x
-      (runGetS deserialize . toStrict . runPutL . serialize) x `shouldBe` Right x
+      (runGetL deserializeAll . runPutL . serialize) x `shouldBe` x
+      (runGetL deserializeAll . fromStrict . runPutS . serialize) x `shouldBe` x
+      (runGetS deserializeAll . runPutS . serialize) x `shouldBe` Right x
+      (runGetS deserializeAll . toStrict . runPutL . serialize) x `shouldBe` Right x
   where
     name = show $ T.typeRep $ proxy gen
     proxy :: Gen a -> Proxy a
     proxy = const Proxy
+
+-- | Read a value and require that the input ends there. It is the reader of
+-- 'decodeSerial' for any monad, so that 'testSerial' can run it with the
+-- strict and the lazy runner.
+deserializeAll :: (MonadGet m, Serial a) => m a
+deserializeAll = do
+  value <- deserialize
+  done <- isEmpty
+  unless done $ fail "testSerial: bytes left over after the value"
+  return value
 
 -- | Generate Marshal identity tests
 testMarshal ::
