@@ -115,6 +115,16 @@ Bitcoin testnet3 is deprecated and still works.
   and two draws from the system must differ. The documentation of
   `generateSharesFrom` says in which order it asks its source for bytes: the
   order of the reference implementation.
+- **The identity helpers of `Haskoin.Util.Arbitrary` have tests of their
+  own.** `testIdentity` and the five tests that it makes, for `Read` and
+  `Show`, JSON, `MarshalJSON`, `Serial` and `Marshal`, are what about 200
+  tests of this library and the tests of the programs built on it rest on.
+  Nothing checked that they can fail: with the comparison taken out of any
+  of the five, every test passed. The new spec runs them on a type whose
+  five forms are right, which must pass, and on types with one fault each,
+  which must fail in the example of that fault and in no other. It also
+  states the names of the groups and of the examples, which `--match`
+  patterns rely on.
 - **The `Network` record holds the aserti3-2d anchor block where it is known**,
   in the new field `asertAnchorBlock`: block 661647 on Bitcoin Cash mainnet
   and block 16844 on testnet4, the constants of Bitcoin Cash Node.
@@ -209,6 +219,18 @@ Bitcoin testnet3 is deprecated and still works.
   `HASKOIN_COMPLEX_PSBT` to a path to keep its PSBTs in a file of the same
   form. Without Podman these tests are pending, and say why. The test suite
   depends on podman-test, which must be on Hackage before this release.
+- **`testSerial` fails for a codec that writes bytes that it does not
+  read.** The identity test of a `SerialBox` read the value back and did not
+  look at what was left of the bytes, so a `Serial` instance that writes a
+  byte more than it reads passed. Such bytes are refused by `decodeSerial`,
+  and they shift every value that follows in a stream. The test of a
+  `MarshalBox` already failed for them. No type of this library was at
+  fault. A program that uses `testIdentity` or `testSerial` on its own
+  types may see a test fail that passed: the codec of that type then writes
+  more than it reads.
+- The test suite needs hspec 2.10 or later, for the functions that run the
+  identity helpers apart from the suite. The library still builds with
+  hspec 2.7.1.
 
 ### Fixed
 

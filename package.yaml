@@ -68,7 +68,9 @@ tests:
     dependencies:
       - base64
       - haskoin-core
-      - hspec >= 2.7.1
+      # 2.10.0 has evalSpec and runSpecForest, which the spec of the identity
+      # helpers runs them with
+      - hspec >= 2.10.0
       - HUnit >= 1.6.0.0
       - QuickCheck >= 2.13.2
       - lens-aeson >= 1.1
