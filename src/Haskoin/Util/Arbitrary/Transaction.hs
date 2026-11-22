@@ -227,7 +227,8 @@ arbitraryTaprootSigInput net = do
   val <- getTestCoin <$> arbitrarySatoshi net
   op <- arbitraryOutPoint
   sh <- elements [sigHashDefault, sigHashAll, sigHashNone, setAnyoneCanPay sigHashAll, setAnyoneCanPay sigHashNone]
-  let out = taprootScriptOutput (TaprootOutput p.point Nothing)
+  -- An output without a script tree: no tree is refused
+  let out = either error id (taprootScriptOutput (TaprootOutput p.point Nothing))
   return (SigInput out val op sh Nothing, k)
 
 -- | Arbitrary 'SigInput' with a 'ScriptOutput' of type 'PayPK'.

@@ -697,7 +697,7 @@ let key = derivePath ("m/86'/0'/0'/0/0" :: DerivPath) master
     -- Nothing means that the output has no script tree.
     output = taprootScriptOutput (TaprootOutput internalKey Nothing)
 
-print (addrToText btc =<< outputAddress btc output)
+print (addrToText btc =<< outputAddress btc =<< eitherToMaybe output)
 -- => Just "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr"
 
 -- Spend a made-up coin of 100,000 satoshi by its key path.
@@ -722,6 +722,9 @@ check, `<key> OP_CHECKSIG`. For other scripts, build the witness yourself with
 
 `checkTapTree` tells whether every leaf of a tree can be spent. A leaf can be at
 most 128 levels deep, and its version must be one that BIP 341 allows.
+`taprootOutputKey` and `taprootScriptOutput` give `Left` for a tree that it
+refuses, so that no address is made for a leaf that can never be spent. Bitcoin
+Core builds no output for a tree deeper than 128 either.
 
 ### SLIP-39 secret sharing
 

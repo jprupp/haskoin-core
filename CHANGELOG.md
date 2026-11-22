@@ -298,6 +298,25 @@ Bitcoin testnet3 is deprecated and still works.
   others, which the PSBT signer of Bitcoin Core signs too, so `signPsbt`
   is unchanged.
 
+- **`taprootOutputKey` and `taprootScriptOutput` give no output for a
+  script tree that `checkTapTree` refuses.** Their results are now
+  `Either String PubKey` and `Either String ScriptOutput`. They gave an
+  output for any tree, and left the check to the caller. A tree with a leaf
+  deeper than 128, or with a leaf version that a control block cannot
+  carry, then got an address like any other, and coins that could only be
+  spent by that leaf were lost. Bitcoin Core builds no output for a tree
+  deeper than 128 (`TaprootBuilder`).
+  - `Left` carries the reason of `checkTapTree`, such as `checkTapTree: a
+    node is deeper than 128`.
+  - `taprootOutputKey` no longer calls `error` when the tweak gives no key,
+    about one case in 2^128: that is `Left` too.
+  - To recognise a coin that someone else paid to such a tree, or to spend
+    it by its key path, pass the root in place of the tree: `MASTCommitment
+    (mastCommitment tree)`. A commitment is not looked into.
+  - A caller without a script tree changes one line. For a BIP 86 address:
+    `outputAddress net =<< eitherToMaybe (taprootScriptOutput
+    (TaprootOutput key Nothing))`.
+
 - **Bitcoin Cash testnet3 is `bchTest3`.** The value `bchTest` is now
   `bchTest3`, and its `name`, the one `netByName` reads, is `bchtest3` instead
   of `bchtest`, in the way of `bchTest4` and `bchtest4`. With a number on both
