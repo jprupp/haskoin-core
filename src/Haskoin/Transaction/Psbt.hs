@@ -2123,7 +2123,7 @@ heldTaprootKeys signer program m =
     ofInternalKey = do
       internal <- either (const Nothing) id (inputTapInternalKey m)
       commitment <- fmap MASTCommitment <$> eitherToMaybe (inputTapMerkleRoot m)
-      guard (exportXOnlyPubKey (taprootOutputKey (TaprootOutput internal commitment)) == program)
+      guard ((exportXOnlyPubKey <$> taprootOutputKey (TaprootOutput internal commitment)) == Right program)
       secret <- held internal
       taprootOutputSecKey secret commitment
     -- The record of each x-only key, by the 32 bytes of the key. An input

@@ -745,7 +745,7 @@ sizeSpec =
           h = fromJust (addressHash160 (pubKeyAddr p))
           op = OutPoint (fromJust (hexToTxHash genesisTxId)) 0
           witnessTx = buildTx [op] [(PayWitnessPKHash h, 90000)]
-          taprootOutput = taprootScriptOutput (TaprootOutput p.point Nothing)
+          taprootOutput = either error id (taprootScriptOutput (TaprootOutput p.point Nothing))
           taprootTx = buildTx [op] [(taprootOutput, 90000)]
       signedWitness <- either fail return (signTx btc witnessTx [SigInput (PayWitnessPKHash h) 100000 op sigHashAll Nothing] [k.key])
       signedTaproot <- either fail return (signTx btc taprootTx [SigInput taprootOutput 100000 op sigHashDefault Nothing] [k.key])
@@ -1035,7 +1035,7 @@ mergeSpec =
           sig = TxSignature (signHash k.key (sha256 ("digest" :: ByteString))) sigHashAll
           h = fromJust (addressHash160 (pubKeyAddr p))
       buildInput btc tx 1 (PayPKHash h) 1 Nothing sig p `shouldBe` Left "buildInput: Invalid input index"
-      buildInput btc tx 0 (taprootScriptOutput (TaprootOutput p.point Nothing)) 1 Nothing sig p `shouldBe` Left "buildInput: a Taproot input has no input script"
+      buildInput btc tx 0 (either error id (taprootScriptOutput (TaprootOutput p.point Nothing))) 1 Nothing sig p `shouldBe` Left "buildInput: a Taproot input has no input script"
       buildInput btc tx 0 (PayPKHash h) 1 (Just (PayPK p)) sig p `shouldBe` Left "buildInput: Invalid output/redeem script combination"
       buildInput btc tx 0 (PayPKHash h) 1 Nothing sig p `shouldBe` Right (RegularInput (SpendPKHash sig p))
 
@@ -1055,7 +1055,7 @@ taprootSigningSpec =
     let op = OutPoint (fromJust (hexToTxHash genesisTxId)) 0
     it "signs with the internal key of an output without script tree, as BIP 86 spends, and with the output key itself" $ do
       let (k, p) = fixedKey 1
-      let so = taprootScriptOutput (TaprootOutput p.point Nothing)
+      let so = either error id (taprootScriptOutput (TaprootOutput p.point Nothing))
           tx = buildTx [op] [(so, 90000)]
           sigi = SigInput so 100000 op sigHashDefault Nothing
           tweaked = fromJust (taprootOutputSecKey k.key Nothing)
@@ -1075,7 +1075,7 @@ taprootSigningSpec =
 
     it "needs the output every input spends, and refuses signInput" $ do
       let (k, p) = fixedKey 1
-      let so = taprootScriptOutput (TaprootOutput p.point Nothing)
+      let so = either error id (taprootScriptOutput (TaprootOutput p.point Nothing))
           other = OutPoint (fromJust (hexToTxHash genesisTxId)) 1
           tx = buildTx [op, other] [(so, 90000)]
           sigi = SigInput so 100000 op sigHashDefault Nothing
@@ -1274,7 +1274,7 @@ consensusSpec =
       verifyStdInput btc (withInputScript signed 0 (B.pack [0x4c, 0x16] <> program)) [(coin, 100000, op)] 0 `shouldBe` False
 
     it "refuses a Taproot input that has an input script" $ do
-      let so = taprootScriptOutput (TaprootOutput p1.point Nothing)
+      let so = either error id (taprootScriptOutput (TaprootOutput p1.point Nothing))
       signed <- either fail return (signTx btc tx [SigInput so 100000 op sigHashDefault Nothing] [k1.key])
       verifyStdInput btc signed [(so, 100000, op)] 0 `shouldBe` True
       verifyStdInput btc (withInputScript signed 0 "\x51") [(so, 100000, op)] 0 `shouldBe` False
@@ -1462,7 +1462,7 @@ signerSpec =
       verifyStdInput btc signed [(PayWitnessPKHash hu, 100000, op)] 0 `shouldBe` True
 
     it "refuses to sign a SegWit or a Taproot coin on a network without SegWit" $ do
-      let so = taprootScriptOutput (TaprootOutput p1.point Nothing)
+      let so = either error id (taprootScriptOutput (TaprootOutput p1.point Nothing))
       signWith bch (PayWitnessPKHash h1) sigHashAll `shouldBe` Left "makeSignature: this network has no SegWit"
       signTx bch tx [SigInput so 100000 op sigHashDefault Nothing] [k1.key] `shouldBe` Left "signTx: this network has no Taproot"
 
@@ -1473,7 +1473,7 @@ signerSpec =
       signInput btc tx 0 (SigInput (PayPKHash h1) 100000 op sigHashAll Nothing) k1 `shouldSatisfy` isRight
 
     it "signTaprootInput refuses a key that is not the key of the output, and an output that is not Taproot" $ do
-      let so = taprootScriptOutput (TaprootOutput p1.point Nothing)
+      let so = either error id (taprootScriptOutput (TaprootOutput p1.point Nothing))
           spent = [TxOut 100000 (encodeSerial so)]
           tweaked = fromJust (taprootOutputSecKey k1.key Nothing)
       -- The internal key is not the key of the output: its tweak is

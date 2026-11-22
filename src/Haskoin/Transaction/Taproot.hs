@@ -274,10 +274,8 @@ leafHashBytes leafVersion scriptBytes =
 --   version in the bits @0xfe@ of its first byte, so an odd version cannot
 --   be expressed, and @0x50@ would read as an annex.
 --
--- 'taprootOutputKey' and 'taprootScriptOutput' do not make this check: the
--- output of such a tree is well defined, and its other leaves and its key
--- path can still be spent. Check a tree with this function before you give
--- out its address, since a leaf it refuses can never be spent.
+-- 'taprootOutputKey' and 'taprootScriptOutput' make this check, and give
+-- no output for a tree that it refuses.
 checkTapTree :: MAST -> Either String ()
 checkTapTree = go (0 :: Int)
   where
@@ -353,27 +351,34 @@ data TaprootOutput = TaprootOutput
 -- hash of the internal key and the root of the tree. The parity of its y
 -- coordinate is the one a control block of a script path spend carries.
 --
--- Two things this function does not do:
+-- It gives no key, with the reason, in two cases:
 --
--- * It does not look at the shape of the tree. A leaf deeper than 128, or
---   with a leaf version a control block cannot carry, gets an output like
---   any other and can never be spent. Run 'checkTapTree' on the tree first.
--- * It calls 'error' when the tweak is not below the order of the curve or
---   gives the point at infinity, which BIP 341 defines as a failure. The
---   tweak is a SHA256 output, so this happens for about one tree in 2^128,
---   and no input is known that reaches it. 'taprootOutputSecKey' returns
---   'Nothing' in the same case.
+-- * 'checkTapTree' refuses the tree: a leaf is deeper than 128, or has a
+--   leaf version that a control block cannot carry. Coins paid to that leaf
+--   alone could never be spent, so no output is made for it. Bitcoin Core
+--   builds no output for a tree deeper than 128 either (@TaprootBuilder@).
+--   The functions gave an output for any tree up to version 2.0.1, and left
+--   the check to the caller.
+-- * The tweak is not below the order of the curve or gives the point at
+--   infinity, which BIP 341 defines as a failure. The tweak is a SHA256
+--   output, so this happens for about one tree in 2^128, and no input is
+--   known that reaches it. 'taprootOutputSecKey' returns 'Nothing' in the
+--   same case.
+--
+-- To recognise a coin that someone else paid to such a tree, or to spend
+-- it by its key path, give the root of the tree in place of the tree:
+-- @MASTCommitment (mastCommitment tree)@. A commitment is not looked into.
 --
 -- @since 0.21.0
-taprootOutputKey :: TaprootOutput -> PubKey
-taprootOutputKey TaprootOutput {..} =
-  fromMaybe keyFail $
+taprootOutputKey :: TaprootOutput -> Either String PubKey
+taprootOutputKey TaprootOutput {..} = do
+  mapM_ checkTapTree mast
+  maybe (Left "taprootOutputKey: the tweak gives no key") Right $
     tweak commitment >>= tweakAddXOnlyPubKey internalKey
   where
     commitment =
       taprootCommitment internalKey $
         mastCommitment <$> mast
-    keyFail = error "haskoin-core taprootOutputKey: key derivation failed"
 
 -- | The secret key that signs a key path spend of the output of the secret
 -- key given: the secret key, negated when its public key has an odd y
@@ -396,17 +401,12 @@ taprootCommitment internalKey merkleRoot =
     $ initTaggedHash "TapTweak"
 
 -- | The output script of a Taproot output: witness version 1 and the
--- x-only output key of 'taprootOutputKey', whose two caveats apply here
--- too. Check a script tree with 'checkTapTree' before you pay to it.
+-- x-only output key of 'taprootOutputKey', which gives no key for a tree
+-- that 'checkTapTree' refuses.
 --
 -- @since 0.21.0
-taprootScriptOutput :: TaprootOutput -> ScriptOutput
-taprootScriptOutput =
-  PayWitness 0x01
-    . runPutS
-    . serialize
-    . XOnlyPubKey
-    . taprootOutputKey
+taprootScriptOutput :: TaprootOutput -> Either String ScriptOutput
+taprootScriptOutput = fmap (PayWitness 0x01 . runPutS . serialize . XOnlyPubKey) . taprootOutputKey
 
 {- Witnesses -}
 

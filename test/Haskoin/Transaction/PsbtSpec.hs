@@ -1686,7 +1686,7 @@ taprootSpec vectors =
       outputTapInternalKey (outputAt 0 psbt) `shouldBe` Right (Just (xOnly "50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0"))
       let tree = fromJust (tapTreeFromLeaves leaves)
           output = TaprootOutput (xOnly "50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0") (Just tree)
-      encodeSerial (taprootScriptOutput output) `shouldBe` (head psbt.unsignedTx.outputs).script
+      encodeSerial (forceRight (taprootScriptOutput output)) `shouldBe` (head psbt.unsignedTx.outputs).script
       Map.lookup (Key 0x06 "") (insertOutputTapTree leaves Map.empty) `shouldBe` Map.lookup (Key 0x06 "") (outputAt 0 psbt)
       records <- expectRight (outputTapDerivations (outputAt 0 psbt))
       length records `shouldBe` 4
@@ -1736,7 +1736,7 @@ taprootSpec vectors =
 
     prop "a Taproot coin without script tree, signed by its key path with the internal key and finalized, verifies" $
       forAll arbitraryKeyPair $ \(secret, public) ->
-        let coinScript = taprootScriptOutput (TaprootOutput public.point Nothing)
+        let coinScript = forceRight (taprootScriptOutput (TaprootOutput public.point Nothing))
             (psbt, coins) = spendingPsbt coinScript
             fields = insertInputTapInternalKey public.point . insertInputTapDerivation public.point (TapDerivation [] (Derivation (fingerprintOf "d90c6a4f") "m/86'/0'/0'/0/0"))
             withFields = withInputs (fields <$> psbt.inputs) psbt
@@ -1748,12 +1748,12 @@ taprootSpec vectors =
         let leaf = Script [opPushData (exportXOnlyPubKey public.point), OP_CHECKSIG]
             tree = MASTBranch (MASTLeaf 0xc0 leaf) (MASTLeaf 0xc0 (Script [OP_RETURN]))
             output = TaprootOutput internal.point (Just tree)
-            coinScript = taprootScriptOutput output
+            coinScript = forceRight (taprootScriptOutput output)
             (psbt, coins) = spendingPsbt coinScript
             proof = case getMerkleProofs tree of
               (_, _, p) : _ -> p
               [] -> []
-            control = encodeControlBlock (0xc0 + keyParity (taprootOutputKey output)) internal.point proof
+            control = encodeControlBlock (0xc0 + keyParity (forceRight (taprootOutputKey output))) internal.point proof
             fields =
               insertInputTapInternalKey internal.point
                 . insertInputTapMerkleRoot (mastCommitment tree)
@@ -1764,7 +1764,7 @@ taprootSpec vectors =
 
     it "the signer refuses a sighash type a Taproot signature may not use" $ do
       let public = derivePublicKey (PrivateKey secretOne True)
-          (psbt, _) = spendingPsbt (taprootScriptOutput (TaprootOutput public.point Nothing))
+          (psbt, _) = spendingPsbt (forceRight (taprootScriptOutput (TaprootOutput public.point Nothing)))
           fields = insertSigHashType (setForkIdFlag sigHashAll) . insertInputTapInternalKey public.point
       signPsbt btc (keySigner secretOne) (onInputs fields psbt)
         `shouldBe` Left "Input 0: the sighash type 65 is not one a Taproot signature may use"
@@ -1776,7 +1776,7 @@ taprootSpec vectors =
     it "the signer adds no key path signature when the internal key of the input does not give the coin" $ do
       let public = derivePublicKey (PrivateKey secretOne True)
           other = compressedKey secretTwo
-          (psbt, _) = spendingPsbt (taprootScriptOutput (TaprootOutput public.point Nothing))
+          (psbt, _) = spendingPsbt (forceRight (taprootScriptOutput (TaprootOutput public.point Nothing)))
           naming = withInputs [insertInputTapInternalKey other.point (inputAt 0 psbt)] psbt
       -- The signer of key 2 holds the internal key that the input names
       signPsbt btc (keySigner secretTwo) naming `shouldBe` Right naming
@@ -2265,7 +2265,8 @@ signerScopeSpec =
     -- digest of a Taproot signature commits to the coin of every input.
     -- Bitcoin Core signs input 0 and leaves input 1, and refuses nothing.
     it "signs its legacy coin, and leaves its Taproot coin unsigned while another input has no coin yet" $ do
-      let both = spendingTwo ownScript (encodeSerial (taprootScriptOutput (TaprootOutput public.point Nothing)))
+      let keyPathCoin = forceRight (taprootScriptOutput (TaprootOutput public.point Nothing))
+          both = spendingTwo ownScript (encodeSerial keyPathCoin)
           third = TxIn (OutPoint "e567952fb6cc33857f392efa3a46c995a28f69cca4bb1b37e0204dab1ec7a389" 0) "" 0xfffffffe
           tx = Tx 2 (both.unsignedTx.inputs <> [third]) both.unsignedTx.outputs [] 0
           ownTaproot = insertInputTapInternalKey public.point (inputAt 1 both)
@@ -2410,7 +2411,7 @@ inputByInputSpec =
     -- input that asks for no type is signed with SIGHASH_DEFAULT, the type
     -- 0, whose signatures have 64 bytes.
     it "the signer refuses a PSBT whose Taproot input has a signature of 65 bytes and asks for no sighash type" $ do
-      let (keyOnly, _) = spendingPsbt (taprootScriptOutput (TaprootOutput public.point Nothing))
+      let (keyOnly, _) = spendingPsbt (forceRight (taprootScriptOutput (TaprootOutput public.point Nothing)))
           asking = onInputs (insertSigHashType sigHashAll . insertInputTapInternalKey public.point) keyOnly
       signed <- expectRight (signPsbt btc signer asking)
       signPsbt btc signer (onInputs deleteSigHashType signed)
@@ -2420,7 +2421,7 @@ inputByInputSpec =
     -- added a signature". Both coins are of key 2, one signed with ECDSA and
     -- one a Taproot coin, and the signer holds key 1.
     it "the signer leaves the flags of a version 2 PSBT as they are when it adds no signature" $ do
-      let theirKeyPath = taprootScriptOutput (TaprootOutput publicTwo.point Nothing)
+      let theirKeyPath = forceRight (taprootScriptOutput (TaprootOutput publicTwo.point Nothing))
       forM_ [theirPkh, theirKeyPath] $ \coin -> do
         let open = withFlags (Modifiable True True False 0) (withVersion Version2 (fst (spendingPsbt coin)))
         signPsbt btc signer open `shouldBe` Right open
@@ -2503,8 +2504,9 @@ inputByInputSpec =
           where
             tree = MASTBranch (MASTLeaf 0xc0 leaf) (MASTLeaf 0xc0 other)
             output = TaprootOutput internal (Just tree)
-            control = encodeControlBlock (0xc0 + keyParity (taprootOutputKey output)) internal [leafHash 0xc0 other]
-            (psbt, _) = spendingPsbt (taprootScriptOutput output)
+            parity = keyParity (forceRight (taprootOutputKey output))
+            control = encodeControlBlock (0xc0 + parity) internal [leafHash 0xc0 other]
+            (psbt, _) = spendingPsbt (forceRight (taprootScriptOutput output))
             fields =
               insertInputTapInternalKey internal
                 . insertInputTapMerkleRoot (mastCommitment tree)
@@ -2640,7 +2642,7 @@ inputByInputSpec =
     -- another coin, of the type SIGHASH_ALL. Bitcoin Core does not look at
     -- it, and finalizes the input.
     it "the finalizer leaves alone a Taproot input that asks for the sighash type 0 and has a partial signature" $ do
-      let (keyOnly, _) = spendingPsbt (taprootScriptOutput (TaprootOutput public.point Nothing))
+      let (keyOnly, _) = spendingPsbt (forceRight (taprootScriptOutput (TaprootOutput public.point Nothing)))
           asking = onInputs (insertSigHashType sigHashDefault . insertInputTapInternalKey public.point) keyOnly
       signed <- expectRight (signPsbt btc signer asking)
       -- Without the partial signature, the witness is the key path signature
@@ -2676,11 +2678,11 @@ inputByInputSpec =
         deepOutput = TaprootOutput publicThree.point (Just twoDepths)
         controlOf script =
           head
-            [ encodeControlBlock (0xc0 + keyParity (taprootOutputKey deepOutput)) publicThree.point proof
+            [ encodeControlBlock (0xc0 + keyParity (forceRight (taprootOutputKey deepOutput))) publicThree.point proof
             | (_, s, proof) <- getMerkleProofs twoDepths,
               s == script
             ]
-        (deep, _) = spendingPsbt (taprootScriptOutput deepOutput)
+        (deep, _) = spendingPsbt (forceRight (taprootScriptOutput deepOutput))
         bothLeaves =
           insertTapLeafScript (TapLeafScript (controlOf near) near 0xc0)
             . insertTapLeafScript (TapLeafScript (controlOf far) far 0xc0)
@@ -2750,11 +2752,11 @@ inputByInputSpec =
             output = TaprootOutput publicThree.point (Just tree)
             control script =
               head
-                [ encodeControlBlock (0xc0 + keyParity (taprootOutputKey output)) publicThree.point proof
+                [ encodeControlBlock (0xc0 + keyParity (forceRight (taprootOutputKey output))) publicThree.point proof
                 | (_, s, proof) <- getMerkleProofs tree,
                   s == script
                 ]
-            (psbt, _) = spendingPsbt (taprootScriptOutput output)
+            (psbt, _) = spendingPsbt (forceRight (taprootScriptOutput output))
             entries =
               insertTapLeafScript (TapLeafScript (control noKeyLeaf) noKeyLeaf 0xc0)
                 . insertTapLeafScript (TapLeafScript (control far) far 0xc0)
@@ -2793,8 +2795,9 @@ taprootChecksSpec vectors =
         leaf = Script [opPushData (exportXOnlyPubKey leafKey), OP_CHECKSIG]
         tree = MASTBranch (MASTLeaf 0xc0 leaf) (MASTLeaf 0xc0 (Script [OP_RETURN]))
         output = TaprootOutput internal (Just tree)
-        control = encodeControlBlock (0xc0 + keyParity (taprootOutputKey output)) internal [leafHash 0xc0 (Script [OP_RETURN])]
-        (withTree, _) = spendingPsbt (taprootScriptOutput output)
+        parity = keyParity (forceRight (taprootOutputKey output))
+        control = encodeControlBlock (0xc0 + parity) internal [leafHash 0xc0 (Script [OP_RETURN])]
+        (withTree, _) = spendingPsbt (forceRight (taprootScriptOutput output))
         treeFields = insertInputTapInternalKey internal . insertInputTapMerkleRoot (mastCommitment tree) . insertTapLeafScript (TapLeafScript control leaf 0xc0)
         derivation = Derivation (fingerprintOf "d90c6a4f") "m/86'/0'/0'/0/0"
         -- A signer that finds its keys by derivation record only, as one
@@ -2834,14 +2837,14 @@ taprootChecksSpec vectors =
     -- Bitcoin Core takes SIGHASH_DEFAULT for a Taproot input that names no
     -- sighash type, and then wants every signature to be 64 bytes
     it "the finalizer leaves alone an input that names no sighash type and has a SIGHASH_ALL key path signature" $ do
-      let (keyOnly, _) = spendingPsbt (taprootScriptOutput (TaprootOutput internal Nothing))
+      let (keyOnly, _) = spendingPsbt (forceRight (taprootScriptOutput (TaprootOutput internal Nothing)))
           asking = onInputs (insertSigHashType sigHashAll . insertInputTapInternalKey internal) keyOnly
       signed <- expectRight (signPsbt btc (keySigner secretOne) asking)
       (fmap (fmap (.hash)) . tapKeySig . inputAt 0) signed `shouldBe` Right (Just sigHashAll)
       leftAlone (onInputs deleteSigHashType signed)
 
     it "the signer refuses a Taproot coin that asks for a sighash type the signer does not accept" $ do
-      let (keyOnly, _) = spendingPsbt (taprootScriptOutput (TaprootOutput internal Nothing))
+      let (keyOnly, _) = spendingPsbt (forceRight (taprootScriptOutput (TaprootOutput internal Nothing)))
       signPsbt btc (keySigner secretOne) (onInputs (insertSigHashType sigHashSingle . insertInputTapInternalKey internal) keyOnly)
         `shouldBe` Left "Input 0: the sighash type 3 is not one the signer accepts"
 
@@ -2901,9 +2904,9 @@ taprootChecksSpec vectors =
           where
             treeOf = MASTBranch (MASTLeaf inTree leaf) (MASTLeaf 0xc0 (Script [OP_RETURN]))
             outputOf = TaprootOutput internal (Just treeOf)
-            parity = keyParity (taprootOutputKey outputOf)
+            parity = keyParity (forceRight (taprootOutputKey outputOf))
             controlOf = encodeControlBlock (inControl + parity) internal [leafHash 0xc0 (Script [OP_RETURN])]
-            (psbt, _) = spendingPsbt (taprootScriptOutput outputOf)
+            (psbt, _) = spendingPsbt (forceRight (taprootScriptOutput outputOf))
             fields =
               insertInputTapInternalKey internal
                 . insertInputTapMerkleRoot (mastCommitment treeOf)
@@ -2947,13 +2950,13 @@ taprootChecksSpec vectors =
     -- refuses such a PSBT, and a program can still build one. The signer
     -- holds the internal key, and cannot tell which coin the key gives.
     it "the signer adds no key path signature to its own coin when the Merkle root of the input is not a hash" $ do
-      let (keyOnly, _) = spendingPsbt (taprootScriptOutput (TaprootOutput internal Nothing))
+      let (keyOnly, _) = spendingPsbt (forceRight (taprootScriptOutput (TaprootOutput internal Nothing)))
           shortRoot = Map.insert (Key 0x18 "") (B.replicate 31 0x00)
           named = onInputs (shortRoot . insertInputTapInternalKey internal) keyOnly
       signPsbt btc (keySigner secretOne) named `shouldBe` Right named
 
     it "signs a Taproot coin of a PSBT of version 2 by its key path, and the PSBT stays of version 2" $ do
-      let (keyOnly, coins) = spendingPsbt (taprootScriptOutput (TaprootOutput internal Nothing))
+      let (keyOnly, coins) = spendingPsbt (forceRight (taprootScriptOutput (TaprootOutput internal Nothing)))
           version2 = withVersion Version2 (onInputs (insertInputTapInternalKey internal) keyOnly)
       final <- expectRight (finalizePsbt btc =<< signPsbt btc (keySigner secretOne) version2)
       final.version `shouldBe` Version2
@@ -2978,8 +2981,8 @@ spendingTree kept depth scripts = onInputs (\m -> foldr insertTapLeafScript m le
     internal = derivePubKey secretOne
     tree = fromJust (tapTreeFromLeaves [TapLeaf depth 0xc0 script | script <- scripts])
     output = TaprootOutput internal (Just tree)
-    control = encodeControlBlock (0xc0 + keyParity (taprootOutputKey output)) internal
-    (psbt, _) = spendingPsbt (taprootScriptOutput output)
+    control = encodeControlBlock (0xc0 + keyParity (forceRight (taprootOutputKey output))) internal
+    (psbt, _) = spendingPsbt (forceRight (taprootScriptOutput output))
     leaves =
       [ TapLeafScript (control proof) script version
       | (version, script, proof) <- getMerkleProofs tree,
@@ -3099,7 +3102,7 @@ coinsSpec =
     -- A Taproot signature commits to the amount of every coin (BIP 341)
     it "a signer signs a Taproot coin known from its witness output only" $ do
       let internal = derivePubKey secretOne
-          (taproot, _) = spendingPsbt (taprootScriptOutput (TaprootOutput internal Nothing))
+          (taproot, _) = spendingPsbt (forceRight (taprootScriptOutput (TaprootOutput internal Nothing)))
       (fmap isJust . tapKeySig . inputAt 0 =<< signPsbt btc signer (withInputs (insertInputTapInternalKey internal <$> taproot.inputs) taproot)) `shouldBe` Right True
 
 {- The fields of version 2, read one by one -}

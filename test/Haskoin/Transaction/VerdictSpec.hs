@@ -821,7 +821,7 @@ spec = do
                   <> concat [[opPushData (xOnly s), OP_CHECKSIGADD] | s <- drop 1 keys]
                   <> [asked, OP_NUMEQUAL]
             tree = TaprootOutput {internalKey = internal, mast = Just (MASTLeaf tapscriptLeafVersion leaf)}
-            out = TxOut value (encodeSerial (taprootScriptOutput tree))
+            out = TxOut value (encodeSerial (either error id (taprootScriptOutput tree)))
             leafOf = Just (leafHash tapscriptLeafVersion leaf, 0xffffffff)
             digest = either error id (taprootSigHash unsigned [out] 0 sigHashDefault Nothing leafOf)
             sign s = (signSchnorr s (hashToMsg digest)).get
@@ -832,7 +832,7 @@ spec = do
                         { annex = Nothing,
                           stack = items,
                           script = leaf,
-                          extIsOdd = odd (keyParity (taprootOutputKey tree)),
+                          extIsOdd = odd (keyParity (either error id (taprootOutputKey tree))),
                           leafVersion = tapscriptLeafVersion,
                           internalKey = internal,
                           control = [],
@@ -846,8 +846,9 @@ spec = do
         -- keys, signed by the first key: an empty item for each other key,
         -- then the signature. The answers of 'verifyStdInput' and of
         -- 'judgeInputs' for it.
-        oneOf count = (verifyStdInput btc spend [(taprootScriptOutput bigTree, value, coin)] 0, verdictOf)
+        oneOf count = (verifyStdInput btc spend [(bigCoin, value, coin)] 0, verdictOf)
           where
+            bigCoin = either error id (taprootScriptOutput bigTree)
             keys = map secret [1001 .. 1000 + count]
             (bigTree, bigOut, bigSign, bigSpend) = multisigCoin OP_1 keys
             spend = bigSpend (replicate (fromIntegral count - 1) "" <> [bigSign (secret 1001)])
@@ -856,7 +857,7 @@ spec = do
       verdict (spendWith [sign (secrets !! 2), "", sign (head secrets)]) `shouldBe` [InputVerified]
       verdict (spendWith ["", sign (secrets !! 1), sign (head secrets)]) `shouldBe` [InputVerified]
       let lastTwo = spendWith [sign (secrets !! 2), sign (secrets !! 1), ""]
-      verifyStdInput btc lastTwo [(taprootScriptOutput tree, value, coin)] 0 `shouldBe` True
+      verifyStdInput btc lastTwo [(either error id (taprootScriptOutput tree), value, coin)] 0 `shouldBe` True
     it "does not verify one signature, three, a signature of another key, or one of other outputs" $ do
       verdict (spendWith ["", "", sign (head secrets)]) `shouldBe` [InputUndecided]
       verdict (spendWith [sign (secrets !! 2), sign (secrets !! 1), sign (head secrets)]) `shouldBe` [InputUndecided]
