@@ -156,6 +156,15 @@ List the lines of 120 columns or more with
 `git ls-files '*.hs' '*.yaml' '*.cabal' '*.md' | xargs grep -n '.\{120,\}'`,
 and fix every one that is code and is not one of the exceptions above.
 
+## General
+
+All features in haskoin-core must follow the Bitcoin specification or BIPs
+exactly. If the specification or the BIPs are imprecise, then haskoin-core
+must follow the bitcoin-core implementation exactly. You can ask the user
+about a feature choice only if you have a strong case that there is a real
+problem in the bitcoin-core implementation. In case of doubt, we want to
+implement the most conservative and safest option for the end users.
+
 ## Feature notes
 
 Read a file before any work on what its line names.
@@ -164,6 +173,8 @@ Read a file before any work on what its line names.
   or on Bitcoin Cash (EDA, DAA, aserti3-2d), and the tests of those rules.
 - `claude-notes/protocol.md`: the protocol machines of the reference nodes
   (`Haskoin.Network.Protocol`), their report in `doc/protocol/` and citations.
+- `claude-notes/psbt.md`: the PSBT signer and finalizer (`signPsbt`,
+  `finalizePsbt`), what they refuse and when, their cost and their tests.
 - `claude-notes/slip39.md`: SLIP-39 shares (`Haskoin.Crypto.Keys.Slip39`),
   their tests and where the literal values of the tests come from.
 - `claude-notes/test-helpers.md`: `testIdentity` and the five identity tests

@@ -654,6 +654,13 @@ Some other useful functions:
 - `xPrvSigner` signs from an extended private key, following the derivation
   records of the inputs.
 - `combinePsbt` merges the copies that different signers return.
+- `signPsbt` signs the inputs that the signer holds a key for and leaves the
+  others as they are, so each party can sign before the others have added their
+  coins and scripts. An input that asks for a sighash type the signer does not
+  accept still stops it, as BIP 174 asks. A Taproot signature commits to the coin
+  of every input, so `signPsbt` leaves every Taproot input unsigned until each
+  input has its coin, as Bitcoin Core does. `finalizePsbt` leaves an input that
+  is not ready as it is.
 - `insertWitnessUtxo` attaches a coin without the transaction that paid it. That
   is enough for a Taproot coin. For a SegWit version 0 coin, the amount is then a
   claim that the signature does not cover for the other inputs, and a signer can

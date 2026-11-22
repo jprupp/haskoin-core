@@ -234,6 +234,63 @@ Bitcoin testnet3 is deprecated and still works.
 
 ### Fixed
 
+- **A Taproot input of another party no longer makes `signPsbt` or
+  `finalizePsbt` refuse the whole PSBT.** The parties of a transaction fill
+  a PSBT in turn, and each signs its own inputs. `signPsbt` already left
+  alone an input for which the signer holds no key, except a Taproot one:
+  it applied every check of a Taproot input before it knew whether the
+  signer held a key of it. A wallet could then not sign its own input:
+  - **While another input had no coin yet.** A Taproot signature commits to
+    the coin of every input, and the signer refused the PSBT as soon as one
+    Taproot input had its coin, with "a Taproot signature needs the output
+    every input spends". It now signs the inputs that it can, and leaves
+    every Taproot input as it is until every input has its coin, as Bitcoin
+    Core does. That holds for a Taproot coin of the signer too: a caller
+    that relied on the refusal now finds that input without a signature.
+  - **Beside a Taproot input with an entry that the library cannot use:** an
+    internal key, a derivation record or a control block whose 32 bytes are
+    no point of the curve, or a leaf script that is not a list of opcodes.
+    `decodePsbt` reads these, as Bitcoin Core 32.1 does, and Bitcoin Core
+    signs the other inputs. The signer now passes over such an entry: it
+    gives no key, and the other entries of the input are still signed.
+  - **Beside a Taproot input whose internal key does not give its coin.**
+    The signer refused the PSBT with "the internal key and the Merkle root
+    do not give the output key of the coin". It now adds no key path
+    signature to such an input, and signs the others. Bitcoin Core does not
+    refuse such a PSBT either. When it holds the internal key it adds a
+    signature that verifies for no coin, which the signer does not copy:
+    BIP 174 has a signer make only valid signatures.
+
+  No BIP says what a signer does with a Taproot input that it cannot sign,
+  so `signPsbt` now does as Bitcoin Core does: only the sighash type refuses
+  the PSBT.
+
+  `finalizePsbt` had the same fault. It now passes over a leaf script that
+  it cannot read, and a script path signature under 32 bytes that are no
+  point. It leaves as it is a Taproot coin whose output key is no point,
+  which it refused with "the coin is not a Taproot output". It also leaves
+  as it is a signed Taproot input while another input has no coin, as
+  Bitcoin Core does: the signature cannot be verified yet, so the input is
+  not ready. It used to refuse the PSBT with "a Taproot signature needs the
+  output every input spends", and a caller that relied on that refusal now
+  finds the input not final. A sighash type that the signer does not accept
+  still refuses the whole PSBT, on any input that has its coin, as BIP 174
+  asks of a signer and as Bitcoin Core does.
+- **`signPsbt` and `finalizePsbt` want one leaf version in a leaf script
+  entry of a Taproot input.** The entry names the leaf version twice: in its
+  value, and in its control block, which is the one a spend takes. When the
+  two differed, the signer signed the leaf of the value, and the finalizer
+  wrote a witness that spends the leaf of the control block: a leaf that
+  nodes do not relay, or one that is not in the tree. BIP 371 defines the
+  entry with one leaf version, and Bitcoin Core writes the same version in
+  both places. The signer and the finalizer now pass over an entry that
+  names two, as they pass over an entry that they cannot read: the signer
+  adds no signature for it, and the finalizer leaves the input not final,
+  as Bitcoin Core does.
+- **Two rules of the Taproot signer of `signPsbt` have a test now.** No
+  code changed for them: a key that a `Signer` gives is used only when it is
+  the key that was asked for, on the key path and on a leaf, and a leaf
+  that is a single key check is signed only when its leaf version is 0xc0.
 - **`signPsbt` and `finalizePsbt` no longer take time that grows with the
   square of the size of a Taproot input.** One input of a PSBT can hold any
   number of leaf scripts, derivation records and script path signatures.

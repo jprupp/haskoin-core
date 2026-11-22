@@ -1614,17 +1614,28 @@ taprootSpec vectors =
             withFields = withInputs (fields <$> psbt.inputs) psbt
          in signsAndVerifies btc [secret] (withFields, coins) === Right True
 
-    it "the signer refuses a sighash type a Taproot signature may not use, and an internal key that does not give the coin" $ do
-      let secret = PrivateKey secretOne True
-          public = derivePublicKey secret
+    it "the signer refuses a sighash type a Taproot signature may not use" $ do
+      let public = derivePublicKey (PrivateKey secretOne True)
+          (psbt, _) = spendingPsbt (taprootScriptOutput (TaprootOutput public.point Nothing))
+          fields = insertSigHashType (setForkIdFlag sigHashAll) . insertInputTapInternalKey public.point
+      signPsbt btc (keySigner secretOne) (onInputs fields psbt)
+        `shouldBe` Left "Input 0: the sighash type 65 is not one a Taproot signature may use"
+
+    -- The coin is the one of key 1, and the input names key 2 as its
+    -- internal key. A signature of key 2 would verify for no coin, and BIP
+    -- 174 has a signer make only valid signatures. Bitcoin Core does not
+    -- refuse such a PSBT, so the input is left as it is.
+    it "the signer adds no key path signature when the internal key of the input does not give the coin" $ do
+      let public = derivePublicKey (PrivateKey secretOne True)
           other = compressedKey secretTwo
-          coinScript = taprootScriptOutput (TaprootOutput public.point Nothing)
-          (psbt, _) = spendingPsbt coinScript
-          withFields m = withInputs [m (insertInputTapInternalKey public.point (inputAt 0 psbt))] psbt
-      signPsbt btc (keySigner secret.key) (withFields (insertSigHashType (setForkIdFlag sigHashAll))) `shouldBe` Left "Input 0: the sighash type 65 is not one a Taproot signature may use"
-      signPsbt btc (keySigner secret.key) (withInputs [insertInputTapInternalKey other.point (inputAt 0 psbt)] psbt) `shouldBe` Left "Input 0: the internal key and the Merkle root do not give the output key of the coin"
+          (psbt, _) = spendingPsbt (taprootScriptOutput (TaprootOutput public.point Nothing))
+          naming = withInputs [insertInputTapInternalKey other.point (inputAt 0 psbt)] psbt
+      -- The signer of key 2 holds the internal key that the input names
+      signPsbt btc (keySigner secretTwo) naming `shouldBe` Right naming
+      -- The signer of key 1 holds no key that the input names
+      signPsbt btc (keySigner secretOne) naming `shouldBe` Right naming
       -- Without the internal key, the input is left alone
-      signPsbt btc (keySigner secret.key) psbt `shouldBe` Right psbt
+      signPsbt btc (keySigner secretOne) psbt `shouldBe` Right psbt
 
 {- Properties -}
 
@@ -1955,6 +1966,90 @@ signerScopeSpec =
           witnessOnly = withInputs [inputAt 0 both, insertWitnessUtxo (TxOut 200000000 otherScript) Map.empty] both
       (signatureCounts =<< signPsbt btc signer witnessOnly) `shouldBe` Right [1, 0]
 
+    -- Input 0 is a coin of key 1. Input 1 is a Taproot coin of someone
+    -- else, the coin of the BIP 371 vectors, with one entry that Bitcoin
+    -- Core 32.1 reads and that nobody can sign or finalize with. Core signs
+    -- input 0 of each. 79be…1798 is the x coordinate of the point G, and 5
+    -- is the x coordinate of no point of the curve: 5³ + 7 = 132 is not a
+    -- square modulo the field prime.
+    let theirTaproot = hexBytes "51205a2c2cf5b52cf31f83ad2e8da63ff03183ecd8f609c7510ae8a48e03910a0757"
+        pointG = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+        noPoint = "0000000000000000000000000000000000000000000000000000000000000005"
+        -- A leaf hash that is the hash of no leaf, and 64 bytes that are
+        -- the signature of nobody
+        noLeaf = T.replicate 32 "cd"
+        noSignature = T.replicate 64 "ab"
+        -- What the entry is, the type of its key, the data of its key and
+        -- its value
+        unusable =
+          [ ("a leaf script that is cut short", 0x15, "c0" <> pointG, "4cc0"),
+            ("a leaf script whose control block names a key that is no point", 0x15, "c0" <> noPoint, "51c0"),
+            ("an internal key that is no point", 0x17, "", noPoint),
+            ("a derivation record of a key that is no point", 0x16, noPoint, "0000000000"),
+            ("a script path signature of a key that is no point", 0x14, noPoint <> noLeaf, noSignature)
+          ]
+
+    forM_ unusable $ \(what, keyType, keyData, value) ->
+      it ("signs and finalizes its own input, and leaves alone a Taproot coin of another party that has " <> what) $ do
+        let both = spendingTwo ownScript theirTaproot
+            entry = Map.insert (Key keyType (hexBytes keyData)) (hexBytes value)
+            withEntry = withInputs [inputAt 0 both, entry (inputAt 1 both)] both
+        decodePsbt (encodePsbt withEntry) `shouldBe` Right withEntry
+        signed <- expectRight (signPsbt btc signer withEntry)
+        signatureCounts signed `shouldBe` Right [1, 0]
+        inputAt 1 signed `shouldBe` inputAt 1 withEntry
+        final <- expectRight (finalizePsbt btc signed)
+        map (isJust . finalScriptSig) final.inputs `shouldBe` [True, False]
+        inputAt 1 final `shouldBe` inputAt 1 withEntry
+
+    -- A key path signature of a BIP 371 vector, for another transaction
+    let vectorSignature =
+          hexBytes
+            "bb53ec917bad9d906af1ba87181c48b86ace5aae2b53605a725ca74625631476\
+            \fc6f5baedaf4f2ee0f477f36f58f3970d5b8273b7e497b97af2e3f125c97af34"
+
+    -- Nobody can spend such a coin, with a signature or without one
+    it "signs and finalizes its own input, and leaves alone a Taproot coin whose output key is no point" $ do
+      let both = spendingTwo ownScript (hexBytes ("5120" <> noPoint))
+          claimed = withInputs [inputAt 0 both, Map.insert (Key 0x13 "") vectorSignature (inputAt 1 both)] both
+      forM_ [both, claimed] $ \psbt' -> do
+        signed <- expectRight (signPsbt btc signer psbt')
+        signatureCounts signed `shouldBe` Right [1, 0]
+        final <- expectRight (finalizePsbt btc signed)
+        map (isJust . finalScriptSig) final.inputs `shouldBe` [True, False]
+        inputAt 1 final `shouldBe` inputAt 1 psbt'
+
+    -- The parties of a PSBT add their coins in turn. Input 0 is a Taproot
+    -- coin of someone else, and the owner of input 1 has not added its coin
+    -- yet. A Taproot signature needs the coin of every input, and this
+    -- signer has none to make.
+    it "leaves alone a Taproot coin of another party while another input has no coin yet" $ do
+      let both = spendingTwo theirTaproot ownScript
+          waiting = withInputs [inputAt 0 both, Map.empty] both
+      signPsbt btc signer waiting `shouldBe` Right waiting
+
+    -- Input 0 is a legacy coin of the signer and input 1 a Taproot coin of
+    -- the signer. The owner of input 2 has not added its coin yet, and the
+    -- digest of a Taproot signature commits to the coin of every input.
+    -- Bitcoin Core signs input 0 and leaves input 1, and refuses nothing.
+    it "signs its legacy coin, and leaves its Taproot coin unsigned while another input has no coin yet" $ do
+      let both = spendingTwo ownScript (encodeSerial (taprootScriptOutput (TaprootOutput public.point Nothing)))
+          third = TxIn (OutPoint "e567952fb6cc33857f392efa3a46c995a28f69cca4bb1b37e0204dab1ec7a389" 0) "" 0xfffffffe
+          tx = Tx 2 (both.unsignedTx.inputs <> [third]) both.unsignedTx.outputs [] 0
+          ownTaproot = insertInputTapInternalKey public.point (inputAt 1 both)
+          waiting = Psbt Version0 tx Map.empty [inputAt 0 both, ownTaproot, Map.empty] both.outputs
+      signed <- expectRight (signPsbt btc signer waiting)
+      signatureCounts signed `shouldBe` Right [1, 0, 0]
+      drop 1 signed.inputs `shouldBe` [ownTaproot, Map.empty]
+
+    -- Without the coin of input 1 nobody can tell whether a Taproot
+    -- signature verifies, so the input is not ready, and Bitcoin Core
+    -- leaves it too.
+    it "the finalizer leaves alone a signed Taproot coin while another input has no coin yet" $ do
+      let both = spendingTwo theirTaproot ownScript
+          waiting = withInputs [Map.insert (Key 0x13 "") vectorSignature (inputAt 0 both), Map.empty] both
+      finalizePsbt btc waiting `shouldBe` Right waiting
+
     -- Bitcoin Core refuses the whole PSBT too: a sighash type that the
     -- caller did not ask for is a mismatch on any input that has its coin
     it "refuses a PSBT in which another party's input asks for a sighash type the signer does not accept" $ do
@@ -2133,6 +2228,78 @@ taprootChecksSpec vectors =
           fields = insertInputTapInternalKey internal . insertInputTapMerkleRoot (mastCommitment tree) . insertTapLeafScript (TapLeafScript stray leaf 0xc0)
       signed <- expectRight (signPsbt btc (keySigner secretTwo) (onInputs fields withTree))
       (fmap length . tapScriptSigs . inputAt 0) signed `shouldBe` Right 0
+
+    -- A signer written by a caller may answer with a key that is not the
+    -- one asked for. Its signature would verify for no key of the coin.
+    -- The input names key 1 as its internal key and key 2 in its leaf, each
+    -- with a record, and the signer answers with key 3.
+    it "signs neither the key path nor a leaf with a key the signer gives when it is not the key asked for" $ do
+      let records =
+            insertInputTapDerivation internal (TapDerivation [] derivation)
+              . insertInputTapDerivation leafKey (TapDerivation [leafHash 0xc0 leaf] derivation)
+          unsigned = onInputs (records . treeFields) withTree
+          wrongByRecord = (keySigner secretThree) {keyOfRecord = \_ _ -> Just secretThree, keyOfHash = const Nothing}
+          keyThree = PrivateKey secretThree True
+          wrongByHash = (keySigner secretThree) {keyOfRecord = \_ _ -> Nothing, keyOfHash = const (Just keyThree)}
+      signPsbt btc wrongByRecord unsigned `shouldBe` Right unsigned
+      signPsbt btc wrongByHash unsigned `shouldBe` Right unsigned
+
+    -- A coin whose tree holds the leaf of key 2 with the first leaf
+    -- version, and an input that has this leaf under a control block with
+    -- the second leaf version, and names the third in its value. The record
+    -- of key 2 lists the hash of the leaf with the third.
+    let leafOfVersion inTree inControl named = onInputs fields psbt
+          where
+            treeOf = MASTBranch (MASTLeaf inTree leaf) (MASTLeaf 0xc0 (Script [OP_RETURN]))
+            outputOf = TaprootOutput internal (Just treeOf)
+            parity = keyParity (taprootOutputKey outputOf)
+            controlOf = encodeControlBlock (inControl + parity) internal [leafHash 0xc0 (Script [OP_RETURN])]
+            (psbt, _) = spendingPsbt (taprootScriptOutput outputOf)
+            fields =
+              insertInputTapInternalKey internal
+                . insertInputTapMerkleRoot (mastCommitment treeOf)
+                . insertTapLeafScript (TapLeafScript controlOf leaf named)
+                . insertInputTapDerivation leafKey (TapDerivation [leafHash named leaf] derivation)
+        scriptSignatures = fmap length . tapScriptSigs . inputAt 0
+        -- A valid signature of key 2 for the leaf of version 0xc0, on the
+        -- input of the PSBT
+        signedLeaf unsigned = onInputs (insertTapScriptSig leafKey hashOfLeaf signature) unsigned
+          where
+            coin = fromJust (either (const Nothing) id (witnessUtxo (inputAt 0 unsigned)))
+            hashOfLeaf = leafHash 0xc0 leaf
+            ofLeaf = Just (hashOfLeaf, 0xffffffff)
+            digest = forceRight (taprootSigHash unsigned.unsignedTx [coin] 0 sigHashDefault Nothing ofLeaf)
+            signature = forceRight (taprootSignature (signSchnorr secretTwo (hashToMsg digest)) sigHashDefault)
+
+    -- BIP 342 gives <key> OP_CHECKSIG its meaning, and the signature its
+    -- digest, for the leaf version 0xc0 only
+    it "signs a leaf of the leaf version 0xc0, and not the same leaf of the leaf version 0xc2" $ do
+      (scriptSignatures =<< signPsbt btc (byRecord secretTwo) (leafOfVersion 0xc0 0xc0 0xc0)) `shouldBe` Right 1
+      (scriptSignatures =<< signPsbt btc (byRecord secretTwo) (leafOfVersion 0xc2 0xc2 0xc2)) `shouldBe` Right 0
+
+    -- A spend takes the leaf version of the control block. In the first
+    -- case the leaf of the entry, of version 0xc0, is not in the tree. In
+    -- the second it is, and its control block spends a leaf that is not.
+    it "signs no leaf whose leaf version is not the one of its control block" $ do
+      (scriptSignatures =<< signPsbt btc (byRecord secretTwo) (leafOfVersion 0xc2 0xc2 0xc0)) `shouldBe` Right 0
+      (scriptSignatures =<< signPsbt btc (byRecord secretTwo) (leafOfVersion 0xc0 0xc2 0xc0)) `shouldBe` Right 0
+
+    -- The witness would spend the leaf of version 0xc2: one that nodes do
+    -- not relay in the first case, and that is not in the tree in the
+    -- second. Bitcoin Core does not finalize such an input, and refuses
+    -- nothing.
+    it "the finalizer leaves alone a signed leaf whose leaf version is not the one of its control block" $ do
+      forM_ [leafOfVersion 0xc2 0xc2 0xc0, leafOfVersion 0xc0 0xc2 0xc0] $ \entry ->
+        finalizePsbt btc (signedLeaf entry) `shouldBe` Right (signedLeaf entry)
+
+    -- A Merkle root is a hash of 32 bytes, and this one has 31. The decoder
+    -- refuses such a PSBT, and a program can still build one. The signer
+    -- holds the internal key, and cannot tell which coin the key gives.
+    it "the signer adds no key path signature to its own coin when the Merkle root of the input is not a hash" $ do
+      let (keyOnly, _) = spendingPsbt (taprootScriptOutput (TaprootOutput internal Nothing))
+          shortRoot = Map.insert (Key 0x18 "") (B.replicate 31 0x00)
+          named = onInputs (shortRoot . insertInputTapInternalKey internal) keyOnly
+      signPsbt btc (keySigner secretOne) named `shouldBe` Right named
 
     it "signs a Taproot coin of a PSBT of version 2 by its key path, and the PSBT stays of version 2" $ do
       let (keyOnly, coins) = spendingPsbt (taprootScriptOutput (TaprootOutput internal Nothing))
