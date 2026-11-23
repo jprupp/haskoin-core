@@ -793,8 +793,8 @@ Bitcoin Cash applies to every block three rules of encoding that Bitcoin
 applies only to the transactions it relays: the S of an ECDSA signature is low,
 a key is compressed or uncompressed, and an input script pushes each item by
 the shortest push that holds it. A node of Bitcoin Cash drops the peer that
-sends it a transaction that breaks one. `verifyStdTx` and `judgeInputs` apply
-the three rules on the Bitcoin Cash networks. `decodeStrictSig`,
+sends it a transaction that breaks one. `verifyStdTx` and `judgeInputs` verify
+no input that breaks one, on any network. `decodeStrictSig`,
 `verifyHashSig` and `importPubKey` follow the consensus of Bitcoin, and take
 more than a block of Bitcoin Cash can hold: to verify a signature of Bitcoin
 Cash with them, check `isCanonicalHalfOrder` too, and read the key with
@@ -1070,14 +1070,15 @@ test network before you use it on mainnet.
   unsigned. To accept others, set `acceptedSigHashes` on the `Signer`.
 - **Verification.** `verifyStdTx` checks the signatures of the standard templates,
   and that outputs do not exceed inputs. It is not a script interpreter and does
-  not apply every consensus rule. Its answer is not what a node does with the
-  transaction. It answers `True` only for inputs in a form that a block can
-  hold, and nodes do not relay some of them: a SegWit input signed with an
-  uncompressed key, a Taproot input with an annex and, on Bitcoin, an input
-  script with a push longer than its data needs. It answers `False` for a script
-  that it does not read, and also for some inputs that a block may hold, such
-  as a signature with a high S or a key in the hybrid form on Bitcoin.
-  `judgeInputs` tells a forged input from one that is left to a node.
+  not apply every consensus rule. It answers `True` only for inputs in a form
+  that Bitcoin Core relays. It answers `False` for a script that it does not
+  read, and for an input that a block may hold and that nodes do not relay: a
+  signature with a high S, a key in the hybrid form, an input script with a
+  push longer than its data needs, a SegWit input signed with an uncompressed
+  key and a Taproot input with an annex. `True` is still no promise that nodes
+  relay the transaction: the rules on the whole transaction, such as its size,
+  its fee and its outputs, are not looked at. `judgeInputs` tells a forged
+  input from one that is left to a node.
 - **Untrusted text.** The cost of `decodeBase58` and `decodeBase58Check` grows
   with the square of the input length. Limit the length of input you pass to them
   directly. The address and key decoders of the library already do.

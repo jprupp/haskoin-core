@@ -163,7 +163,9 @@ exactly. If the specification or the BIPs are imprecise, then haskoin-core
 must follow the bitcoin-core implementation exactly. You can ask the user
 about a feature choice only if you have a strong case that there is a real
 problem in the bitcoin-core implementation. In case of doubt, we want to
-implement the most conservative and safest option for the end users.
+implement the most conservative and safest option for the end users. We
+generally want to follow the bitcoin-core relay rules rather than block
+validation rules.
 
 ## Feature notes
 
