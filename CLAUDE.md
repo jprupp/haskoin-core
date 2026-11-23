@@ -235,6 +235,9 @@ Read a file before any work on what its line names.
   `PsbtSpec.hs`. Size it so that the old code, timed first, is 4 times over.
   Time both with the built `spec` and nothing else running: a mutant run
   beside it made a test of 1 s miss a limit of 3 s.
+- A test of the order of a type that defines `compare` only: with this GHC
+  `a < b` calls `compare b a`. State the order with `compare` in both
+  directions, as `sortsBefore` of `ExtendedSpec.hs`.
 - `--match "/Module/name/"` runs nothing unless `name` is the whole name of
   a `describe`. Without slashes, a part of the name is enough.
 - The seconds that `haskell-dev test` prints change with the load of the

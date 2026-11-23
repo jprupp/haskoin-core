@@ -39,6 +39,11 @@ import Test.Hspec.QuickCheck
 import Test.QuickCheck hiding ((.&.))
 import Text.Read (readMaybe)
 
+-- | The order of two paths by their index lists: the shorter list first, then
+-- index by index, where a hardened index has its high bit set.
+shortlex :: DerivPath -> DerivPath -> Ordering
+shortlex = comparing (\p -> (length (pathToList p), pathToList p))
+
 identityTests :: IdentityTests
 identityTests =
   def
@@ -396,6 +401,11 @@ spec = do
       let p = (Deriv :| 44 :| 0 :: HardPath) ++/ (Deriv :/ 0 :/ 5 :: SoftPath)
       p `shouldBe` (Deriv :| 44 :| 0 :/ 0 :/ 5)
       pathToStr p `shouldBe` "/44'/0'/0/5"
+    it "++/ keeps the hardened steps of the path on its right" $
+      (Deriv :/ 1 :: SoftPath) ++/ (Deriv :| 2 :/ 3 :| 4 :: DerivPath) `shouldBe` (Deriv :/ 1 :| 2 :/ 3 :| 4)
+    it "++/ with a path of no step gives the other path" $ do
+      (Deriv :: SoftPath) ++/ (Deriv :| 2 :/ 3 :: DerivPath) `shouldBe` (Deriv :| 2 :/ 3)
+      (Deriv :| 2 :/ 3 :: DerivPath) ++/ (Deriv :: HardPath) `shouldBe` (Deriv :| 2 :/ 3)
     it "toHard keeps a path only when every segment is hardened" $ do
       toHard (Deriv :| 1 :| 2 :: DerivPath) `shouldBe` Just (Deriv :| 1 :| 2)
       toHard (Deriv :| 1 :/ 2 :: DerivPath) `shouldBe` Nothing
@@ -422,14 +432,82 @@ spec = do
     it "binary soft path refuses a hardened segment" $
       (runGetS deserialize (hex "0000000000000001" <> hex "80000001") :: Either String SoftPath)
         `shouldSatisfy` isLeft
-    it "sorts a shorter path first, then by segment, soft before hard" $ do
-      (Deriv :/ 9 :: DerivPath) < (Deriv :/ 0 :/ 1) `shouldBe` True
-      (Deriv :/ 5 :: DerivPath) < (Deriv :| 0) `shouldBe` True
-      (Deriv :/ 1 :: DerivPath) < (Deriv :/ 2) `shouldBe` True
+  describe "Path order" $ do
+    -- Each pair is given smaller first, and compared in both directions:
+    -- `<` alone calls `compare` with its arguments exchanged.
+    let sortsBefore :: DerivPath -> DerivPath -> Expectation
+        sortsBefore a b = (compare a b, compare b a) `shouldBe` (LT, GT)
+    it "a path sorts equal to itself" $ do
+      compare (Deriv :: DerivPath) Deriv `shouldBe` EQ
+      compare (Deriv :| 1 :/ 2 :: DerivPath) (Deriv :| 1 :/ 2) `shouldBe` EQ
+    it "a shorter path sorts first, whatever the steps" $ do
+      Deriv `sortsBefore` (Deriv :/ 0)
+      (Deriv :/ 9) `sortsBefore` (Deriv :/ 0 :/ 1)
+      (Deriv :| 9) `sortsBefore` (Deriv :/ 0 :/ 1)
+      (Deriv :| 9 :| 9) `sortsBefore` (Deriv :/ 0 :/ 0 :/ 0)
+    it "a soft step sorts before a hardened step, whatever the indices" $ do
+      (Deriv :/ 5) `sortsBefore` (Deriv :| 0)
+      (Deriv :| 7 :/ 5) `sortsBefore` (Deriv :| 7 :| 0)
+      (Deriv :/ 7 :/ 5) `sortsBefore` (Deriv :/ 7 :| 0)
+    it "two soft steps sort by their index" $ do
+      (Deriv :/ 1) `sortsBefore` (Deriv :/ 2)
+      (Deriv :| 7 :/ 1) `sortsBefore` (Deriv :| 7 :/ 2)
+    it "two hardened steps sort by their index" $ do
+      (Deriv :| 1) `sortsBefore` (Deriv :| 2)
+      (Deriv :/ 7 :| 1) `sortsBefore` (Deriv :/ 7 :| 2)
+    it "the first step that differs decides, whatever the steps after it" $ do
+      (Deriv :/ 1 :/ 9) `sortsBefore` (Deriv :/ 2 :/ 0)
+      (Deriv :| 1 :| 9) `sortsBefore` (Deriv :| 2 :| 0)
+      (Deriv :/ 9 :| 9) `sortsBefore` (Deriv :| 0 :/ 0)
+      (Deriv :/ 1 :| 9 :/ 4) `sortsBefore` (Deriv :/ 2 :/ 0 :/ 4)
+      (Deriv :/ 3 :/ 1 :/ 9 :| 9) `sortsBefore` (Deriv :/ 3 :/ 2 :/ 0 :/ 0)
+    it "a path of hardened steps only, or of soft steps only, sorts the same way" $ do
+      compare (Deriv :| 9 :: HardPath) (Deriv :| 0 :| 1) `shouldBe` LT
+      compare (Deriv :| 1 :| 9 :: HardPath) (Deriv :| 2 :| 0) `shouldBe` LT
+      compare (Deriv :| 2 :| 0 :: HardPath) (Deriv :| 1 :| 9) `shouldBe` GT
+      compare (Deriv :/ 9 :: SoftPath) (Deriv :/ 0 :/ 1) `shouldBe` LT
+      compare (Deriv :/ 1 :/ 9 :: SoftPath) (Deriv :/ 2 :/ 0) `shouldBe` LT
+      compare (Deriv :/ 2 :/ 0 :: SoftPath) (Deriv :/ 1 :/ 9) `shouldBe` GT
     prop "ordering agrees with the shortlex order of the index lists" $
       forAll arbitraryDerivPath $ \a ->
         forAll arbitraryDerivPath $ \b ->
-          compare a b == comparing (\p -> (length (pathToList p), pathToList p)) a b
+          compare a b == shortlex a b
+    -- Two random paths share no step. These two have the same steps before
+    -- and after the one step that differs.
+    prop "ordering agrees with the shortlex order of the index lists, for two paths that differ in one step" $
+      forAll (listOf arbitraryBip32PathIndex) $ \before ->
+        forAll (listOf arbitraryBip32PathIndex) $ \after ->
+          forAll arbitraryBip32PathIndex $ \stepA ->
+            forAll arbitraryBip32PathIndex $ \stepB ->
+              let a = concatBip32Segments (before <> [stepA] <> after)
+                  b = concatBip32Segments (before <> [stepB] <> after)
+               in compare a b == shortlex a b
+  describe "A path takes time by its length, and not by the square of its length: in under three seconds" $ do
+    let steps = 50000 :: Int
+        -- /1/5'/5/5'/... and /2/5'/5/5'/..., of as many steps
+        tailOf path = foldl (\p _ -> p :/ 5 :| 5) (path :| 5) [2 .. steps `div` 2]
+        low = tailOf (Deriv :/ 1) :: DerivPath
+        high = tailOf (Deriv :/ 2) :: DerivPath
+        -- Whether the work gives the answer, when it does within three
+        -- seconds. The paths are built before the time starts.
+        answers :: (Eq a) => a -> a -> IO (Maybe Bool)
+        answers work answer = do
+          _ <- evaluate (low == high)
+          timeout 3000000 (evaluate (work == answer))
+    -- The seconds are those of the code that walked the path again at each
+    -- step, built without optimisation as the tests are.
+    -- 38 seconds
+    it "pathToStr writes a path of 50000 steps" $
+      answers (pathToStr low) ("/1/5'" <> concat (replicate (steps `div` 2 - 1) "/5/5'")) `shouldReturn` Just True
+    -- 32 seconds
+    it "two paths of 50000 steps that differ at the first step are put in order" $
+      answers (compare low high, compare high low) (LT, GT) `shouldReturn` Just True
+    -- 25 seconds
+    it "++/ puts a path of 50000 steps after another" $
+      answers
+        (pathToList ((Deriv :| 44 :: HardPath) ++/ low))
+        ([0x8000002c, 1, 0x80000005] <> concat (replicate (steps `div` 2 - 1) [5, 0x80000005]))
+        `shouldReturn` Just True
   describe "Path parsing" $ do
     -- BIP32 writes a hardened index with a subscript H, as in m/0H/1. Bitcoin
     -- Core and BIP380 write an apostrophe or a small h.
