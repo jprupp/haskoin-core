@@ -225,7 +225,7 @@ import Haskoin.Network.Data
 import Haskoin.Script.Common
 import Haskoin.Script.SigHash
 import Haskoin.Script.Standard
-import Haskoin.Transaction.Builder.Sign (SigInput (..), makeSigHash, makeSignature)
+import Haskoin.Transaction.Builder.Sign (SigInput (..), makeSigHashWith, makeSignatureWith)
 import Haskoin.Transaction.Common hiding (decodeTx)
 import Haskoin.Transaction.Segwit (isSegwit)
 import Haskoin.Transaction.Taproot
@@ -1921,8 +1921,8 @@ xPrvSigner xprv originM =
 -- * a SegWit version 0 coin of more than 'maxSatoshi', which Bitcoin Core
 --   does not sign;
 -- * a legacy coin asked to sign SIGHASH_SINGLE with no output at its
---   index, as 'makeSignature' explains, and a Taproot coin in that case,
---   for which BIP 341 defines no digest.
+--   index, as 'Haskoin.Transaction.Builder.makeSignature' explains, and a
+--   Taproot coin in that case, for which BIP 341 defines no digest.
 --
 -- An uncompressed key gets no signature on a SegWit version 0 coin, which
 -- no node relays and Bitcoin Core does not sign, and the other keys of
@@ -1974,14 +1974,17 @@ xPrvSigner xprv originM =
 -- each leaf script once, however many entries have that script, and finds
 -- the record of a key by a lookup. So the time it takes grows with the
 -- size of the input, and not with the product of two of those numbers.
--- The hashes that the digests of the Taproot inputs share are computed
--- once for the PSBT ('taprootTxHashes'), so the time for all the inputs
--- grows with the size of the PSBT, and not with the number of its
--- signatures times the size of its transaction.
+-- The hashes that the digests of the inputs share are computed once for
+-- the PSBT ('taprootTxHashes' for the Taproot inputs, 'txSigHashes' for
+-- the SegWit version 0 inputs), so the time for all the inputs grows with
+-- the size of the PSBT, and not with the number of its signatures times
+-- the size of its transaction. A legacy input is the exception: its
+-- digest hashes a copy of the whole transaction, in Bitcoin Core too.
 signPsbt :: Network -> Signer -> Psbt -> Either String Psbt
 signPsbt net signer psbt = do
   coins <- spentOutputs psbt
   let hashes = taprootHashes tx coins
+      sigHashes = txSigHashes tx
   signed <- forM (zip3 [0 ..] (zip tx.inputs psbt.inputs) coins) $ \(i, (input, m), coinM) ->
     first (("Input " <> show i <> ": ") <>) $ case coinM of
       Just (coin, witnessOnly) | not (isFinal m) -> do
@@ -1994,7 +1997,7 @@ signPsbt net signer psbt = do
         return . fromMaybe (m, []) $
           if isTaprootCoin net coin
             then signTaproot signer hashes i m coin sighash
-            else signEcdsa net signer tx i input m coin witnessOnly sighash
+            else signEcdsa net signer sigHashes i input m coin witnessOnly sighash
       _ -> return (m, [])
   return $ foldr afterSignature (Psbt psbt.version tx psbt.globals (fst <$> signed) psbt.outputs) (concatMap snd signed)
   where
@@ -2004,8 +2007,9 @@ signPsbt net signer psbt = do
 -- those the script names, for a coin signed with ECDSA, and the sighash
 -- type used. 'Nothing' when no signature is added: the input is left as it
 -- is, for each reason that 'signPsbt' lists.
-signEcdsa :: Network -> Signer -> Tx -> Int -> TxIn -> PsbtMap -> TxOut -> Bool -> SigHash -> Maybe (PsbtMap, [SigHash])
-signEcdsa net signer tx i input m coin witnessOnly sighash = do
+signEcdsa ::
+  Network -> Signer -> TxSigHashes -> Int -> TxIn -> PsbtMap -> TxOut -> Bool -> SigHash -> Maybe (PsbtMap, [SigHash])
+signEcdsa net signer sigHashes i input m coin witnessOnly sighash = do
   spend <- inputSpend coin m
   let witnessCoin = isSegwit spend.program
   -- BIP 174 has the signer check the scripts that the input provides
@@ -2021,7 +2025,7 @@ signEcdsa net signer tx i input m coin witnessOnly sighash = do
           key.compress || not witnessCoin,
           let public = derivePublicKey key,
           Map.notMember (Key partialSigType (encodeSerial public)) m,
-          Right signature <- [makeSignature net tx i sigInput key]
+          Right signature <- [makeSignatureWith net sigHashes i sigInput key]
         ]
   guard (not (null signatures))
   return (foldr (uncurry insertPartialSignature) m signatures, [sighash])
@@ -2449,7 +2453,7 @@ inputSpend coin m = do
       PayMulSig _ _ -> Just out
       _ -> Nothing
 
--- | What an input is signed against, as 'makeSignature' wants it: the
+-- | What an input is signed against, as 'makeSignatureWith' wants it: the
 -- script of its coin or its witness program, with the redeem script of a
 -- P2SH coin or the witness script of a P2WSH coin
 signingInput :: TxIn -> TxOut -> SigHash -> Spend -> SigInput
@@ -2527,13 +2531,17 @@ signingInput input output sighash spend =
 -- thousands of leaf scripts and of script path signatures, at no cost to
 -- its writer. A leaf finds its signature by a lookup, so the time such an
 -- input takes grows with its size, and not with the product of the two
--- numbers. The hashes that the digests of the Taproot inputs share are
--- computed once for the PSBT ('taprootTxHashes'), so the time for all the
--- inputs grows with the size of the PSBT, and not with its square.
+-- numbers. The hashes that the digests of the inputs share are computed
+-- once for the PSBT ('taprootTxHashes' for the Taproot inputs,
+-- 'txSigHashes' for the SegWit version 0 inputs), so the time for all the
+-- inputs grows with the size of the PSBT, and not with its square. A
+-- legacy input is the exception: its digest hashes a copy of the whole
+-- transaction, in Bitcoin Core too.
 finalizePsbt :: Network -> Psbt -> Either String Psbt
 finalizePsbt net psbt = do
   coins <- spentOutputs psbt
   let hashes = taprootHashes tx coins
+      sigHashes = txSigHashes tx
   inputs <- forM (zip3 [0 ..] (zip tx.inputs psbt.inputs) coins) $ \(i, (input, m), coinM) ->
     first (("Input " <> show i <> ": ") <>) $ case coinM of
       _ | isFinal m -> return (cleared m)
@@ -2546,7 +2554,7 @@ finalizePsbt net psbt = do
               -- type, also for the type 0, which no partial signature has
               | not (signaturesUse sighash m) || (sighashM == Just sigHashDefault && hasPartialSignatures m) = Nothing
               | isTaprootCoin net coin = finalTaproot hashes i m coin
-              | otherwise = finalEcdsa net tx i input m coin witnessOnly sighash
+              | otherwise = finalEcdsa net sigHashes i input m coin witnessOnly sighash
         return (maybe m (finalized m) finals)
   return $ Psbt psbt.version tx psbt.globals inputs psbt.outputs
   where
@@ -2580,15 +2588,16 @@ finalizePsbt net psbt = do
 -- | The final script and witness of an input signed with ECDSA, from the
 -- partial signatures that its script takes, when they suffice and each of
 -- them verifies. 'Nothing' leaves the input as it is.
-finalEcdsa :: Network -> Tx -> Int -> TxIn -> PsbtMap -> TxOut -> Bool -> SigHash -> Maybe (ByteString, WitnessStack)
-finalEcdsa net tx i input m coin witnessOnly sighash = do
+finalEcdsa ::
+  Network -> TxSigHashes -> Int -> TxIn -> PsbtMap -> TxOut -> Bool -> SigHash -> Maybe (ByteString, WitnessStack)
+finalEcdsa net sigHashes i input m coin witnessOnly sighash = do
   spend <- inputSpend coin m
   let witnessCoin = isSegwit spend.program
       sigInput = signingInput input coin sighash spend
   -- Only a witness signature may rely on a witness output
   guard (witnessCoin || not witnessOnly)
   used <- usedSignatures spend.naming (namedSignatures m spend.naming)
-  digest <- eitherToMaybe (makeSigHash net tx i sigInput.script coin.value sighash sigInput.redeem)
+  digest <- eitherToMaybe (makeSigHashWith net sigHashes i sigInput.script coin.value sighash sigInput.redeem)
   -- One digest serves every signature: all are of the sighash type, by
   -- 'signaturesUse'
   forM_ used $ \(public, bytes) -> do

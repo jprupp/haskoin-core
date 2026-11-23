@@ -21,7 +21,9 @@ import Data.Bytes.Serial
 import Data.Default (def)
 import Data.Either
 import Data.List (find, inits, isInfixOf, isPrefixOf)
+import Data.Map.Strict qualified as Map
 import Data.Maybe
+import Data.Set qualified as Set
 import Data.String (fromString)
 import Data.String.Conversions
 import Data.Text (Text)
@@ -35,6 +37,7 @@ import Haskoin.Script
 import Haskoin.Transaction
 import Haskoin.Util
 import Haskoin.Util.Arbitrary
+import System.Timeout (timeout)
 import Test.HUnit
 import Test.Hspec
 import Test.Hspec.QuickCheck
@@ -127,6 +130,7 @@ spec = do
   taprootSigningSpec
   segwitSpec
   genesisSpec
+  sharedHashesCostSpec
 
 -- Txid Vectors
 
@@ -1084,6 +1088,21 @@ taprootSigningSpec =
       signTaprootInput tx [TxOut 100000 (encodeSerial so)] 0 sigHashDefault k.key `shouldBe` Left "taprootSigHash: one spent output per input is required"
       signTaprootInput tx [TxOut 100000 (encodeSerial so), TxOut 1 ""] 0 (setForkIdFlag sigHashAll) k.key `shouldBe` Left "taprootSigHash: invalid hash type 65"
 
+    it "refuses to sign a Taproot input of a transaction whose witness list does not match its inputs" $ do
+      let (k, p) = fixedKey 1
+          so = either error id (taprootScriptOutput (TaprootOutput p.point Nothing))
+          tweaked = fromJust (taprootOutputSecKey k.key Nothing)
+          two = buildTx [op, coinAt 1] [(so, 190000)]
+          sigis = [SigInput so 100000 outpoint sigHashDefault Nothing | outpoint <- [op, coinAt 1]]
+          spent = replicate 2 (TxOut 100000 (encodeSerial so))
+          wrongCount = Left "signTaprootInput: Invalid number of witness stacks"
+      -- One stack for two inputs
+      signTx btc (withWitness two [[]]) sigis [k.key] `shouldBe` wrongCount
+      signTaprootInput (withWitness two [[]]) spent 1 sigHashDefault tweaked `shouldBe` wrongCount
+      -- A stack for each input, or none
+      fmap (map length . (.witness)) (signTx btc (withWitness two [[], []]) sigis [k.key]) `shouldBe` Right [1, 1]
+      fmap (map length . (.witness)) (signTaprootInput two spent 1 sigHashDefault tweaked) `shouldBe` Right [0, 1]
+
 {- SegWit helpers -}
 
 segwitSpec :: Spec
@@ -1152,6 +1171,101 @@ segwitSpec =
       calcWitnessProgram btc (PayPKHash h) (RegularInput (SpendPKHash sig p)) `shouldBe` Left "calcWitnessProgram: Invalid segwit SigInput"
 
 {- Genesis -}
+
+-- | The digest of BIP 143 holds three hashes over every input and every
+-- output of the transaction. It is the digest of a SegWit version 0 input
+-- on Bitcoin and of every input on Bitcoin Cash. When each input computes
+-- the three hashes again, the time grows with the number of inputs times
+-- the size of the transaction. The comment of a test is the time that it
+-- took before the hashes were computed once.
+sharedHashesCostSpec :: Spec
+sharedHashesCostSpec =
+  describe
+    "A transaction of 5000 inputs and 8000 outputs takes time by its size, \
+    \and not by the square of its size: in under three seconds"
+    $ do
+      let (key, public) = fixedKey 1
+          h = keyHash public
+          outpoints = map coinAt [1 .. 5000]
+          -- 5000 coins of 100,000 satoshi pay 8000 outputs of 50,000
+          unsigned = buildTx outpoints (replicate 8000 (PayPKHash h, 50000))
+          sigInputs coin = [SigInput coin 100000 outpoint sigHashAll Nothing | outpoint <- outpoints]
+          coins coin = [(coin, 100000, outpoint) | outpoint <- outpoints]
+          spent coin = replicate 5000 (Just (TxOut 100000 (encodeSerial coin)))
+          signedOn net coin = either error id (signTx net unsigned (sigInputs coin) [key.key])
+          -- On Bitcoin the coins are P2WPKH, on Bitcoin Cash P2PKH
+          witnessCoin = PayWitnessPKHash h
+          cashCoin = PayPKHash h
+          signed = signedOn btc witnessCoin
+          cashSigned = signedOn bch cashCoin
+          -- The PSBT of the transaction: each input has its coin
+          psbt =
+            let empty = psbtOf unsigned
+                input = insertWitnessUtxo (TxOut 100000 (encodeSerial witnessCoin)) Map.empty
+             in Psbt empty.version empty.unsignedTx empty.globals (replicate 5000 input) empty.outputs
+          signer = (keySigner key.key) {requirePreviousTx = False}
+          signedPsbt = either error id (signPsbt btc signer psbt)
+          -- Whether the work gives the answer, when it does within three
+          -- seconds. What the work starts from is built before the time
+          -- starts.
+          answers :: (Eq a) => Int -> a -> a -> IO (Maybe Bool)
+          answers built work answer = do
+            _ <- evaluate built
+            timeout 3000000 (evaluate (work == answer))
+          sizeOf = B.length . encodeSerial
+
+      it "txSigHashForkIdWith gives a digest of its own to each input, from the hashes that they share" $ do
+        let hashes = txSigHashes unsigned
+            digests = do
+              code <- encodeOutput cashCoin
+              mapM (\i -> txSigHashForkIdWith btc hashes code 100000 i sigHashAll) [0 .. 4999]
+        answers (sizeOf unsigned) (Set.size . Set.fromList <$> digests) (Right 5000) `shouldReturn` Just True
+
+      -- 18 seconds
+      it "signTx gives every SegWit input a signature that ends with the hash type 0x01, and the key of 33 bytes" $ do
+        let shape stack = (B.last <$> take 1 stack, B.length <$> drop 1 stack)
+            witnesses = map shape . (.witness) <$> signTx btc unsigned (sigInputs witnessCoin) [key.key]
+        answers (sizeOf unsigned) witnesses (Right (replicate 5000 ([0x01], [33]))) `shouldReturn` Just True
+
+      -- 17 seconds
+      it "verifyStdTx verifies the signed SegWit transaction" $
+        answers (sizeOf signed) (verifyStdTx btc signed (coins witnessCoin)) True `shouldReturn` Just True
+
+      -- 17 seconds
+      it "judgeInputs says of every input of the signed SegWit transaction that it is verified" $
+        answers (sizeOf signed) (judgeInputs btc signed (spent witnessCoin)) (replicate 5000 InputVerified)
+          `shouldReturn` Just True
+
+      -- 17 seconds
+      it "signPsbt adds one partial signature to every SegWit input" $ do
+        let signatureCounts = map (fmap length . partialSignatures) . (.inputs)
+            signedInputs = signatureCounts <$> signPsbt btc signer psbt
+        answers (B.length (encodePsbt psbt)) signedInputs (Right (replicate 5000 (Right 1)))
+          `shouldReturn` Just True
+
+      -- 17 seconds
+      it "finalizePsbt gives every SegWit input a final witness of two items" $ do
+        let witnessSizes = map (fmap (fmap length) . finalScriptWitness) . (.inputs)
+            finalInputs = witnessSizes <$> finalizePsbt btc signedPsbt
+        answers (B.length (encodePsbt signedPsbt)) finalInputs (Right (replicate 5000 (Right (Just 2))))
+          `shouldReturn` Just True
+
+      -- 17 seconds
+      it "signTx signs every input of Bitcoin Cash with the hash type 0x41" $ do
+        let hashType input = case unmarshal bch input.script of
+              Right (RegularInput (SpendPKHash (TxSignature _ sh) _)) -> Just sh
+              _ -> Nothing
+            hashTypes = map hashType . (.inputs) <$> signTx bch unsigned (sigInputs cashCoin) [key.key]
+        answers (sizeOf unsigned) hashTypes (Right (replicate 5000 (Just 0x41))) `shouldReturn` Just True
+
+      -- 17 seconds
+      it "verifyStdTx verifies the signed transaction of Bitcoin Cash" $
+        answers (sizeOf cashSigned) (verifyStdTx bch cashSigned (coins cashCoin)) True `shouldReturn` Just True
+
+      -- 17 seconds
+      it "judgeInputs says of every input of the signed transaction of Bitcoin Cash that it is verified" $
+        answers (sizeOf cashSigned) (judgeInputs bch cashSigned (spent cashCoin)) (replicate 5000 InputVerified)
+          `shouldReturn` Just True
 
 genesisSpec :: Spec
 genesisSpec =
@@ -1487,6 +1601,16 @@ signerSpec =
       signTaprootInput tx spent 0 sigHashDefault tweaked `shouldSatisfy` isRight
       signTaprootInput tx [TxOut 100000 (encodeSerial (PayWitnessPKHash h1))] 0 sigHashDefault tweaked
         `shouldBe` Left "signTaprootInput: the output spent is not a Taproot output"
+
+    it "signs a legacy input without a change of the witness list of the transaction" $ do
+      let two = buildTx [op, coinAt 1] [(PayPKHash h1, 90000)]
+          sigi = SigInput (PayPKHash h1) 100000 (coinAt 1) sigHashAll Nothing
+      -- A transaction without witness stays without
+      fmap (.witness) (signInput btc two 1 sigi k1) `shouldBe` Right []
+      fmap (.witness) (signTx btc two [sigi] [k1.key]) `shouldBe` Right []
+      -- A witness list is kept as it is, and its stacks are not counted
+      fmap (.witness) (signInput btc (withWitness two [[]]) 1 sigi k1) `shouldBe` Right [[]]
+      fmap (.witness) (signTx btc (withWitness two [[]]) [sigi] [k1.key]) `shouldBe` Right [[]]
 
     it "refuses to sign a SegWit input of a transaction whose witness list does not match its inputs" $ do
       let two = buildTx [op, coinAt 1] [(PayPKHash h1, 90000)]
