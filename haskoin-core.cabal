@@ -119,6 +119,7 @@ library
       Haskoin.Transaction.Builder.Sign
       Haskoin.Transaction.Common
       Haskoin.Transaction.Genesis
+      Haskoin.Transaction.Judge
       Haskoin.Transaction.Psbt
       Haskoin.Transaction.Segwit
       Haskoin.Transaction.Taproot
@@ -198,6 +199,7 @@ test-suite spec
       Haskoin.NetworkSpec
       Haskoin.Script.CashTokenSpec
       Haskoin.ScriptSpec
+      Haskoin.Transaction.JudgeSpec
       Haskoin.Transaction.PsbtSpec
       Haskoin.Transaction.TaprootSpec
       Haskoin.Transaction.VerdictSpec

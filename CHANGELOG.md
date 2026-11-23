@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/)
 and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **What can be said of a transaction without a full node.** The new module
+  `Haskoin.Transaction.Judge`, a separate import, has the checks that a
+  program can make of a transaction with no interpreter of scripts, given
+  the outputs that it spends.
+  - `judge` is for a transaction that somebody wants to publish: its coins
+    are there and unspent, it pays no more than it holds, its lock time has
+    passed, it is no larger than nodes relay and has no dust, its input
+    scripts only push data, its version is one that nodes take, its tokens
+    follow the rules of Bitcoin Cash, and no signature of a coin locked to
+    one key is forged. It moved here from haskoin-store, where it has
+    judged what clients post since 1.13, with `Coin`, `Refusal`, `Rules`,
+    `maxTxSize`, `maxStandardSize`, `isDust` and `tokenRules`. `rulesAt`
+    gives the rules at a height and a median time.
+  - `judgeRelayed` is new, for a transaction that a peer sent as one that
+    its node took. It refuses only what no node takes whatever its policy:
+    no inputs or outputs, an output spent twice, a coinbase, more paid than
+    held, tokens of Bitcoin Cash that break their rules, and a forged
+    signature of a coin locked to one key. It leaves out every rule of
+    relay, since the policy of a node is its own, and the lock time, which
+    a node holds to the block that it is at.
+  - Both say whether every signature was verified, or name the first input
+    that could not be judged, which is no refusal: what to do with such a
+    transaction depends on who vouches for it.
+  The names of the module are not exported by `Haskoin`, where `Coin` is
+  already a class.
+
 ## [3.0.0] - 2026-11-20
 
 This release breaks backwards compatibility in three places:

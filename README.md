@@ -587,6 +587,44 @@ print $ do
 Bitcoin shares nothing between the inputs: it hashes a copy of the whole
 transaction for each of them, by its design.
 
+### Judging a transaction without a node
+
+A full node checks a transaction by running the script of every coin that
+it spends. This library runs no scripts. But most of what makes a
+transaction bad needs none, and `Haskoin.Transaction.Judge`, a separate
+import, checks that: a coin that is not there, more paid than is held, a
+lock time that has not passed, tokens of Bitcoin Cash made from nothing,
+and the signature of a coin locked to one key, which is most coins.
+
+It answers two questions:
+
+| Function | The question | What it holds the transaction to |
+| --- | --- | --- |
+| `judge` | Somebody wants to publish it: would a node relay it? | The rules of the chain, and the rules of relay that have not changed in years |
+| `judgeRelayed` | A peer sent it: could a node have taken it? | Only what no node takes, whatever its policy |
+
+Both give a `Refusal` with the reason, or `Nothing` when every signature
+was verified, or the first input that could not be judged:
+
+```haskell
+import Haskoin
+import Haskoin.Transaction.Judge (Refusal, judgeRelayed)
+
+-- The outputs that the inputs of the transaction spend, in order.
+relayed :: Tx -> [TxOut] -> Either Refusal (Maybe Int)
+relayed = judgeRelayed btc
+```
+
+An input that could not be judged is no reason to refuse. It spends a coin
+locked by a script, which is a normal thing to do, and only a full node can
+say whether it is good. What to do with such a transaction depends on who
+vouches for it: from a node of your own it is as good as any, and from a
+stranger it is a claim that nothing here supports.
+
+This is not validation. A transaction that passes may still be one that no
+node takes: a script that fails, a fee too low, a conflict with another
+transaction.
+
 ### Coin selection and fees
 
 Make your coin type an instance of `Coin`. The library then picks coins and
@@ -1088,6 +1126,7 @@ modules you need, or to import it qualified.
 | `Haskoin.Network.Protocol`    | State machines of the reference nodes' protocol (separate import)    |
 | `Haskoin.Script`              | Scripts, standard templates, signature hashes and CashTokens         |
 | `Haskoin.Transaction`         | Transaction types, builder, signing, SegWit, Taproot and PSBT        |
+| `Haskoin.Transaction.Judge`   | What can be said of a transaction without a node (separate import)   |
 | `Haskoin.Util`                | Hexadecimal helpers, `Marshal` and small utilities                   |
 | `Haskoin.Util.Direct`         | Serializers run straight on a buffer (separate import)               |
 | `Haskoin.Util.Arbitrary`      | QuickCheck generators such as `arbitraryTx` (separate import)        |

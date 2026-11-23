@@ -1595,8 +1595,9 @@ musig2Spec vectors =
       \key that is no point of the curve, or of another length"
       $ do
         let nonce = "42" <> T.replicate 66 "ab"
-            refused entry = decodePsbt (tinyPsbt "" entry "")
-              `shouldSatisfy` either (noSignerKey `isSuffixOf`) (const False)
+            refused entry =
+              decodePsbt (tinyPsbt "" entry "")
+                `shouldSatisfy` either (noSignerKey `isSuffixOf`) (const False)
             noSignerKey = "is not a participant key and an aggregate key, with a leaf hash or none"
         refused ("431b" <> notAPoint <> aPoint <> nonce)
         refused ("431b" <> aPoint <> notAPoint <> nonce)

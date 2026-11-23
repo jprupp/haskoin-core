@@ -195,8 +195,8 @@ module Haskoin.Transaction.Psbt
   )
 where
 
-import Control.DeepSeq (NFData)
 import Control.Applicative ((<|>))
+import Control.DeepSeq (NFData)
 import Control.Monad (ap, forM, forM_, guard, mfilter, replicateM, unless, when, zipWithM)
 import Crypto.Hash (Digest, SHA256, digestFromByteString)
 import Crypto.Secp256k1 (PubKey, SecKey, derivePubKey, exportXOnlyPubKey, importPubKey, importXOnlyPubKey, signSchnorr, verifySchnorr)
@@ -211,8 +211,8 @@ import Data.Char (toUpper)
 import Data.List (find, minimumBy, nubBy, stripPrefix)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Ord (comparing)
 import Data.Maybe (catMaybes, fromMaybe, isJust, isNothing, listToMaybe, mapMaybe, maybeToList)
+import Data.Ord (comparing)
 import Data.Serialize qualified as S
 import Data.Word (Word32, Word64, Word8)
 import GHC.Generics (Generic)

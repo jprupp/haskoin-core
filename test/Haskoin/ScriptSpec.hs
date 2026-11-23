@@ -1032,13 +1032,12 @@ digestSpec = do
       `shouldBe` Right "c46030820cbc48402a47cc5b5d3d41648f4e3a711f56b804d601d09dc112a6a4"
     txSigHash btc bip143Tx bip143ScriptCode bip143Value 1 0x101
       `shouldBe` Right "8e4ac2d7b4f759fdd01de9b78a2c46fe361316f397b214c7f0f98f073128aa4c"
-  it "computes the fork id digest of Bitcoin Cash for each of its six hash types"
-    $
+  it "computes the fork id digest of Bitcoin Cash for each of its six hash types" $
     -- The fork id of Bitcoin Cash is 0, so the last four bytes of the
     -- preimage are the hash type byte and three zero bytes
-    forM_ bip143CashDigests
-    $ \(sh, digest) ->
-      (sh, txSigHashForkId bch bip143Tx bip143ScriptCode bip143Value 1 sh) `shouldBe` (sh, Right digest)
+    forM_ bip143CashDigests $
+      \(sh, digest) ->
+        (sh, txSigHashForkId bch bip143Tx bip143ScriptCode bip143Value 1 sh) `shouldBe` (sh, Right digest)
   it "fails for an input index the transaction does not have" $ do
     txSigHash btc bip143Tx bip143ScriptCode bip143Value 2 sigHashAll `shouldSatisfy` isLeft
     txSigHash btc bip143Tx bip143ScriptCode bip143Value (-1) sigHashAll `shouldSatisfy` isLeft
