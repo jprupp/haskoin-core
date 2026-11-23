@@ -184,6 +184,21 @@ spec = do
           signed = head (rights [signTaprootInput (spending "" []) [out] 0 sigHashDefault s | s <- [k, negated]])
           negated = fromJust (secKey . (.get) =<< tweakNegate =<< tweak k.get)
       three btc signed (Just out)
+    -- The digest of a Taproot input commits to the index of the input. The
+    -- transaction spends two coins of one key, and each input then gets
+    -- the signature that the key made for the other.
+    it "says forged of a Taproot signature that the key of the coin made for another input" $ do
+      let out = TxOut value (encodeSerial (PayWitness 1 (B.drop 1 pub)))
+          one = spending "" []
+          two = one {inputs = one.inputs <> [TxIn (OutPoint coin.hash 1) "" maxBound]} :: Tx
+          signInput i s tx = signTaprootInput tx [out, out] i sigHashDefault s
+          signBoth s = signInput 0 s two >>= signInput 1 s
+          -- the secret of the key with an even y, whichever of the two it is
+          signed = head (rights (map signBoth [k, negated]))
+          negated = fromJust (secKey . (.get) =<< tweakNegate =<< tweak k.get)
+          exchanged = signed {witness = reverse signed.witness} :: Tx
+      judgeInputs btc signed [Just out, Just out] `shouldBe` [InputVerified, InputVerified]
+      judgeInputs btc exchanged [Just out, Just out] `shouldBe` [InputForged, InputForged]
     it "leaves a hash type other than all, and a script, to a node" $ do
       let unsigned = spending "" []
           none = ecdsa k 0x02 (txSigHash btc unsigned pkhScript value 0 sigHashNone)

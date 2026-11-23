@@ -65,6 +65,9 @@ module Haskoin.Transaction.Taproot
     taprootSignature,
     isTaprootSigHash,
     taprootSigHash,
+    TaprootTxHashes,
+    taprootTxHashes,
+    taprootSigHashWith,
     encodeTaprootSig,
     decodeTaprootSig,
   )
@@ -97,8 +100,10 @@ import Data.Bytes.Get (MonadGet, getBytes, runGetS)
 import Data.Bytes.Put (MonadPut, putByteString, putWord32le, putWord64le, putWord8, runPutL, runPutS)
 import Data.Bytes.Serial (Serial (..), deserialize, serialize)
 import Data.Foldable (foldl')
-import Data.Maybe (fromMaybe, maybeToList)
+import Data.Maybe (fromMaybe, isJust, maybeToList)
 import Data.Serialize (Serialize (..))
+import Data.Vector (Vector)
+import Data.Vector qualified as V
 import Data.Word (Word32, Word8)
 import GHC.Records (HasField (..))
 import Haskoin.Crypto.Hash
@@ -680,6 +685,13 @@ decodeTaprootSig bytes
 -- output at the index of the input, or when the annex is empty or does not
 -- start with @0x50@: no node takes such an item for an annex, so no node
 -- computes that digest.
+--
+-- This is the function for one digest. It hashes every input and every
+-- output of the transaction, so a caller that needs the digest of each
+-- input, or several digests of one input, takes the hashes once with
+-- 'taprootTxHashes' and each digest with 'taprootSigHashWith'. With this
+-- function the time for all the inputs grows with the square of their
+-- number.
 taprootSigHash ::
   -- | transaction to sign
   Tx ->
@@ -696,30 +708,109 @@ taprootSigHash ::
   Maybe (Digest SHA256, Word32) ->
   Either String Hash256
 taprootSigHash tx spent i sh annexM leafM = do
-  unless (i >= 0 && i < length tx.inputs) $
-    Left "taprootSigHash: input index out of range"
+  -- A wrong index is told before a wrong number of spent outputs
+  unless (i >= 0 && i < length tx.inputs) $ Left indexOutOfRange
+  hashes <- taprootTxHashes tx spent
+  taprootSigHashWith hashes i sh annexM leafM
+
+indexOutOfRange :: String
+indexOutOfRange = "taprootSigHash: input index out of range"
+
+-- | What the Taproot digests of one transaction share: the transaction,
+-- the output that each of its inputs spends, and the five hashes of BIP 341
+-- that are the same for every input (@sha_prevouts@, @sha_amounts@,
+-- @sha_scriptpubkeys@, @sha_sequences@ and @sha_outputs@).
+--
+-- BIP 341 says of these hashes that they "may be cached across signatures
+-- of the same transaction", and Bitcoin Core computes them once for a
+-- transaction (@PrecomputedTransactionData@). They cover every input and
+-- every output, so a digest that computes them again takes time by the
+-- size of the transaction, and the digests of all the inputs by its
+-- square. With a value of this type, a digest takes time by the size of
+-- its own input.
+--
+-- Make it with 'taprootTxHashes', which is the only way, so that it always
+-- holds one spent output for each input. A hash is computed when the first
+-- digest needs it: one with @SIGHASH_ANYONECANPAY@ needs none of the four
+-- over the inputs, and one with @SIGHASH_NONE@ or @SIGHASH_SINGLE@ does not
+-- need the one over the outputs.
+--
+-- The digest does not commit to the input scripts nor to the witnesses, so
+-- the value stays right while the inputs of the transaction are signed.
+-- After any other change of the transaction or of a spent output, make it
+-- again.
+data TaprootTxHashes = TaprootTxHashes
+  { version :: !Word32,
+    locktime :: !Word32,
+    -- | each input with the output it spends
+    inputs :: !(Vector (TxIn, TxOut)),
+    outputs :: !(Vector TxOut),
+    shaPrevouts :: Hash256,
+    shaAmounts :: Hash256,
+    shaScriptPubKeys :: Hash256,
+    shaSequences :: Hash256,
+    shaOutputs :: Hash256
+  }
+
+-- | The hashes that the Taproot digests of a transaction share, from the
+-- transaction and the outputs that its inputs spend, one per input and in
+-- their order. Fails when the spent outputs do not match the inputs.
+taprootTxHashes :: Tx -> [TxOut] -> Either String TaprootTxHashes
+taprootTxHashes tx spent = do
   unless (length spent == length tx.inputs) $
     Left "taprootSigHash: one spent output per input is required"
+  return
+    TaprootTxHashes
+      { version = tx.version,
+        locktime = tx.locktime,
+        inputs = V.fromList (zip tx.inputs spent),
+        outputs = V.fromList tx.outputs,
+        shaPrevouts = hashOf (mapM_ (serialize . (.outpoint)) tx.inputs),
+        shaAmounts = hashOf (mapM_ (putWord64le . (.value)) spent),
+        shaScriptPubKeys = hashOf (mapM_ (putVarIntBytes . (.script)) spent),
+        shaSequences = hashOf (mapM_ (putWord32le . (.sequence)) tx.inputs),
+        shaOutputs = hashOf (mapM_ serialize tx.outputs)
+      }
+  where
+    hashOf = sha256 . runPutS
+
+-- | The digest of 'taprootSigHash' for one input, from the hashes that the
+-- inputs of the transaction share. It gives the digest that
+-- 'taprootSigHash' gives for the transaction and the spent outputs of
+-- 'taprootTxHashes', and fails as it does.
+taprootSigHashWith ::
+  TaprootTxHashes ->
+  -- | index of input being signed
+  Int ->
+  -- | what to sign
+  SigHash ->
+  -- | annex of the input, if there is one, with its @0x50@ prefix
+  Maybe ByteString ->
+  -- | for a script path spend: the leaf hash, and the position of the last
+  -- @OP_CODESEPARATOR@ executed, @0xffffffff@ for none
+  Maybe (Digest SHA256, Word32) ->
+  Either String Hash256
+taprootSigHashWith hashes i sh annexM leafM = do
+  (input, coin) <- maybe (Left indexOutOfRange) Right (hashes.inputs V.!? i)
   unless (isTaprootSigHash sh) $
     Left ("taprootSigHash: invalid hash type " <> show (fromIntegral sh :: Word32))
-  when (isSigHashSingle sh && i >= length tx.outputs) $
-    Left "taprootSigHash: SIGHASH_SINGLE without an output at the input index"
+  -- The output that SIGHASH_SINGLE signs
+  ownOutput <-
+    if isSigHashSingle sh
+      then maybe (Left noOutput) (Right . Just) (hashes.outputs V.!? i)
+      else Right Nothing
   forM_ annexM $ \annex ->
     unless (isAnnex annex) $ Left "taprootSigHash: an annex starts with 0x50"
   return . taggedHash "TapSighash" . runPutS $ do
     putWord8 0x00 -- the epoch
     putWord8 (fromIntegral sh)
-    putWord32le tx.version
-    putWord32le tx.locktime
-    unless (anyoneCanPay sh) $ do
-      serialize $ sha256 (runPutS (mapM_ (serialize . (.outpoint)) tx.inputs))
-      serialize $ sha256 (runPutS (mapM_ (putWord64le . (.value)) spent))
-      serialize $ sha256 (runPutS (mapM_ (putVarIntBytes . (.script)) spent))
-      serialize $ sha256 (runPutS (mapM_ (putWord32le . (.sequence)) tx.inputs))
+    putWord32le hashes.version
+    putWord32le hashes.locktime
+    unless (anyoneCanPay sh) $
+      mapM_ serialize [hashes.shaPrevouts, hashes.shaAmounts, hashes.shaScriptPubKeys, hashes.shaSequences]
     unless (isSigHashNone sh || isSigHashSingle sh) $
-      serialize $
-        sha256 (runPutS (mapM_ serialize tx.outputs))
-    putWord8 (bool 0 2 (isJust' leafM) .|. bool 0 1 (isJust' annexM))
+      serialize hashes.shaOutputs
+    putWord8 (bool 0 2 (isJust leafM) .|. bool 0 1 (isJust annexM))
     if anyoneCanPay sh
       then do
         serialize input.outpoint
@@ -729,17 +820,14 @@ taprootSigHash tx spent i sh annexM leafM = do
       else putWord32le (fromIntegral i)
     forM_ annexM $ \annex ->
       serialize $ sha256 (runPutS (putVarIntBytes annex))
-    when (isSigHashSingle sh) $
-      serialize $
-        sha256 (runPutS (serialize (tx.outputs !! i)))
+    forM_ ownOutput $ \output ->
+      serialize $ sha256 (runPutS (serialize output))
     forM_ leafM $ \(leaf, codeSeparatorPosition) -> do
       putByteString (BA.convert leaf)
       putWord8 0x00 -- the key version
       putWord32le codeSeparatorPosition
   where
-    input = tx.inputs !! i
-    coin = spent !! i
-    isJust' = maybe False (const True)
+    noOutput = "taprootSigHash: SIGHASH_SINGLE without an output at the input index"
 
 -- | The tagged hash of BIP 340: SHA256 of the hash of the tag twice, then
 -- the message

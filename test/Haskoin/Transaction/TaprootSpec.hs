@@ -13,7 +13,8 @@
 module Haskoin.Transaction.TaprootSpec (spec) where
 
 import Control.Applicative ((<|>))
-import Control.Monad (forM, forM_, (<=<))
+import Control.Exception (evaluate)
+import Control.Monad (forM, forM_, void, (<=<))
 import Crypto.Hash (Digest, SHA256, digestFromByteString, hashFinalize, hashUpdate)
 import Data.Aeson
 import Data.Aeson.Types
@@ -25,13 +26,16 @@ import Data.Bytes.Put (putByteString, putWord8, runPutS)
 import Data.Bytes.Serial (deserialize, serialize)
 import Data.Bytes.VarInt qualified as Base128
 import Data.Either (isLeft, isRight)
+import Data.Map.Strict qualified as Map
 import Data.Maybe (fromJust, isJust, isNothing)
 import Data.Serialize qualified as S
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified
 import Data.Word (Word32, Word64, Word8)
 import Haskoin
 import Haskoin.Util.Arbitrary
+import System.Timeout (timeout)
 import Test.HUnit (assertBool, (@?=))
 import Test.Hspec
 import Test.Hspec.QuickCheck (prop)
@@ -100,6 +104,12 @@ spec = do
         -- auxiliary randomness, as signSchnorr signs
         fmap (encodeHex . encodeTaprootSig) (taprootSignature (signSchnorr tweaked (hashToMsg digest)) c.hashType) `shouldBe` Right (head c.witness)
 
+    it "the digest of each input of the vector, from the hashes that its inputs share" $ do
+      hashes <- expectRight (taprootTxHashes testKeyPath.unsignedTx testKeyPath.spent)
+      forM_ testKeyPath.cases $ \c ->
+        fmap (encodeHex . runPutS . serialize) (taprootSigHashWith hashes c.index c.hashType Nothing Nothing)
+          `shouldBe` Right c.sigHash
+
     it "the fully signed transaction of the vector verifies against the coins it spends" $
       verifyStdTx btc testKeyPath.signedTx (coinsOf testKeyPath) `shouldBe` True
 
@@ -120,6 +130,20 @@ spec = do
       forM_ noTree $ \c ->
         (signed.witness !! c.index) `shouldBe` [hexBytes (head c.witness)]
 
+    -- Two signing parameters for one coin of 100,000 satoshi. They differ
+    -- by the amount, which the digest commits to: 100,000 and 100,001.
+    it "signTx signs a Taproot input with the first signing parameters given for its outpoint" $ do
+      let secret = (fst bip86Key).key
+          coinScript = either error id (taprootScriptOutput (TaprootOutput (derivePubKey secret) Nothing))
+          outpoint = OutPoint "1111111111111111111111111111111111111111111111111111111111111111" 0
+          right = SigInput coinScript 100000 outpoint sigHashDefault Nothing
+          wrong = SigInput coinScript 100001 outpoint sigHashDefault Nothing
+          verifies parameters =
+            (\tx -> verifyStdTx btc tx [(coinScript, 100000, outpoint)])
+              <$> signTx btc (buildTx [outpoint] [(coinScript, 99000)]) parameters [secret]
+      verifies [right, wrong] `shouldBe` Right True
+      verifies [wrong, right] `shouldBe` Right False
+
     -- The witness of each input is in the vector, so this checks the
     -- signer against the BIP for all seven inputs and hash types
     it "signTaprootInput signs each Taproot input of the vector with its output secret key, and gives the witness of the vector" $
@@ -138,6 +162,22 @@ spec = do
       taprootSigHash tx spent 0 (setForkIdFlag sigHashAll) Nothing Nothing `shouldBe` Left "taprootSigHash: invalid hash type 65"
       -- The transaction has two outputs: input 3 has none at its index
       taprootSigHash tx spent 3 sigHashSingle Nothing Nothing `shouldBe` Left "taprootSigHash: SIGHASH_SINGLE without an output at the input index"
+      -- A wrong index and missing coins: the index is told
+      taprootSigHash tx (take 8 spent) 9 sigHashDefault Nothing Nothing
+        `shouldBe` Left "taprootSigHash: input index out of range"
+
+    it "taprootTxHashes refuses missing coins, and taprootSigHashWith refuses what taprootSigHash refuses" $ do
+      let tx = testKeyPath.unsignedTx
+          spent = testKeyPath.spent
+      void (taprootTxHashes tx (take 8 spent)) `shouldBe` Left "taprootSigHash: one spent output per input is required"
+      hashes <- expectRight (taprootTxHashes tx spent)
+      let digest i hashType annex = taprootSigHashWith hashes i hashType annex Nothing
+      digest 9 sigHashDefault Nothing `shouldBe` Left "taprootSigHash: input index out of range"
+      digest (-1) sigHashDefault Nothing `shouldBe` Left "taprootSigHash: input index out of range"
+      digest 0 0x04 Nothing `shouldBe` Left "taprootSigHash: invalid hash type 4"
+      digest 3 sigHashSingle Nothing
+        `shouldBe` Left "taprootSigHash: SIGHASH_SINGLE without an output at the input index"
+      digest 0 sigHashDefault (Just "hello") `shouldBe` Left "taprootSigHash: an annex starts with 0x50"
 
     it "taprootSigHash commits to the annex and to the leaf of a script path spend" $ do
       let tx = testKeyPath.unsignedTx
@@ -483,9 +523,25 @@ spec = do
       -- the first input without one
       taprootSigHash testKeyPath.unsignedTx testKeyPath.spent 2 sigHashSingle Nothing Nothing
         `shouldBe` Left "taprootSigHash: SIGHASH_SINGLE without an output at the input index"
+    -- The first input has the sequence number 0xfffffffe and is signed with
+    -- SIGHASH_ALL|ANYONECANPAY (0x81). The second has 0xfffffffd and is
+    -- signed with SIGHASH_SINGLE|ANYONECANPAY (0x83).
+    it "of an input signed with ANYONECANPAY commits to the sequence number of that input" $ do
+      let spent = replicate 2 (coin anyoneCanPayCoin)
+          digestAt i hashType =
+            encodeHex . runPutS . serialize <$> taprootSigHash (txOf anyoneCanPayTx) spent i hashType Nothing Nothing
+      digestAt 0 0x81 `shouldBe` Right "0055ae93be20be76bdd1aebf526c2184fc92aeedb8107141cf08a7d153bd63f1"
+      digestAt 1 0x83 `shouldBe` Right "01b065079f55a45bd2b76aaf8650277f1818442b8fca98e205b0e31bd2517be5"
 
   describe "verifyStdTx on Taproot inputs" $ do
     let coinOfTx = oneCoin
+    -- Bitcoin Core 32.1 relayed and mined this spend on regtest, with the
+    -- relay policy of mainnet. The test of 'taprootSigHash' above states
+    -- the digests of its two signatures.
+    it "verifies two key path inputs signed with ANYONECANPAY, whose sequence numbers are not 0xffffffff" $ do
+      let tx = txOf anyoneCanPayTx
+          script = either error id (decodeSerial (hexBytes anyoneCanPayCoin))
+      verifyStdTx btc tx [(script, 100000, input.outpoint) | input <- tx.inputs] `shouldBe` True
     -- Bitcoin Core 32.1 mined these two spends on regtest, and does not
     -- relay a Taproot input with an annex: "bad-witness-nonstandard". The
     -- tests of 'taprootSigHash' above state the digests of their signatures.
@@ -526,6 +582,8 @@ spec = do
             return (verifyStdTx btc (Tx unsigned.version unsigned.inputs unsigned.outputs [witness] unsigned.locktime) [(coinScript, 100000, outpoint)])
       spendWith 0xc0 `shouldBe` Right True
       spendWith 0xc2 `shouldBe` Right False
+
+  sharedHashesCostSpec
 
   describe "Control blocks" $
     it "are refused when the internal key is not the x coordinate of a point" $
@@ -681,6 +739,84 @@ arbitraryMAST withCommitments = choose (0, 6 :: Int) >>= go
       n <- frequency [(3, choose (1, 127)), (3, choose (128, 252)), (2, choose (253, 600)), (2, elements [127, 128, 252, 253])]
       return (Script (replicate n OP_NOP))
 
+-- | BIP 341 has the digest of every input of a transaction commit to four
+-- hashes over all its inputs and one over all its outputs, which "may be
+-- cached across signatures of the same transaction". Each test fails by its
+-- time when a function computes them again for each input: 5000 times the
+-- hashes of 5000 inputs. The seconds in the comments are those of such
+-- code built without optimisation, on the computer where the tests were
+-- written. The code that computes the hashes once takes under a second
+-- there.
+sharedHashesCostSpec :: Spec
+sharedHashesCostSpec =
+  describe
+    "A transaction of 5000 Taproot inputs takes time by its size, \
+    \and not by the square of its size: in under three seconds"
+    $ do
+      let count = 5000
+          secret = (fst bip86Key).key
+          internal = derivePubKey secret
+          coinScript = either error id (taprootScriptOutput (TaprootOutput internal Nothing))
+          coin = TxOut 100000 (encodeSerial coinScript)
+          funding = "1111111111111111111111111111111111111111111111111111111111111111"
+          outpoints = [OutPoint funding i | i <- [1 .. 5000]]
+          unsigned = buildTx outpoints [(coinScript, 99000)]
+          sigInputs = [SigInput coinScript 100000 outpoint sigHashDefault Nothing | outpoint <- outpoints]
+          signed = either error id (signTx btc unsigned sigInputs [secret])
+          -- The PSBT of the transaction: each input has its coin and the
+          -- internal key of the coin
+          psbt =
+            let empty = psbtOf unsigned
+                input = insertInputTapInternalKey internal (insertWitnessUtxo coin Map.empty)
+             in Psbt empty.version empty.unsignedTx empty.globals (replicate count input) empty.outputs
+          signedPsbt = either error id (signPsbt btc (keySigner secret) psbt)
+          -- Whether the work gives the answer, when it does within three
+          -- seconds. What the work starts from is built before the time
+          -- starts.
+          answers :: (Eq a) => Int -> a -> a -> IO (Maybe Bool)
+          answers built work answer = do
+            _ <- evaluate built
+            timeout 3000000 (evaluate (work == answer))
+          sizeOf = BS.length . encodeSerial
+
+      -- 15 seconds
+      it "taprootSigHashWith gives a digest of its own to each input, from the hashes that they share" $ do
+        let digests = do
+              hashes <- taprootTxHashes unsigned (replicate count coin)
+              mapM (\i -> taprootSigHashWith hashes i sigHashDefault Nothing Nothing) [0 .. count - 1]
+        answers (sizeOf unsigned) (Set.size . Set.fromList <$> digests) (Right 5000) `shouldReturn` Just True
+
+      -- 16 seconds
+      it "signTx signs every input with a signature of 64 bytes" $ do
+        let signatureSizes = map (map BS.length) . (.witness)
+            signatures = signatureSizes <$> signTx btc unsigned sigInputs [secret]
+        answers (sizeOf unsigned) signatures (Right (replicate 5000 [64]))
+          `shouldReturn` Just True
+
+      -- 16 seconds
+      it "verifyStdTx verifies the signed transaction" $
+        answers (sizeOf signed) (verifyStdTx btc signed [(coinScript, 100000, outpoint) | outpoint <- outpoints]) True
+          `shouldReturn` Just True
+
+      -- 16 seconds
+      it "judgeInputs says of every input of the signed transaction that it is verified" $
+        answers (sizeOf signed) (judgeInputs btc signed (replicate count (Just coin))) (replicate 5000 InputVerified)
+          `shouldReturn` Just True
+
+      -- 16 seconds
+      it "signPsbt adds a key path signature of 64 bytes to every input" $ do
+        let signatureSizes = map (fmap (fmap (BS.length . encodeTaprootSig)) . tapKeySig) . (.inputs)
+            signedInputs = signatureSizes <$> signPsbt btc (keySigner secret) psbt
+        answers (BS.length (encodePsbt psbt)) signedInputs (Right (replicate 5000 (Right (Just 64))))
+          `shouldReturn` Just True
+
+      -- 16 seconds
+      it "finalizePsbt gives every input a final witness of one signature of 64 bytes" $ do
+        let witnessSizes = map (fmap (fmap (map BS.length)) . finalScriptWitness) . (.inputs)
+            finalInputs = witnessSizes <$> finalizePsbt btc signedPsbt
+        answers (BS.length (encodePsbt signedPsbt)) finalInputs (Right (replicate 5000 (Right (Just [64]))))
+          `shouldReturn` Just True
+
 digestHex :: Digest SHA256 -> Text
 digestHex = encodeHex . BA.convert
 
@@ -706,6 +842,24 @@ keyPathAnnexTx, scriptPathAnnexTx, codeSeparatorTx :: Text
 keyPathAnnexTx = "010000000001016a7d9c7f155cc46f63ab350387f74b6a585d7a179941592d6fb2151e384740810100000000ffffffff01d07e010000000000160014cabe51bbc4203c9221901541c9e9d3ac219e6ca80240dac56ae755419956efbb11ff69d46916c956612e03bdafe382e48ca1fc4bdf12fc768daf297548a89d22f19451c08107e763523a88d10b9a5044de20789895d2065068656c6c6f00000000"
 scriptPathAnnexTx = "010000000001016be84449b8f2ec0559b321b2aed59ba273f79710a73c5a7e3cbce8e57178c2260100000000ffffffff01d07e010000000000160014cabe51bbc4203c9221901541c9e9d3ac219e6ca80441fe2a5388123bdc28dc0635796683a24418375c1e94b9d9074889d4b6865224dd6a0ae16d63d454d1dcdbd86f7291f5be5ce2d0cb785adddc1cbd9bd9b8cda3bd012220864f1c660fd3842d2b45acae2d2c181378c3c397d9c8f6a36dce7e1b3f2fa01fac21c1bc4d541d1be26036455459e9fd4fb8c9e2b829b17eb18fb5f66bbbdedc1c61681750616e6e6578206f66206120736372697074207061746800000000"
 codeSeparatorTx = "01000000000101a1b61db207932647112026e232f793c6d807f666f46ebb23b526e68342630f820100000000ffffffff01d07e010000000000160014cabe51bbc4203c9221901541c9e9d3ac219e6ca8044093e3dfc003f3d11aca5c6301aa52f55fe916b01036710653c56ff829d393489a26834188c932372f93aadf116a55c540f68e049f2b17b69760ea22190b944b57401f03095eb9fe08f9462b86196fccd3dfffc2702c6c0b186593bed2ae31f4b963a5b36a40a4c0c76c3da7caf03f39b358773ce914999a772d638d3f5f18d49aa945201da5064215e4cad73afbc2f5cc5d1c537452b49b3660ab201ef739b808950e5cadab203ef9208927082a726fea24d87dabbb476a30c669f1aa0d98bdfc29ad7e30d33dac21c0db5c3a57b4b60a18c53d60623fc64fbd97c21fe61e9a0508919f1bbe7e658aa900000000"
+
+-- | A spend of two Taproot coins of 100,000 satoshi by their key path, which
+-- Bitcoin Core 32.1 relayed and mined on regtest. Its inputs have the
+-- sequence numbers 0xfffffffe and 0xfffffffd, and the hash types
+-- SIGHASH_ALL|ANYONECANPAY and SIGHASH_SINGLE|ANYONECANPAY.
+anyoneCanPayTx :: Text
+anyoneCanPayTx =
+  "020000000001024a884fd05241f5d864cf6cd5dd8bb19f89c0b0b10fb6bd806b3be7ee56d9c0730100000000feffffff0a50\
+  \bfca9dd73133b8941a03243bb3bee8355a73ceb570d016d09a9e2bb35c670100000000fdffffff02b8820100000000002251\
+  \205cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bcd07e0100000000002251205cbdf0646e5d\
+  \b4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc01418d197e78f4779ecaa9f0a411e9f466385e961729b2fe\
+  \b6a534438b12ae47dc3410f09ee8e9ac294be0780d01beab6faac04af3b37e78d36547a70c49d4b6d6b6810141b9d6be7fc2\
+  \a1abe3a1dd70c980918100ebd5ad47070d8e3362c9e19b1160b8a95f7fc166e7ae67aa6f4fe662e0b4088b11bf770b55d0f2\
+  \85e3bcddd9d142e2838300000000"
+
+-- | The output script of both coins that 'anyoneCanPayTx' spends
+anyoneCanPayCoin :: Text
+anyoneCanPayCoin = "51205cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc"
 
 -- | A script path spend of a coin whose output key does not commit to the
 -- leaf. The leaf is "<key> OP_CHECKSIG", its signature is valid, and the
