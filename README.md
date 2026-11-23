@@ -564,8 +564,8 @@ combines the results for legacy inputs. For SegWit multisig, use a [PSBT](#psbt)
 The digest of a SegWit version 0 input, and of every input on Bitcoin Cash, is
 the one of BIP 143. It holds three hashes over all the inputs and all the
 outputs of the transaction, which are the same for every input. `signTx`,
-`verifyStdTx`, `judgeInputs`, `signPsbt` and `finalizePsbt` compute them once
-for a transaction. Code that computes the digests itself does the same:
+`mergeTxs`, `verifyStdTx`, `judgeInputs`, `signPsbt` and `finalizePsbt` compute
+them once for a transaction. Code that computes the digests itself does the same:
 `txSigHashes` takes the transaction once, and `txSigHashForkIdWith` gives the
 digest of one input. `txSigHashForkId` computes the three hashes at each call,
 so it is the function for one digest.

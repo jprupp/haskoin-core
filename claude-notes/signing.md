@@ -22,5 +22,18 @@ The signer and the verifier of whole transactions: `signTx`, `signInput`,
   `sharedHashesCostSpec` of `TaprootSpec.hs` (Taproot) and of
   `TransactionSpec.hs` (SegWit version 0 and Bitcoin Cash, with 8000
   outputs so that the old code is 5 times over the limit).
-- Not done: `mergeTxs` and `mergeTxInput` walk the lists and call
-  `txSigHash` for each input. `countMulSig` is for one input.
+- `mergeTxs` merges each input on its input scripts (`mergeScripts`, with
+  `txSigHashes` of the first transaction) and puts the transaction together
+  once. `mergeTxInput` runs `mergeScripts` for one input. Its timed test is
+  on Bitcoin Cash: on Bitcoin the legacy digest is the square by design.
+- A loop over the inputs whose work calls libsecp256k1 many times for each
+  input: a left fold (`foldM`, as in `mergeTxs`), not `mapM` of `Either`.
+  The bindings use `safe` foreign calls, which take longer on a deep stack:
+  `mergeTxs` of ten transactions of 2000 inputs took 1.07 s, and now 0.40.
+- Not done: a legacy multisig computes its digest again for each key that a
+  signature is tried against (`countMulSig'`, `spendInput`, `mergeScripts`).
+  Bitcoin Core keeps it by hash type (`SigHashCache`). `countMulSig` is for
+  one input.
+- Not done: `matchTemplate` (in `findInputIndex` and `mergeTxs`) looks for
+  the coin of each input from the start of the list. It is fast only when
+  the coins or the signing parameters come in the order of the inputs.
