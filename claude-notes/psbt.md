@@ -50,6 +50,10 @@ the readers of the fields that they use, and their tests in `PsbtSpec.hs`.
   of the key, and each leaf script is asked for once, whatever its number of
   entries. `taprootCostSpec` fails within three seconds per test when a
   lookup becomes a walk.
+- A new Taproot digest in the signer or the finalizer: `taprootSigHashWith`
+  on the hashes of `taprootHashes`, never `taprootSigHash`, which hashes the
+  whole transaction. The tests of 5000 inputs are in `sharedHashesCostSpec`
+  of `TaprootSpec.hs`, with the other callers of the digest.
 
 ## Tests
 

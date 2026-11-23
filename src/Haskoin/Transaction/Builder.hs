@@ -756,26 +756,34 @@ verifyStdTx net tx coins =
     spent = spentCoins tx coins
     toSpend = sum (map (toInteger . (.value)) tx.outputs)
 
--- | The coin of each input of a transaction, and the outputs that the
--- Taproot digest commits to. 'verifyStdTx' computes this once, so that the
--- time it takes does not grow with the square of the number of inputs.
+-- | The coin of each input of a transaction, and the hashes that its
+-- Taproot digests share. 'verifyStdTx' and 'judgeInputs' compute this once
+-- for a transaction: they look up each coin once, and the digests of the
+-- Taproot inputs hash the inputs and the outputs of the transaction once,
+-- and not once for each input.
 data SpentCoins = SpentCoins
   { -- | the coin of each input, in order, when it is among those given
     coins :: [Maybe (ScriptOutput, Word64)],
-    -- | the output every input spends, when every coin is given
-    outputs :: Maybe [TxOut]
+    -- | the hashes of the Taproot digests, when every coin is given: the
+    -- digest commits to the output that every input spends
+    taproot :: Maybe TaprootTxHashes
   }
 
 spentCoins :: Tx -> [(ScriptOutput, Word64, OutPoint)] -> SpentCoins
 spentCoins tx given =
   SpentCoins
     { coins = found,
-      outputs = map (\(so, val) -> TxOut val (encodeSerial so)) <$> sequence found
+      taproot = sharedHashes tx . map (\(so, val) -> TxOut val (encodeSerial so)) =<< sequence found
     }
   where
     -- The first coin given for an outpoint is its coin
     byOutPoint = Map.fromListWith (\_ first -> first) [(o, (so, val)) | (so, val, o) <- given]
     found = map (\i -> Map.lookup i.outpoint byOutPoint) tx.inputs
+
+-- | The hashes that the Taproot digests of a transaction share, from the
+-- output that each of its inputs spends
+sharedHashes :: Tx -> [TxOut] -> Maybe TaprootTxHashes
+sharedHashes tx = eitherToMaybe . taprootTxHashes tx
 
 -- | Verify that an input spends one of the coins given with a standard
 -- input that verifies: a signature of the right key and digest for
@@ -994,16 +1002,15 @@ verifyInput net tx spent i
       outKey <- case so of
         PayWitness 1 program -> maybe (Left "not an output key") Right (importXOnlyPubKey program)
         _ -> Left "not a Taproot output"
-      -- The outputs every input spends, in order, which the Taproot digest
-      -- commits to
-      spentOutputs <- maybe (Left "a spent output is missing") Right spent.outputs
+      -- The digest commits to the output that every input spends
+      hashes <- maybe (Left "a spent output is missing") Right spent.taproot
       spend <- maybe (Left "not a Taproot witness") Right (viewTaprootWitness ws)
       -- Bitcoin Core does not relay an annex, whatever is in it
       -- (@IsWitnessStandard@)
       when (isJust (annexOf spend)) $ Left "nodes do not relay an annex"
       let schnorr sigBytes leaf = do
             TaprootSignature sig sh <- decodeTaprootSig sigBytes
-            h <- taprootSigHash tx spentOutputs i sh Nothing leaf
+            h <- taprootSigHashWith hashes i sh Nothing leaf
             return (sig, h)
       case spend of
         KeyPathSpend sigBytes _ -> do
@@ -1148,7 +1155,7 @@ judgeInputs net tx given = zipWith judge [0 ..] decoded
     spent =
       SpentCoins
         { coins = [d >>= \(prefix, so, v) -> if B.null prefix then Just (so, v) else Nothing | d <- decoded],
-          outputs = sequence prevs
+          taproot = sharedHashes tx =<< sequence prevs
         }
     -- What the second reading of an input may answer. Without a fork id
     -- it does not say verified: 'verifyInput' reads every kind of input
@@ -1274,10 +1281,10 @@ judgeInputs net tx given = zipWith judge [0 ..] decoded
             cashDigest code = txSigHashCashToken net tx prefix code val i
         taproot program sig = fromRight InputUndecided $ do
           key <- maybe (Left "not a key") Right (importXOnlyPubKey program)
-          outs <- maybe (Left "a spent output is missing") Right spent.outputs
+          hashes <- maybe (Left "a spent output is missing") Right spent.taproot
           TaprootSignature s sh <- decodeTaprootSig sig
           unless (sh == sigHashDefault || sh == sigHashAll) $ Left "another hash type"
-          m <- taprootSigHash tx outs i sh Nothing Nothing
+          m <- taprootSigHashWith hashes i sh Nothing Nothing
           return (verdict (verifySchnorr key s (hashToMsg m)))
         verdict ok = if ok then InputVerified else InputForged
 

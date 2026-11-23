@@ -1974,10 +1974,14 @@ xPrvSigner xprv originM =
 -- each leaf script once, however many entries have that script, and finds
 -- the record of a key by a lookup. So the time it takes grows with the
 -- size of the input, and not with the product of two of those numbers.
+-- The hashes that the digests of the Taproot inputs share are computed
+-- once for the PSBT ('taprootTxHashes'), so the time for all the inputs
+-- grows with the size of the PSBT, and not with the number of its
+-- signatures times the size of its transaction.
 signPsbt :: Network -> Signer -> Psbt -> Either String Psbt
 signPsbt net signer psbt = do
   coins <- spentOutputs psbt
-  let allCoins = mapM (fmap fst) coins
+  let hashes = taprootHashes tx coins
   signed <- forM (zip3 [0 ..] (zip tx.inputs psbt.inputs) coins) $ \(i, (input, m), coinM) ->
     first (("Input " <> show i <> ": ") <>) $ case coinM of
       Just (coin, witnessOnly) | not (isFinal m) -> do
@@ -1989,7 +1993,7 @@ signPsbt net signer psbt = do
           Left ("a signature of the input does not use the sighash type " <> show (fromIntegral sighash :: Word32))
         return . fromMaybe (m, []) $
           if isTaprootCoin net coin
-            then signTaproot signer tx allCoins i m coin sighash
+            then signTaproot signer hashes i m coin sighash
             else signEcdsa net signer tx i input m coin witnessOnly sighash
       _ -> return (m, [])
   return $ foldr afterSignature (Psbt psbt.version tx psbt.globals (fst <$> signed) psbt.outputs) (concatMap snd signed)
@@ -2053,12 +2057,12 @@ heldKeys signer m named = nubBy (\a b -> derivePublicKey a == derivePublicKey b)
 -- As Bitcoin Core (@SignTaproot@): a signature that the input has stays,
 -- and an input that has or gets a key path signature gets no leaf
 -- signature.
-signTaproot :: Signer -> Tx -> Maybe [TxOut] -> Int -> PsbtMap -> TxOut -> SigHash -> Maybe (PsbtMap, [SigHash])
-signTaproot signer tx allCoins i m coin sighash = do
-  spent <- allCoins
+signTaproot :: Signer -> Maybe TaprootTxHashes -> Int -> PsbtMap -> TxOut -> SigHash -> Maybe (PsbtMap, [SigHash])
+signTaproot signer hashesM i m coin sighash = do
+  hashes <- hashesM
   let held = heldTaprootKeys signer (taprootProgram coin) m
       signatureFor secret leafM = eitherToMaybe $ do
-        h <- taprootSigHash tx spent i sighash Nothing ((,0xffffffff) <$> leafM)
+        h <- taprootSigHashWith hashes i sighash Nothing ((,0xffffffff) <$> leafM)
         taprootSignature (signSchnorr secret (hashToMsg h)) sighash
       hasKeySig = Map.member (Key tapKeySigType B.empty) m
       keySig =
@@ -2354,6 +2358,14 @@ spentOutputs psbt =
   forM (zip3 [0 :: Int ..] psbt.unsignedTx.inputs psbt.inputs) $ \(i, input, m) ->
     first (("Input " <> show i <> ": ") <>) (spentOutput input m)
 
+-- | The hashes that the BIP 341 digests of the Taproot inputs share, once
+-- every input has its coin: the digest commits to the output that every
+-- input spends. The signer and the finalizer take them once for a PSBT, as
+-- Bitcoin Core does (@PrecomputePSBTData@), so that a digest takes time by
+-- the size of its own input, and not by the size of the transaction.
+taprootHashes :: Tx -> [Maybe (TxOut, Bool)] -> Maybe TaprootTxHashes
+taprootHashes tx coins = mapM (fmap fst) coins >>= eitherToMaybe . taprootTxHashes tx
+
 -- | The output an input spends, from the fields of the input: the output
 -- of its previous transaction, which must be the transaction the input
 -- spends from, or else its witness output alone. The flag tells when the
@@ -2515,11 +2527,13 @@ signingInput input output sighash spend =
 -- thousands of leaf scripts and of script path signatures, at no cost to
 -- its writer. A leaf finds its signature by a lookup, so the time such an
 -- input takes grows with its size, and not with the product of the two
--- numbers.
+-- numbers. The hashes that the digests of the Taproot inputs share are
+-- computed once for the PSBT ('taprootTxHashes'), so the time for all the
+-- inputs grows with the size of the PSBT, and not with its square.
 finalizePsbt :: Network -> Psbt -> Either String Psbt
 finalizePsbt net psbt = do
   coins <- spentOutputs psbt
-  let allCoins = mapM (fmap fst) coins
+  let hashes = taprootHashes tx coins
   inputs <- forM (zip3 [0 ..] (zip tx.inputs psbt.inputs) coins) $ \(i, (input, m), coinM) ->
     first (("Input " <> show i <> ": ") <>) $ case coinM of
       _ | isFinal m -> return (cleared m)
@@ -2531,7 +2545,7 @@ finalizePsbt net psbt = do
               -- BIP 174 asks it of every signature when the input names a
               -- type, also for the type 0, which no partial signature has
               | not (signaturesUse sighash m) || (sighashM == Just sigHashDefault && hasPartialSignatures m) = Nothing
-              | isTaprootCoin net coin = finalTaproot tx allCoins i m coin
+              | isTaprootCoin net coin = finalTaproot hashes i m coin
               | otherwise = finalEcdsa net tx i input m coin witnessOnly sighash
         return (maybe m (finalized m) finals)
   return $ Psbt psbt.version tx psbt.globals inputs psbt.outputs
@@ -2635,13 +2649,13 @@ namedSignatures m script =
 -- verify or the control block does not commit the leaf to the coin, when
 -- the output key is no point of the curve, and while another input lacks
 -- its coin, since the signature cannot be verified before.
-finalTaproot :: Tx -> Maybe [TxOut] -> Int -> PsbtMap -> TxOut -> Maybe (ByteString, WitnessStack)
-finalTaproot tx allCoins i m coin = do
-  spent <- allCoins
+finalTaproot :: Maybe TaprootTxHashes -> Int -> PsbtMap -> TxOut -> Maybe (ByteString, WitnessStack)
+finalTaproot hashesM i m coin = do
+  hashes <- hashesM
   outKey <- importXOnlyPubKey (taprootProgram coin)
   let verified public leafM bytes = do
         signature <- eitherToMaybe (decodeTaprootSig bytes)
-        digest <- eitherToMaybe (taprootSigHash tx spent i signature.hash Nothing ((,0xffffffff) <$> leafM))
+        digest <- eitherToMaybe (taprootSigHashWith hashes i signature.hash Nothing ((,0xffffffff) <$> leafM))
         guard (verifySchnorr public signature.sig (hashToMsg digest))
   (B.empty,) <$> case plainField tapKeySigType m of
     Just bytes -> [bytes] <$ verified outKey Nothing bytes

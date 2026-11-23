@@ -136,6 +136,19 @@ Bitcoin testnet3 is deprecated and still works.
   block itself is trusted to be the anchor: a custom network must give the
   first block whose median time past reaches the activation time. Code that
   builds a `Network` record field by field must now set this field.
+- **`taprootTxHashes` and `taprootSigHashWith` give the Taproot digests of
+  one transaction from the hashes that they share.** The digest of BIP 341
+  commits to four hashes over all the inputs of the transaction and to one
+  over all its outputs, which are the same for every input: the BIP says
+  that they "may be cached across signatures of the same transaction".
+  `taprootTxHashes` computes them once, from the transaction and the output
+  that each input spends, into a value of the new type `TaprootTxHashes`.
+  `taprootSigHashWith` then gives the digest of one input, for a hash type,
+  an annex and a leaf, in a time that does not depend on the size of the
+  transaction. `taprootSigHash` is unchanged and gives the same digests: it
+  is the function for a single digest, since it hashes the whole
+  transaction at each call. Code that calls it for every input of a
+  transaction should change to the two new functions.
 
 ### Deprecated
 
@@ -508,6 +521,41 @@ Bitcoin testnet3 is deprecated and still works.
   of two numbers: 1.5 seconds for one leaf at 4000 places and a record of
   32,000 leaves, and now 0.3 seconds. The signatures and the final
   witnesses are the same as before.
+- **`verifyStdTx`, `judgeInputs`, `signTx`, `signPsbt` and `finalizePsbt` no
+  longer hash the whole transaction again for each Taproot input.** The
+  digest of a Taproot signature commits to hashes over all the inputs and
+  all the outputs of the transaction. These functions computed them again
+  for every input, so a transaction with twice as many Taproot inputs took
+  four times as long. They now compute them once for a transaction, as
+  Bitcoin Core does, with the new `taprootTxHashes`. The seconds for a
+  transaction of 2000 Taproot inputs, and of 5000:
+
+  | Function       | 2000, before | 2000, now | 5000, before | 5000, now |
+  |----------------|--------------|-----------|--------------|-----------|
+  | `verifyStdTx`  | 1.22         | 0.09      | 7.8          | 0.54      |
+  | `judgeInputs`  | 1.23         | 0.10      | 8.0          | 0.46      |
+  | `signTx`       | 1.34         | 0.19      | 7.9          | 0.74      |
+  | `signPsbt`     | 1.35         | 0.17      | 7.5          | 0.45      |
+  | `finalizePsbt` | 1.22         | 0.06      | 7.7          | 0.15      |
+
+  `judgeInputs` needs no valid signature to do that work, so a server that
+  judges transactions from the network paid it for whoever asked: 0.93
+  seconds for a transaction of 1739 inputs, the most that 400,000 weight
+  units hold, and now 0.08 seconds. In a PSBT the cost was also inside one
+  input: a signer that held the keys of 1024 leaves of one input computed
+  1024 digests, 0.71 seconds in a transaction of 2000 inputs and now 0.12
+  seconds. The digests, the signatures and the answers are the same as
+  before. The documentation of the verifier said that its time did not grow
+  with the square of the number of inputs, which was not true of Taproot
+  inputs.
+- **The digest of a Taproot input signed with `SIGHASH_ANYONECANPAY` has a
+  test of its sequence number now.** No code changed for it. That digest
+  commits to the sequence number of its own input, and every such input of
+  the BIP 341 vector has the sequence number 0xffffffff, so a digest that
+  always held that number passed the tests. The new test states the two
+  digests of a transaction that Bitcoin Core 32.1 relayed and mined on
+  regtest, whose inputs have the sequence numbers 0xfffffffe and
+  0xfffffffd.
 - **`judgeInputs` verifies a multisig of Bitcoin Cash with Schnorr signatures
   whose field of bits is the byte 0x81.** That is two signatures of eight
   keys, by the first key and the last. The field of bits takes the place of

@@ -202,6 +202,9 @@ Read a file before any work on what its line names.
 - A new module: `stack build --dry-run` writes `haskoin-core.cabal` again in
   under a second, without a build. The file is tracked, so it is part of the
   change.
+- A change of a function that a README example calls: nothing compiles
+  the README. Copy the example into a `main` and build it with
+  `stack exec -- ghc -O0`, then run it for the `-- =>` lines.
 - "Non type-variable argument in the constraint: HasField": a local function
   without a signature uses `x.field` on its argument. Give it a signature, or
   write the expression where it is used.
@@ -221,6 +224,8 @@ Read a file before any work on what its line names.
 - A probe with `stack exec -- runghc` or `ghc` uses the library as last
   built. After a build of changed source, such as a reverted fix to see a
   test fail, build the real source again before the probe.
+- "haskell-dev: not in a git repository", in a copy of the tree made with
+  `git archive`: run `git init` in the copy. No commit is needed.
 - A run under a memory limit: a clean `haskell-dev build` needs 1.2 GB for
   GHC, and each of the eight test processes about 100 MB.
 - A test of a cost: `timeout` around `evaluate`, as `taprootCostSpec` of

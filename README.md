@@ -694,10 +694,11 @@ Some other useful functions:
 ```haskell
 let key = derivePath ("m/86'/0'/0'/0/0" :: DerivPath) master
     internalKey = (deriveXPubKey key).key
-    -- Nothing means that the output has no script tree.
-    output = taprootScriptOutput (TaprootOutput internalKey Nothing)
 
-print (addrToText btc =<< outputAddress btc =<< eitherToMaybe output)
+-- Nothing means that the output has no script tree.
+output <- either fail pure (taprootScriptOutput (TaprootOutput internalKey Nothing))
+
+print (addrToText btc =<< outputAddress btc output)
 -- => Just "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr"
 
 -- Spend a made-up coin of 100,000 satoshi by its key path.
@@ -719,6 +720,25 @@ To commit to scripts, pass a `MAST` in place of `Nothing`. `signTx` only signs k
 path spends. `signPsbt` also signs a script path when the leaf is a single key
 check, `<key> OP_CHECKSIG`. For other scripts, build the witness yourself with
 `taprootSigHash` and `encodeTaprootWitness`.
+
+`taprootSigHash` hashes every input and every output of the transaction, so it
+is the function for one digest. For the digest of each input, or for several
+digests of one input, take the hashes that they share once with
+`taprootTxHashes`, and each digest with `taprootSigHashWith`:
+
+```haskell
+-- The outputs that the inputs spend, one for each input and in their order.
+let spent = [TxOut 100000 (encodeSerial output)]
+
+print $ do
+  hashes <- taprootTxHashes unsigned spent
+  mapM (\i -> taprootSigHashWith hashes i sigHashDefault Nothing Nothing) [0 .. length spent - 1]
+-- => Right ["bc2a6f20493e9377e4214f713ff3168c3eec0e8d07c1c18f3d9756df8602ef6c"]
+```
+
+`signTx`, `verifyStdTx`, `judgeInputs`, `signPsbt` and `finalizePsbt` do this
+themselves: they hash the inputs and the outputs of a transaction once for all
+its Taproot inputs.
 
 `checkTapTree` tells whether every leaf of a tree can be spent. A leaf can be at
 most 128 levels deep, and its version must be one that BIP 341 allows.

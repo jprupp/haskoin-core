@@ -43,6 +43,7 @@ import Data.Bytes.Serial
 import Data.Either
 import Data.Hashable
 import Data.List
+import qualified Data.Map.Strict as Map
 import Data.Maybe
 import Data.Word
 import GHC.Generics
@@ -160,16 +161,26 @@ signTx net otx sigis allKeys
       if isTaprootOutput so
         then do
           unless net.segWit $ Left "signTx: this network has no Taproot"
-          spent <- spentOutputs
-          foldM (\t k -> signTaprootInput t spent i sh k.key) tx keys
+          (spent, hashes) <- taprootCoins
+          let digest = taprootSigHashWith hashes i sh Nothing Nothing
+          foldM (\t k -> digest >>= signTaprootDigest t i sh k.key (spent !! i)) tx keys
         else foldM (\t k -> signInput net t i sigi k) tx keys
     -- The outputs every input spends, which a Taproot signature commits
-    -- to: a nested SegWit program is spent as its P2SH wrapper
+    -- to, and the hashes that the digests of the Taproot inputs share. The
+    -- digest commits to no input script and to no witness, so the hashes
+    -- of the unsigned transaction hold while its inputs are signed.
+    taprootCoins = do
+      spent <- spentOutputs
+      hashes <- taprootTxHashes otx spent
+      return (spent, hashes)
+    -- A nested SegWit program is spent as its P2SH wrapper
     spentOutputs =
       forM ti $ \txin ->
-        case find ((== txin.outpoint) . (.outpoint) . fst) sigis of
+        case Map.lookup txin.outpoint parameters of
           Just (s, nested) -> (\so -> TxOut s.value (encodeSerial so)) <$> coinScript s nested
           Nothing -> Left "signTx: a Taproot signature needs the output every input spends"
+    -- The signing parameters of each outpoint: the first given for it
+    parameters = Map.fromListWith (\_ first -> first) [(s.outpoint, (s, nested)) | (s, nested) <- sigis]
     coinScript s nested
       | nested && isSegwit s.script = toP2SH =<< encodeOutput s.script
       | otherwise = Right s.script
@@ -192,6 +203,10 @@ isTaprootOutput = \case
 -- input spends is not a Taproot output, or when the secret key is not the
 -- key of that output: a signature of another key would make a transaction
 -- that no node accepts.
+--
+-- This signs one input, and its digest hashes the whole transaction
+-- ('taprootSigHash'). 'signTx' signs every input of a transaction with the
+-- hashes that their digests share computed once.
 signTaprootInput ::
   Tx ->
   -- | outputs spent, one per input
@@ -205,7 +220,13 @@ signTaprootInput ::
 signTaprootInput tx spent i sh secret = do
   -- The digest checks the index and the number of spent outputs
   h <- taprootSigHash tx spent i sh Nothing Nothing
-  outputKey <- case B.unpack (spent !! i).script of
+  signTaprootDigest tx i sh secret (spent !! i) h
+
+-- | 'signTaprootInput' on the output that the input spends and the digest
+-- of the input, which the caller computed for the hash type
+signTaprootDigest :: Tx -> Int -> SigHash -> SecKey -> TxOut -> Hash256 -> Either String Tx
+signTaprootDigest tx i sh secret coin h = do
+  outputKey <- case B.unpack coin.script of
     0x51 : 0x20 : program | length program == 32 -> Right (B.pack program)
     _ -> Left "signTaprootInput: the output spent is not a Taproot output"
   unless (exportXOnlyPubKey (derivePubKey secret) == outputKey) $
