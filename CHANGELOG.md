@@ -668,6 +668,38 @@ Bitcoin testnet3 is deprecated and still works.
   `mergeTxInput` keeps its type and its results. The coins are best given
   in the order of the inputs: each input still looks for its coin from the
   start of the list.
+- **The text, the order and the append of a derivation path take time by
+  the length of the path, and no longer by the square of it.** A path holds
+  its last step outermost, and three functions walked the earlier steps
+  again at each step: `pathToStr` copied their text, `compare` tested them
+  for equality and then compared them, and `++/` built the rest of its
+  second path again. A path with twice as many steps took four times as
+  long. Every text form of a path goes through `pathToStr`: the `Show` and
+  JSON instances of `DerivPath`, `HardPath`, `SoftPath` and `ParsedPath`,
+  and the `Show` of the `Derivation` and `TapDerivation` records of a PSBT.
+  A path can be of any length: `parsePath`, the JSON and binary decoders
+  and the derivation records of a PSBT read one of any number of steps, as
+  Bitcoin Core does. So a program that shows a path that it was given, for
+  example in an error message about a PSBT, could be held by a small file:
+  a record of 16000 steps is a PSBT of 64 KB. Each of the three functions
+  now walks a path once. The seconds on the release build, by the number
+  of steps, for paths whose indices have one digit:
+
+  | Function         | 4000, before | 16000, before | 32000, before | 32000, now  | 1000000, now |
+  |------------------|--------------|---------------|---------------|-------------|--------------|
+  | `pathToStr`      | 0.14         | 2.8           | 12.5          | 0.004       | 0.13         |
+  | `compare`, twice | 0.045        | 0.45          | 1.7           | under 0.001 | 0.008        |
+  | `++/`            | 0.035        | 0.70          | 2.9           | 0.004       | 0.18         |
+
+  The texts, the order and the appended paths are the same as before. A
+  shorter path sorts first, then the first step that differs decides, a
+  soft step before a hardened one: the order of the index lists of
+  `pathToList`. That order had tests that a wrong `compare` could pass:
+  the fixed cases used `<`, which calls `compare` with its arguments
+  exchanged, and two random paths share no step. It is now stated with
+  `compare` in both directions on fixed pairs, and on random pairs that
+  differ in one step. `++/` has a test with a hardened step in its second
+  path.
 - **`judgeInputs` verifies a multisig of Bitcoin Cash with Schnorr signatures
   whose field of bits is the byte 0x81.** That is two signatures of eight
   keys, by the first key and the last. The field of bits takes the place of

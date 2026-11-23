@@ -785,21 +785,29 @@ instance Eq (DerivPathI t) where
   Deriv == Deriv = True
   _ == _ = False
 
+-- | A shorter path sorts first. Two paths of the same length sort by the
+-- first step that differs, counted from the key down: a soft step before a
+-- hardened one, then by index. That is the order of the index lists of
+-- 'pathToList', where the hard bit is set, with the shorter list first.
+--
+-- A path holds its last step outermost, so the comparison walks both paths
+-- once from their last step and remembers the difference nearest the key. It
+-- takes time by the length of the paths, also for paths that come from
+-- outside and are of any length.
 instance Ord (DerivPathI t) where
-  -- Same hardness on each side
-  (nextA :| iA) `compare` (nextB :| iB) =
-    if nextA == nextB then iA `compare` iB else nextA `compare` nextB
-  (nextA :/ iA) `compare` (nextB :/ iB) =
-    if nextA == nextB then iA `compare` iB else nextA `compare` nextB
-  -- Different hardness: a soft path sorts before a hard one, as it does when
-  -- comparing the index lists of 'pathToList', where the hard bit is set.
-  (nextA :/ _iA) `compare` (nextB :| _iB) =
-    if nextA == nextB then LT else nextA `compare` nextB
-  (nextA :| _iA) `compare` (nextB :/ _iB) =
-    if nextA == nextB then GT else nextA `compare` nextB
-  Deriv `compare` Deriv = EQ
-  Deriv `compare` _ = LT
-  _ `compare` Deriv = GT
+  compare = go EQ
+    where
+      -- @later@ is the order of the steps seen so far, which are the later
+      -- steps of the two paths: a difference in an earlier step replaces it.
+      go later (nextA :| iA) (nextB :| iB) = sameKind later iA iB nextA nextB
+      go later (nextA :/ iA) (nextB :/ iB) = sameKind later iA iB nextA nextB
+      go _ (nextA :/ _) (nextB :| _) = go LT nextA nextB
+      go _ (nextA :| _) (nextB :/ _) = go GT nextA nextB
+      go later Deriv Deriv = later
+      go _ Deriv _ = LT
+      go _ _ Deriv = GT
+      -- Two steps of the same kind sort by their index
+      sameKind later iA iB = go $! compare iA iB <> later
 
 instance Serial DerivPath where
   deserialize = listToPath <$> getList getWord32be
@@ -868,13 +876,16 @@ listToPath =
       | otherwise = go is :/ i
     go [] = Deriv
 
--- | Convert a derivation path to a human-readable string.
+-- | Convert a derivation path to a human-readable string: each step as @\/@
+-- and its index, with @'@ after the index of a hardened step, and no @m@ or
+-- @M@ in front. The text is written in one pass over the steps, so it takes
+-- time by the length of the path. Every text form of a path is this one: the
+-- 'Show' and JSON instances of the path types and of 'ParsedPath'.
 pathToStr :: DerivPathI t -> String
-pathToStr p =
-  case p of
-    next :| i -> concat [pathToStr next, "/", show i, "'"]
-    next :/ i -> concat [pathToStr next, "/", show i]
-    Deriv -> ""
+pathToStr =
+  concatMap step . pathSteps
+  where
+    step (hard, i) = '/' : shows i (if hard then "'" else "")
 
 -- | Turn a derivation path into a hard derivation path. Will fail if the path
 -- contains soft derivations.
@@ -899,16 +910,16 @@ toGeneric p = case p of
   next :| i -> toGeneric next :| i
   Deriv -> Deriv
 
--- | Append two derivation paths together. The result will be a mixed
--- derivation path.
+-- | Append two derivation paths together: the steps of the first, then the
+-- steps of the second. The result is a mixed derivation path, whatever the
+-- two paths hold. It takes time by the length of the two paths.
 (++/) :: DerivPathI t1 -> DerivPathI t2 -> DerivPath
 (++/) p1 p2 =
-  go id (toGeneric p2) $ toGeneric p1
+  foldl' step (toGeneric p1) (pathSteps p2)
   where
-    go f p = case p of
-      next :/ i -> go (f . (:/ i)) $ toGeneric next
-      next :| i -> go (f . (:| i)) $ toGeneric next
-      _ -> f
+    step p (hard, i)
+      | hard = p :| i
+      | otherwise = p :/ i
 
 -- | Derive a private key from a derivation path. Throws
 -- 'DerivationException' when the path cannot be followed, for example when it
