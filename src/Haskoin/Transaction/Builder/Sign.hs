@@ -226,7 +226,8 @@ signTaprootInput tx spent i sh secret = do
 -- multisig. Any other key fails, since its signature would make an input
 -- that no node accepts. The key is used in the form given, compressed or
 -- not. That is the way to spend a SegWit coin of an uncompressed key on
--- purpose, which 'signTx' refuses.
+-- purpose, which 'signTx' refuses. Nodes do not relay that spend, so
+-- 'Haskoin.Transaction.Builder.verifyStdInput' answers 'False' for it.
 --
 -- An input signed with 'SIGHASH_SINGLE' at an index that has no output is
 -- refused, whatever its coin. That signature commits to no output, as one

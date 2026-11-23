@@ -486,12 +486,15 @@ spec = do
 
   describe "verifyStdTx on Taproot inputs" $ do
     let coinOfTx = oneCoin
-    it "accepts the key path spend with an annex that Bitcoin Core 32.1 mined on regtest" $ do
+    -- Bitcoin Core 32.1 mined these two spends on regtest, and does not
+    -- relay a Taproot input with an annex: "bad-witness-nonstandard". The
+    -- tests of 'taprootSigHash' above state the digests of their signatures.
+    it "refuses the key path spend with an annex, which nodes do not relay" $ do
       let tx = txOf keyPathAnnexTx
-      verifyStdTx btc tx (coinOfTx tx "512028066f61c28af1ecb48c7948f8b5770838eec15223c8697a8e40510c2c29ea04") `shouldBe` True
-    it "accepts the script path spend of a single key leaf with an annex that Bitcoin Core 32.1 mined on regtest" $ do
+      verifyStdTx btc tx (coinOfTx tx "512028066f61c28af1ecb48c7948f8b5770838eec15223c8697a8e40510c2c29ea04") `shouldBe` False
+    it "refuses the script path spend of a single key leaf with an annex, which nodes do not relay" $ do
       let tx = txOf scriptPathAnnexTx
-      verifyStdTx btc tx (coinOfTx tx "5120a354b6c111a5f8339fd8ea5bc6147f8ca829029188e4d3f7622751417328be18") `shouldBe` True
+      verifyStdTx btc tx (coinOfTx tx "5120a354b6c111a5f8339fd8ea5bc6147f8ca829029188e4d3f7622751417328be18") `shouldBe` False
     -- The witness holds a valid signature of the leaf key over the leaf
     -- "<key> OP_CHECKSIG", and a control block that names the same key as
     -- internal key. The coin's output key does not commit to that leaf.

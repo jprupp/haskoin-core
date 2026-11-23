@@ -298,6 +298,36 @@ Bitcoin testnet3 is deprecated and still works.
   others, which the PSBT signer of Bitcoin Core signs too, so `signPsbt`
   is unchanged.
 
+- **`verifyStdInput`, `verifyStdTx` and `judgeInputs` no longer verify an
+  input that a block may hold and that nodes do not relay.** They follow
+  the rules by which Bitcoin Core relays an input, where they followed the
+  rules of a block for three forms. A caller that hands a transaction to
+  its peers when every input is verified sent these, and the peers dropped
+  them. The answers were `True`, `True` and `InputVerified`. They are now
+  `False`, `False` and `InputUndecided` for:
+  - on Bitcoin, an input script with a push longer than its data needs: a
+    signature, a key or a redeem script after `OP_PUSHDATA1`, `2` or `4`
+    where a shorter push holds it. Bitcoin Core 32.1: "Data push larger
+    than necessary";
+  - a SegWit version 0 input with a signature checked against an
+    uncompressed key: a witness key hash, native or nested, and a key or
+    a key hash in a witness script. Bitcoin Core 32.1: "Using
+    non-compressed keys in segwit". In a multisig witness script, the
+    signatures must verify against the compressed keys after the last
+    uncompressed one: `OP_CHECKMULTISIG` tries the keys from the last one,
+    and Bitcoin Core relays the spend when it reaches no uncompressed key;
+  - a Taproot input with an annex, by the key path or by a script path.
+    Bitcoin Core 32.1: "bad-witness-nonstandard".
+
+  A high S, a key in the hybrid form and an undefined hash type were
+  refused already. An input of one key in one of these forms is still
+  `InputForged` when its signature does not verify. `signInput` still signs
+  a SegWit coin with an uncompressed key that it is given, and
+  `verifyStdInput` now answers `False` for that input. `True` is still no
+  promise that nodes relay the transaction: the rules on the whole
+  transaction, such as its size, its fee and its outputs, are not looked
+  at. The tests hold 16 spends that Bitcoin Core 32.1 judged on regtest
+  with the relay policy of mainnet.
 - **`taprootOutputKey` and `taprootScriptOutput` give no output for a
   script tree that `checkTapTree` refuses.** Their results are now
   `Either String PubKey` and `Either String ScriptOutput`. They gave an
@@ -499,7 +529,8 @@ Bitcoin testnet3 is deprecated and still works.
   S. The README now says so under "Security notes", and so do the comments
   of `verifyStdTx` and `verifyStdInput`, which also name the key in the
   hybrid form among the inputs that are refused. The functions did not
-  change.
+  change with that correction. They changed later in this version: see
+  "no longer verify an input that a block may hold" above.
 - **On Bitcoin Cash, an ECDSA signature whose DER form is 64 bytes is no
   longer read as an ECDSA signature.** On Bitcoin Cash a signature of 64
   bytes before its hash type byte is a Schnorr signature, whatever its
@@ -562,9 +593,10 @@ Bitcoin testnet3 is deprecated and still works.
   connection. On a network with a fork id the answers are now `False` and
   `InputUndecided`, also when the signature does not verify. An input in
   the encoding that every wallet makes is verified as before. Nothing
-  changes on Bitcoin: there a block may hold the three forms,
-  `verifyStdInput` still answers `True` for a longer push, and a high S and
-  a hybrid key were `InputUndecided` already.
+  changes on Bitcoin with this entry: there a block may hold the three
+  forms, and a high S and a hybrid key were `InputUndecided` already. A
+  longer push is no longer verified on Bitcoin either: see "no longer
+  verify an input that a block may hold" above.
 - **The documentation of `isCanonicalHalfOrder`, `decodeStrictSig`,
   `verifyHashSig` and `decodePubKey` gave the rules of Bitcoin as the rules
   of consensus.** A low S and the form of a key are rules of the relay

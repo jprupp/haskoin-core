@@ -1453,13 +1453,19 @@ signerSpec =
       signTx btc tx [SigInput (PayPKHash hu) 100000 op sigHashAll Nothing] [k1.key] `shouldSatisfy` isRight
 
     -- A block accepts such a spend, so one who knows what it does can still
-    -- make it, with the key in the form to use
+    -- make it, with the key in the form to use. Nodes do not relay it, so
+    -- it is not verified. Its signature is good: with another amount paid,
+    -- the same input is forged.
     it "signInput signs a SegWit coin with the uncompressed key it is given" $ do
       let hu = keyHash p1u
           sigi = SigInput (PayWitnessPKHash hu) 100000 op sigHashAll Nothing
-      signed <- either fail return (signInput btc tx 0 sigi k1u)
-      map (map B.length) signed.witness `shouldSatisfy` (\w -> map (drop 1) w == [[65]])
-      verifyStdInput btc signed [(PayWitnessPKHash hu, 100000, op)] 0 `shouldBe` True
+          coinOf = [Just (TxOut 100000 (encodeSerial (PayWitnessPKHash hu)))]
+          paysLess = signed' {outputs = [o {value = o.value - 1} | o <- signed'.outputs]} :: Tx
+          signed' = either error id (signInput btc tx 0 sigi k1u)
+      map (map B.length) signed'.witness `shouldSatisfy` (\w -> map (drop 1) w == [[65]])
+      verifyStdInput btc signed' [(PayWitnessPKHash hu, 100000, op)] 0 `shouldBe` False
+      judgeInputs btc signed' coinOf `shouldBe` [InputUndecided]
+      judgeInputs btc paysLess coinOf `shouldBe` [InputForged]
 
     it "refuses to sign a SegWit or a Taproot coin on a network without SegWit" $ do
       let so = either error id (taprootScriptOutput (TaprootOutput p1.point Nothing))

@@ -70,7 +70,7 @@ import Data.Conduit.List (sourceList)
 import Data.Either (fromRight, rights)
 import Data.List (nub)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes, isNothing)
+import Data.Maybe (catMaybes, isJust, isNothing)
 import Data.String.Conversions (cs)
 import Data.Text (Text)
 import Data.Word (Word64)
@@ -733,12 +733,17 @@ mergeTxInput net txs tx ((so, val), i) = do
 --
 -- This is not a script interpreter. It answers 'True' only for the
 -- standard kinds of input listed at 'verifyStdInput', and 'False' for any
--- other script, valid or not. For those kinds it follows consensus: it
--- does not answer 'True' for an input that no block can contain.
+-- other script, valid or not. For those kinds it follows the rules by
+-- which Bitcoin Core relays an input, which are stricter than those of a
+-- block. It does not answer 'True' for an input that no block can
+-- contain, nor for one that a block may hold and that nodes do not relay:
+-- 'verifyStdInput' lists them. A caller that hands a transaction to its
+-- peers needs that answer, and a miner is the only one who can use the
+-- other.
 --
--- It does not follow the relay policy, so its answer is not what a node
--- does with the transaction. 'verifyStdInput' lists inputs that it accepts
--- and nodes do not relay, and inputs that it refuses and a block may hold.
+-- 'True' is still no promise that nodes relay the transaction. The relay
+-- policy also has rules on the whole transaction, such as its size, its
+-- fee and its outputs, that are not looked at here.
 verifyStdTx ::
   Network -> Tx -> [(ScriptOutput, Word64, OutPoint)] -> Bool
 verifyStdTx net tx coins =
@@ -809,17 +814,18 @@ spentCoins tx given =
 -- * A network without SegWit has no witness inputs.
 -- * On Bitcoin Cash, the input script pushes each item by the shortest
 --   push that holds it ('isMinimalPush'). Every block must keep the
---   @MINIMALDATA@ rule there. On Bitcoin that rule is one of the relay
---   policy: a block may hold a longer push, and the answer is 'True' for
---   it.
+--   @MINIMALDATA@ rule there.
 -- * On Bitcoin Cash, no signature is 64 bytes long before its hash type
 --   byte. A node reads that length as a Schnorr signature, also when the
 --   bytes are a valid ECDSA signature in DER, and this function reads no
 --   Schnorr signature ('decodeTxSig'). On Bitcoin a block may hold such an
 --   ECDSA signature, and the answer is 'True' for it.
 --
--- The answer can be 'False' for an input that a block may hold but that
--- nodes do not relay:
+-- The answer is not 'True' either for an input that a block may hold and
+-- that nodes do not relay. The rules are those by which Bitcoin Core 32.1
+-- relays an input: @STANDARD_SCRIPT_VERIFY_FLAGS@ and @IsWitnessStandard@.
+-- Up to version 2.0.1 the answer was 'True' for the last three of this
+-- list:
 --
 -- * A signature is read with 'decodeTxSig', which applies the relay rules:
 --   low S and a defined hash type.
@@ -836,18 +842,28 @@ spentCoins tx given =
 --   'decodeWitnessInput' do not read such a script. A coin locked to such
 --   a script itself cannot be given here: 'decodeOutput' does not read it,
 --   so that a 'PayMulSig' is always the script the signatures cover.
+-- * On Bitcoin, an input script with a push longer than its data needs:
+--   a signature, a key or a redeem script after @OP_PUSHDATA1@, @2@ or
+--   @4@ where a shorter push holds it (@MINIMALDATA@).
+-- * A SegWit version 0 input with a signature checked against an
+--   uncompressed key (@WITNESS_PUBKEYTYPE@): the key of a witness key
+--   hash, native or nested, and the key of a witness script. In a
+--   multisig witness script, @OP_CHECKMULTISIG@ tries the keys from the
+--   last one until every signature has its key. So the signatures must
+--   verify against the compressed keys after the last uncompressed one,
+--   and an uncompressed key before the first key that signs is not looked
+--   at, as in Bitcoin Core.
+-- * A Taproot input with an annex, by the key path or by a script path.
+--   BIP 341 gives the annex no meaning yet, and Bitcoin Core does not
+--   relay one (@IsWitnessStandard@).
 --
--- The answer can be 'True' for an input that a block may hold but that
--- nodes do not relay. So 'True' does not say that nodes relay the
--- transaction, and the relay policy also has rules on the whole
--- transaction, such as its size and its outputs, that are not looked at
--- here:
+-- 'signInput' can still make a SegWit input with an uncompressed key, for
+-- one who has a miner to hand it to. The answer here is 'False' for it:
+-- 'judgeInputs' tells such an input, 'InputUndecided', from a forged one.
 --
--- * A SegWit version 0 input signed with an uncompressed key
---   (@WITNESS_PUBKEYTYPE@ of the relay policy).
--- * On Bitcoin, an input script with a push longer than its data needs
---   (@MINIMALDATA@ of the relay policy), as said above.
--- * A Taproot input with an annex, which Bitcoin Core 32.1 does not relay.
+-- 'True' is still no promise that nodes relay the transaction: the relay
+-- policy also has rules on the whole transaction, such as its size, its
+-- fee and its outputs, that are not looked at here.
 verifyStdInput :: Network -> Tx -> [(ScriptOutput, Word64, OutPoint)] -> Int -> Bool
 verifyStdInput net tx coins = verifyInput net tx (spentCoins tx coins)
 
@@ -865,7 +881,7 @@ verifyInput net tx spent i
         | otherwise ->
             or $
               rights
-                [ (\si -> null ws && blockHoldsPushes net inp && verifyLegacyInput so0 val si)
+                [ (\si -> null ws && minimalPushes inp && verifyLegacyInput so0 val si)
                     <$> unmarshal net inp,
                   nestedScriptOutput >>= \so -> verifyNestedInput so0 so val <$> wp so
                 ]
@@ -918,6 +934,8 @@ verifyInput net tx spent i
         payToScriptAddress rdm == Right (p2shAddr h) && verifyLegacyInput rdm val (RegularInput si')
       _ -> False
 
+    -- A signature of a SegWit version 0 input verifies against a
+    -- compressed key only: WITNESS_PUBKEYTYPE of the relay policy.
     verifySegwitInput ::
       ScriptOutput -> Word64 -> (Maybe ScriptOutput, SimpleInput) -> Bool
     verifySegwitInput so val (rdm, si) = case (so, rdm, si) of
@@ -925,9 +943,7 @@ verifyInput net tx spent i
         Nothing,
         SpendPKHash (TxSignature sig sh) pub
         ) ->
-          -- Compare the key hash only. An uncompressed key is non-standard
-          -- here but still valid by consensus, so verification accepts it.
-          let keytest = pubKeyAddr pub == p2pkhAddr h
+          let keytest = pub.compress && pubKeyAddr pub == p2pkhAddr h
               sighash = theTxSigHash so val sh Nothing
               pkpoint = pub.point
               verify = checkSig sighash sig pkpoint
@@ -936,7 +952,7 @@ verifyInput net tx spent i
         Just rdm'@(PayPK pub),
         SpendPK (TxSignature sig sh)
         ) ->
-          let keytest = payToWitnessScriptAddress rdm' == Right (p2wshAddr h)
+          let keytest = pub.compress && payToWitnessScriptAddress rdm' == Right (p2wshAddr h)
               sighash = theTxSigHash so val sh $ Just rdm'
               pkpoint = pub.point
               verify = checkSig sighash sig pkpoint
@@ -946,7 +962,7 @@ verifyInput net tx spent i
         SpendPKHash (TxSignature sig sh) pub
         ) ->
           let keytest = payToWitnessScriptAddress rdm' == Right (p2wshAddr h)
-              addrtest = addressHash (encodeSerial pub) == kh
+              addrtest = pub.compress && addressHash (encodeSerial pub) == kh
               pkpoint = pub.point
               sighash = theTxSigHash so val sh $ Just rdm'
               verify = checkSig sighash sig pkpoint
@@ -956,7 +972,12 @@ verifyInput net tx spent i
         SpendMulSig sigs
         ) ->
           let keytest = payToWitnessScriptAddress rdm' == Right (p2wshAddr h)
-              pkpoints = (.point) <$> pubs
+              -- OP_CHECKMULTISIG tries the keys from the last one, until
+              -- every signature has its key. The relay policy fails the
+              -- script at an uncompressed key that is tried. So the
+              -- signatures must verify against the compressed keys after
+              -- the last uncompressed one.
+              pkpoints = (.point) <$> reverse (takeWhile (.compress) (reverse pubs))
               hashfun sh = theTxSigHash so val sh $ Just rdm'
               verify = multisigVerifies hashfun pkpoints r sigs
            in keytest && verify
@@ -976,19 +997,23 @@ verifyInput net tx spent i
       -- The outputs every input spends, in order, which the Taproot digest
       -- commits to
       spentOutputs <- maybe (Left "a spent output is missing") Right spent.outputs
-      let schnorr sigBytes annex leaf = do
+      spend <- maybe (Left "not a Taproot witness") Right (viewTaprootWitness ws)
+      -- Bitcoin Core does not relay an annex, whatever is in it
+      -- (@IsWitnessStandard@)
+      when (isJust (annexOf spend)) $ Left "nodes do not relay an annex"
+      let schnorr sigBytes leaf = do
             TaprootSignature sig sh <- decodeTaprootSig sigBytes
-            h <- taprootSigHash tx spentOutputs i sh annex leaf
+            h <- taprootSigHash tx spentOutputs i sh Nothing leaf
             return (sig, h)
-      case viewTaprootWitness ws of
-        Just (KeyPathSpend sigBytes annex) -> do
-          (sig, h) <- schnorr sigBytes annex Nothing
+      case spend of
+        KeyPathSpend sigBytes _ -> do
+          (sig, h) <- schnorr sigBytes Nothing
           return (verifySchnorr outKey sig (hashToMsg h))
-        Just (ScriptPathSpend spd) -> case (spd.script.ops, spd.stack) of
+        ScriptPathSpend spd -> case (spd.script.ops, spd.stack) of
           ([OP_PUSHDATA keyBytes OPCODE, OP_CHECKSIG], [sigBytes])
             | spd.leafVersion == tapscriptLeafVersion -> do
                 leafKey <- maybe (Left "not an x-only key") Right (importXOnlyPubKey keyBytes)
-                (sig, h) <- schnorr sigBytes spd.annex (Just (leafHash spd.leafVersion spd.script, 0xffffffff))
+                (sig, h) <- schnorr sigBytes (Just (leafHash spd.leafVersion spd.script, 0xffffffff))
                 return (verifyScriptPathData outKey spd && verifySchnorr leafKey sig (hashToMsg h))
           -- The multisig of Taproot, @multi_a@ of the output descriptors:
           -- a key and OP_CHECKSIG, then a key and OP_CHECKSIGADD for each
@@ -1006,14 +1031,17 @@ verifyInput net tx spent i
                       | B.null sigBytes = Right False
                       | otherwise = do
                           key <- maybe (Left "not an x-only key") Right (importXOnlyPubKey keyBytes)
-                          (sig, h) <- schnorr sigBytes spd.annex leaf
+                          (sig, h) <- schnorr sigBytes leaf
                           if verifySchnorr key sig (hashToMsg h)
                             then Right True
                             else Left "a signature that does not verify"
                 signed <- sequence (zipWith signs keys (reverse items))
                 return (verifyScriptPathData outKey spd && length (filter id signed) == asked)
           _ -> Left "script path spends other than key checks are not verified"
-        Nothing -> Left "not a Taproot witness"
+
+    annexOf :: TaprootWitness -> Maybe B.ByteString
+    annexOf (KeyPathSpend _ annex) = annex
+    annexOf (ScriptPathSpend spd) = spd.annex
 
 -- | What can be said of the signature of an input without running its
 -- script.
@@ -1060,7 +1088,8 @@ data InputVerdict
 -- nothing else.
 -- An input whose signature verifies and that 'verifyStdInput' refuses is
 -- 'InputUndecided' there: one that a block may hold and that nodes do not
--- relay, such as a high S, and one that no block holds, such as a witness
+-- relay, such as a high S, a longer push or an uncompressed key in a
+-- SegWit input, and one that no block holds, such as a witness
 -- program nested in a script hash that is not pushed by its length (BIP
 -- 141). The other way, a guard in the second reading for each such form,
 -- lets a form that was forgotten pass as verified.
@@ -1252,19 +1281,22 @@ judgeInputs net tx given = zipWith judge [0 ..] decoded
           return (verdict (verifySchnorr key s (hashToMsg m)))
         verdict ok = if ok then InputVerified else InputForged
 
+-- | Does an input script only push data, each item by the shortest push
+-- that holds it ('isMinimalPush')? These are the @SIGPUSHONLY@ and
+-- @MINIMALDATA@ rules. Bitcoin Cash applies them to every block. On
+-- Bitcoin they are rules of the relay policy: a block may hold a longer
+-- push, and nodes do not relay it.
+minimalPushes :: B.ByteString -> Bool
+minimalPushes script = case runGetS deserialize script of
+  Right (Script ops) -> all isMinimalPush ops
+  Left _ -> False
+
 -- | Can a block of the network hold an input script that pushes its items
--- as this one does? On Bitcoin any script passes: a block may hold a push
--- that is longer than its data needs, and only the relay policy refuses
--- it. On Bitcoin Cash every block must keep that rule: the script only
--- pushes data (@SIGPUSHONLY@), and each item by the shortest push that
--- holds it (@MINIMALDATA@, 'isMinimalPush'). A network of Bitcoin Cash is
--- one whose signatures commit to a fork id.
+-- as this one does? On Bitcoin any script passes. On Bitcoin Cash the
+-- script must keep the rules of 'minimalPushes'. A network of Bitcoin
+-- Cash is one whose signatures commit to a fork id.
 blockHoldsPushes :: Network -> B.ByteString -> Bool
-blockHoldsPushes net script
-  | isNothing net.sigHashForkId = True
-  | otherwise = case runGetS deserialize script of
-      Right (Script ops) -> all isMinimalPush ops
-      Left _ -> False
+blockHoldsPushes net script = isNothing net.sigHashForkId || minimalPushes script
 
 -- | The most keys that a Taproot multisig script can have and still be
 -- spent: @MAX_PUBKEYS_PER_MULTI_A@ of Bitcoin Core, and the limit of

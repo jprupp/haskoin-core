@@ -659,12 +659,13 @@ spec = do
       -- larger than necessary".
       it "do not verify it when the bits are pushed as a byte of data" $
         spendOfEight ("fd9c010181" <> afterBits) `shouldBe` (False, [InputVerified, InputUndecided])
-    it "on Bitcoin, still verify a key that is not pushed by the shortest push, which a block may hold" $ do
+    -- On Bitcoin a block may hold that push, and nodes do not relay it
+    it "on Bitcoin, do not verify a key that is not pushed by the shortest push either" $ do
       let sig = ecdsa k 0x01 (txSigHash btc (spending "" []) pkhScript value 0 sigHashAll)
           -- the key after OP_PUSHDATA1 and its length
           tx = spending (runPutS (serialize (Script [opPushData sig, OP_PUSHDATA pub OPDATA1]))) []
-      verifyStdTx btc tx [(PayPKHash h160, value, coin)] `shouldBe` True
-      judgeInputs btc tx [prev (PayPKHash h160)] `shouldBe` [InputVerified]
+      verifyStdTx btc tx [(PayPKHash h160, value, coin)] `shouldBe` False
+      judgeInputs btc tx [prev (PayPKHash h160)] `shouldBe` [InputUndecided]
 
   -- Transactions that Bitcoin Cash Node 29.2.0 and Bitcoin Core 32.1 judged
   -- on regtest. Each has one input, signed by the key 03974d27...ce40 with a
@@ -897,6 +898,247 @@ spec = do
       splitTokenPrefix ("\xef" <> category <> "\x10\xfd\x05\x00" <> script) `shouldBe` Nothing
       splitTokenPrefix ("\xef" <> category) `shouldBe` Nothing
 
+  -- Spends of the outputs of one transaction, each a coin of 1,000,000, as
+  -- Bitcoin Core 32.1 judged them on regtest with the relay policy of
+  -- mainnet (-acceptnonstdtxn=0). It took every one of them in a block,
+  -- and its mempool refused some. The verifiers answer for the mempool: a
+  -- caller hands a verified transaction to its peers.
+  describe "verifyStdTx and judgeInputs on spends that Bitcoin Core 32.1 takes in a block" $ do
+    let -- a coin of the hash of a compressed key
+        keyHashCoin = hex "76a91479b000887626b294a914501a4cd226b58b23598388ac"
+        -- a coin of the hash of a multisig script: one signature of two
+        -- compressed keys
+        scriptHashCoin = hex "a914e75f3c8e0ac1f7a0257aa5224fbca71ae406f1be87"
+        -- a coin of the hash of an uncompressed key, version 0
+        witnessKeyHashCoin = hex "00146ff3443c994fb2c821969dae53bd5b5052d8394f"
+        -- the same witness program in a script hash
+        nestedKeyHashCoin = hex "a914d2ceb3d73c391a8aeb3a26de640112a32142d6fa87"
+        -- a coin of the hash of a witness script: an uncompressed key and
+        -- OP_CHECKSIG
+        witnessKeyCoin =
+          hex
+            "00208b47cde638bfae62a33fc0e99c5080e26c26fb72b8336fb612c2b15b5203\
+            \0a90"
+        -- a coin of the hash of a witness script that names the hash of an
+        -- uncompressed key
+        witnessScriptKeyHashCoin =
+          hex
+            "0020c1ef90ba4e56f20642830c9aa414cc739e5c78eda0b10542783afba9be1b\
+            \51ba"
+        -- a coin of the hash of a witness script: one signature of an
+        -- uncompressed key or of a compressed key, in that order
+        uncompressedFirstCoin =
+          hex
+            "00208bd26d11700bfe773d46cd6afafd62dc593309a150fbd43e6725346e1752\
+            \072c"
+        -- the same with the compressed key first
+        uncompressedLastCoin =
+          hex
+            "0020c062f57c576e379b94f85af81a91df800027c1e396a95d188a6faa75bc48\
+            \0596"
+        -- a Taproot coin without a script tree
+        taprootKeyCoin =
+          hex
+            "51208c5db7f797196d6edc4dd7df6048f4ea6b883a6af6af032342088f436543\
+            \790f"
+        -- a Taproot coin with one leaf: a key and OP_CHECKSIG
+        taprootLeafCoin =
+          hex
+            "51202d5f0e6381d7ae8ac0398aed9667dce8ae22ec0052ff0d7f4da46dafc4e3\
+            \0108"
+        keyHashSpend =
+          txOf
+            "02000000011167db886c9b3a5684c47b5c8c8f05962dfd4b6e8d5624fba50e26\
+            \29504c5657000000006a47304402207574cc799e4fb6dd2fa4f12fb566abf877\
+            \7861ce44deaa804e649e1168beb6b002202384dd2ae1c07854407fbc0f866e57\
+            \33c3cfeb40c79bce978961b83cb0d04c8c0121031b84c5567b126440995d3ed5\
+            \aaba0565d71e1834604819ff9c17f5e9d5dd078fffffffff01703a0f00000000\
+            \0016001479b000887626b294a914501a4cd226b58b23598300000000"
+        keyByLongerPush =
+          txOf
+            "02000000011167db886c9b3a5684c47b5c8c8f05962dfd4b6e8d5624fba50e26\
+            \29504c5657000000006b47304402207574cc799e4fb6dd2fa4f12fb566abf877\
+            \7861ce44deaa804e649e1168beb6b002202384dd2ae1c07854407fbc0f866e57\
+            \33c3cfeb40c79bce978961b83cb0d04c8c014c21031b84c5567b126440995d3e\
+            \d5aaba0565d71e1834604819ff9c17f5e9d5dd078fffffffff01703a0f000000\
+            \000016001479b000887626b294a914501a4cd226b58b23598300000000"
+        scriptHashSpend =
+          txOf
+            "02000000011167db886c9b3a5684c47b5c8c8f05962dfd4b6e8d5624fba50e26\
+            \29504c5657010000009100473044022031e52014a10d4859e400d9931434a47c\
+            \d7964088348f79fd1ba55a57f84c12e502201b65c5e8d3a861b7f4e205d1e94e\
+            \eec9e3961eb2a98bc5bf441e9eb49597880601475121031b84c5567b12644099\
+            \5d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f21024d4b6cd1361032\
+            \ca9bd2aeb9d900aa4d45d9ead80ac9423374c451a7254d076652aeffffffff01\
+            \703a0f000000000016001479b000887626b294a914501a4cd226b58b23598300\
+            \000000"
+        redeemByLongerPush =
+          txOf
+            "02000000011167db886c9b3a5684c47b5c8c8f05962dfd4b6e8d5624fba50e26\
+            \29504c5657010000009300473044022031e52014a10d4859e400d9931434a47c\
+            \d7964088348f79fd1ba55a57f84c12e502201b65c5e8d3a861b7f4e205d1e94e\
+            \eec9e3961eb2a98bc5bf441e9eb495978806014d47005121031b84c5567b1264\
+            \40995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f21024d4b6cd136\
+            \1032ca9bd2aeb9d900aa4d45d9ead80ac9423374c451a7254d076652aeffffff\
+            \ff01703a0f000000000016001479b000887626b294a914501a4cd226b58b2359\
+            \8300000000"
+        witnessKeyHashSpend =
+          txOf
+            "020000000001011167db886c9b3a5684c47b5c8c8f05962dfd4b6e8d5624fba5\
+            \0e2629504c56570200000000ffffffff01703a0f000000000016001479b00088\
+            \7626b294a914501a4cd226b58b2359830248304502210093609da44ddaf3757f\
+            \c14b431f54ad4fbfb5f32f1e7d0d34abbb410ad7d7e48002203eb623d51fad39\
+            \a530b8f681b10a1ac0b37efcc72167dc6d6e6e66968301fb160141041b84c556\
+            \7b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f70beaf8f\
+            \588b541507fed6a642c5ab42dfdf8120a7f639de5122d47a69a8e8d100000000"
+        nestedKeyHashSpend =
+          txOf
+            "020000000001011167db886c9b3a5684c47b5c8c8f05962dfd4b6e8d5624fba5\
+            \0e2629504c565703000000171600146ff3443c994fb2c821969dae53bd5b5052\
+            \d8394fffffffff01703a0f000000000016001479b000887626b294a914501a4c\
+            \d226b58b23598302483045022100b905c7bb775f5276373c64424208db35afa3\
+            \196666956710a2415706838aa10802202f535fcc6f9dbe5878f9b365dd7130d0\
+            \bf8d20d1b7b7ed362c63efb7bcdbdf110141041b84c5567b126440995d3ed5aa\
+            \ba0565d71e1834604819ff9c17f5e9d5dd078f70beaf8f588b541507fed6a642\
+            \c5ab42dfdf8120a7f639de5122d47a69a8e8d100000000"
+        witnessKeySpend =
+          txOf
+            "020000000001011167db886c9b3a5684c47b5c8c8f05962dfd4b6e8d5624fba5\
+            \0e2629504c56570400000000ffffffff01703a0f000000000016001479b00088\
+            \7626b294a914501a4cd226b58b23598302483045022100d77b5a74faaaffdd2b\
+            \7668b220ca7eb787a603ceeb3c74ec30873a43fdb8368d022000a04bc6344baa\
+            \34e071a3d6d51429f108b447a1cc860392aee2a020af6cb036014341041b84c5\
+            \567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f70beaf\
+            \8f588b541507fed6a642c5ab42dfdf8120a7f639de5122d47a69a8e8d1ac0000\
+            \0000"
+        witnessScriptKeyHashSpend =
+          txOf
+            "020000000001011167db886c9b3a5684c47b5c8c8f05962dfd4b6e8d5624fba5\
+            \0e2629504c56570500000000ffffffff01703a0f000000000016001479b00088\
+            \7626b294a914501a4cd226b58b23598303483045022100b1935dbe6ca24c14e9\
+            \2320e81580fbb7ef722e9b234f4e50377c07c38d2244c202205615266de48c84\
+            \d5071c98026dd96cb3491f500d2ce0d7f15e9b05f559c7a0370141041b84c556\
+            \7b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f70beaf8f\
+            \588b541507fed6a642c5ab42dfdf8120a7f639de5122d47a69a8e8d11976a914\
+            \6ff3443c994fb2c821969dae53bd5b5052d8394f88ac00000000"
+        firstSignedByUncompressed =
+          txOf
+            "020000000001011167db886c9b3a5684c47b5c8c8f05962dfd4b6e8d5624fba5\
+            \0e2629504c56570600000000ffffffff01703a0f000000000016001479b00088\
+            \7626b294a914501a4cd226b58b2359830300483045022100b3e607710b0554c7\
+            \7128b2837b9a80fbf59338ed84b6ac083fccdd8eede92d89022013978a0b0220\
+            \f58d02e968fb9beba93845e14ed45804add23ef52f1b104dca8801675141041b\
+            \84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f70\
+            \beaf8f588b541507fed6a642c5ab42dfdf8120a7f639de5122d47a69a8e8d121\
+            \024d4b6cd1361032ca9bd2aeb9d900aa4d45d9ead80ac9423374c451a7254d07\
+            \6652ae00000000"
+        firstSignedByCompressed =
+          txOf
+            "020000000001011167db886c9b3a5684c47b5c8c8f05962dfd4b6e8d5624fba5\
+            \0e2629504c56570600000000ffffffff01703a0f000000000016001479b00088\
+            \7626b294a914501a4cd226b58b235983030047304402207c5b2dc81d2897af64\
+            \b883563c708b37f1e42d8bedf63eed901e19dab3dc298f02203f003e9bc34b03\
+            \331868ad5297aca870c26c50f5d5dccce5c2ee87b40f2e328401675141041b84\
+            \c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f70be\
+            \af8f588b541507fed6a642c5ab42dfdf8120a7f639de5122d47a69a8e8d12102\
+            \4d4b6cd1361032ca9bd2aeb9d900aa4d45d9ead80ac9423374c451a7254d0766\
+            \52ae00000000"
+        lastSignedByUncompressed =
+          txOf
+            "020000000001011167db886c9b3a5684c47b5c8c8f05962dfd4b6e8d5624fba5\
+            \0e2629504c56570700000000ffffffff01703a0f000000000016001479b00088\
+            \7626b294a914501a4cd226b58b2359830300483045022100c4b7fd0ba9d954d9\
+            \9bffa0068e7897948117b11cd54fce8cdc3a26b814bea29602204fd1cd8a2c2f\
+            \911edb61e66c97b25917d952f6f350614547692a63126b891d2e01675121024d\
+            \4b6cd1361032ca9bd2aeb9d900aa4d45d9ead80ac9423374c451a7254d076641\
+            \041b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd07\
+            \8f70beaf8f588b541507fed6a642c5ab42dfdf8120a7f639de5122d47a69a8e8\
+            \d152ae00000000"
+        lastSignedByCompressed =
+          txOf
+            "020000000001011167db886c9b3a5684c47b5c8c8f05962dfd4b6e8d5624fba5\
+            \0e2629504c56570700000000ffffffff01703a0f000000000016001479b00088\
+            \7626b294a914501a4cd226b58b235983030047304402204fe1b7a84c5372695b\
+            \0bb43cd15f3ac5aec05ccdb6fc312f2eeee6dddb2d157102206e4266722d3c3e\
+            \5cb896ce99aff08937d1c83b98522ee19e111c91d12525388401675121024d4b\
+            \6cd1361032ca9bd2aeb9d900aa4d45d9ead80ac9423374c451a7254d07664104\
+            \1b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f\
+            \70beaf8f588b541507fed6a642c5ab42dfdf8120a7f639de5122d47a69a8e8d1\
+            \52ae00000000"
+        taprootKeySpend =
+          txOf
+            "020000000001011167db886c9b3a5684c47b5c8c8f05962dfd4b6e8d5624fba5\
+            \0e2629504c56570800000000ffffffff01703a0f000000000016001479b00088\
+            \7626b294a914501a4cd226b58b2359830140dc88ba8dbb9d4f93403ec77500f7\
+            \9b376d0cf9ffa730885e57ca3792ab5718aa76090837f3eb597598ea64de5f65\
+            \71046bc629cb7f7ca8a7ee361ce259f03dbe00000000"
+        taprootKeyAnnex =
+          txOf
+            "020000000001011167db886c9b3a5684c47b5c8c8f05962dfd4b6e8d5624fba5\
+            \0e2629504c56570800000000ffffffff01703a0f000000000016001479b00088\
+            \7626b294a914501a4cd226b58b2359830240d2b9c3795f370ec7a511a4c2ff43\
+            \bcde8754bee1af3f852ea982787f05c1f1e2f7c94f343bf46fe43b70280a498d\
+            \f3684ad3981f639ae4c66a4a9f4a0f22b208065068656c6c6f00000000"
+        taprootLeafSpend =
+          txOf
+            "020000000001011167db886c9b3a5684c47b5c8c8f05962dfd4b6e8d5624fba5\
+            \0e2629504c56570900000000ffffffff01703a0f000000000016001479b00088\
+            \7626b294a914501a4cd226b58b2359830340245d8213e2b622e5f6e4d70b0ac8\
+            \9fec15463c55a5ef40a0cb1e1accec2aec8562b61967842ec3b4c038f08a125a\
+            \2192efc5160bee13937cdb34f3767e6911bd22204d4b6cd1361032ca9bd2aeb9\
+            \d900aa4d45d9ead80ac9423374c451a7254d0766ac21c11b84c5567b12644099\
+            \5d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f00000000"
+        taprootLeafAnnex =
+          txOf
+            "020000000001011167db886c9b3a5684c47b5c8c8f05962dfd4b6e8d5624fba5\
+            \0e2629504c56570900000000ffffffff01703a0f000000000016001479b00088\
+            \7626b294a914501a4cd226b58b2359830440716789e28f3c4da087a129121a18\
+            \1e0728b3fa6d02f43882f3f6ef6afa9598771f24ede0c3682f703afaea551329\
+            \cfcd54c1a89f242d4f6f9bfaec2e3f47f85c22204d4b6cd1361032ca9bd2aeb9\
+            \d900aa4d45d9ead80ac9423374c451a7254d0766ac21c11b84c5567b12644099\
+            \5d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f065068656c6c6f0000\
+            \0000"
+    it "verify the spends that the node relayed" $ do
+      verdicts btcRegTest keyHashCoin keyHashSpend `shouldBe` (True, [InputVerified])
+      verdicts btcRegTest scriptHashCoin scriptHashSpend `shouldBe` (True, [InputVerified])
+      verdicts btcRegTest taprootKeyCoin taprootKeySpend `shouldBe` (True, [InputVerified])
+      verdicts btcRegTest taprootLeafCoin taprootLeafSpend `shouldBe` (True, [InputVerified])
+    -- The node: "Data push larger than necessary". The key is after
+    -- OP_PUSHDATA1 and its length, and the redeem script after OP_PUSHDATA2.
+    it "do not verify an input script with a longer push, which the node did not relay" $ do
+      verdicts btcRegTest keyHashCoin keyByLongerPush `shouldBe` (False, [InputUndecided])
+      verdicts btcRegTest scriptHashCoin redeemByLongerPush `shouldBe` (False, [InputUndecided])
+    -- The node: "Using non-compressed keys in segwit".
+    it "do not verify a SegWit input of an uncompressed key, which the node did not relay" $ do
+      verdicts btcRegTest witnessKeyHashCoin witnessKeyHashSpend `shouldBe` (False, [InputUndecided])
+      verdicts btcRegTest nestedKeyHashCoin nestedKeyHashSpend `shouldBe` (False, [InputUndecided])
+      verdicts btcRegTest witnessKeyCoin witnessKeySpend `shouldBe` (False, [InputUndecided])
+      verdicts btcRegTest witnessScriptKeyHashCoin witnessScriptKeyHashSpend `shouldBe` (False, [InputUndecided])
+    -- OP_CHECKMULTISIG tries the keys from the last one. With the
+    -- signature of the last key, it never looks at the key before it.
+    it "verify a witness multisig whose uncompressed key is before the key that signed, which the node relayed" $
+      verdicts btcRegTest uncompressedFirstCoin firstSignedByCompressed `shouldBe` (True, [InputVerified])
+    -- The node: "Using non-compressed keys in segwit", all three times.
+    it "do not verify a witness multisig whose uncompressed key signed, or is after the key that signed" $ do
+      verdicts btcRegTest uncompressedFirstCoin firstSignedByUncompressed `shouldBe` (False, [InputUndecided])
+      verdicts btcRegTest uncompressedLastCoin lastSignedByUncompressed `shouldBe` (False, [InputUndecided])
+      verdicts btcRegTest uncompressedLastCoin lastSignedByCompressed `shouldBe` (False, [InputUndecided])
+    -- The node: "bad-witness-nonstandard". Each signature covers its annex.
+    it "do not verify a Taproot input with an annex, which the node did not relay" $ do
+      verdicts btcRegTest taprootKeyCoin taprootKeyAnnex `shouldBe` (False, [InputUndecided])
+      verdicts btcRegTest taprootLeafCoin taprootLeafAnnex `shouldBe` (False, [InputUndecided])
+    -- The spend that the node relayed, with an annex added after its
+    -- signature. The digest of a Taproot signature covers the annex (BIP
+    -- 341), so no block holds this one.
+    it "do not verify a Taproot input with an annex that its signature does not cover" $ do
+      let withAnnex = taprootKeySpend {witness = [head taprootKeySpend.witness <> ["\x50hello"]]} :: Tx
+      verdicts btcRegTest taprootKeyCoin withAnnex `shouldBe` (False, [InputUndecided])
+    -- No node takes a signature that does not verify, in any form
+    it "say forged of a coin of one key spent in such a form with a signature that does not verify" $ do
+      verdicts btcRegTest keyHashCoin (tampered keyByLongerPush) `shouldBe` (False, [InputForged])
+      verdicts btcRegTest witnessKeyHashCoin (tampered witnessKeyHashSpend) `shouldBe` (False, [InputForged])
+      verdicts btcRegTest nestedKeyHashCoin (tampered nestedKeyHashSpend) `shouldBe` (False, [InputForged])
+
   -- A spend can be written in other bytes with every signature still good:
   -- see "Haskoin.Util.Arbitrary.Spelling". Each property below makes signed
   -- transactions of one to four inputs with one input in such a spelling,
@@ -906,13 +1148,12 @@ spec = do
   --
   -- MINIMALDATA, LOW_S, STRICTENC and WITNESS_PUBKEYTYPE are rules of the
   -- relay policy of Bitcoin Core: a block may hold an input that breaks
-  -- one. The verifiers take the first and the last, and leave the two
-  -- others to a node.
+  -- one. The verifiers leave such an input to a node.
   describe "verifyStdTx and judgeInputs on a good spend written a way that Bitcoin does not relay" $ do
-    prop "verify an input script that pushes an item by a longer push" $
-      answersFor btc LongPush (True, InputVerified, True)
-    prop "verify a SegWit input of an uncompressed key" $
-      answersFor btc UncompressedKey (True, InputVerified, True)
+    prop "do not verify an input script that pushes an item by a longer push" $
+      answersFor btc LongPush (False, InputUndecided, True)
+    prop "do not verify a SegWit input of an uncompressed key" $
+      answersFor btc UncompressedKey (False, InputUndecided, True)
     prop "do not verify a signature with a high S" $
       answersFor btc HighS (False, InputUndecided, True)
     prop "do not verify a key in the hybrid form" $
