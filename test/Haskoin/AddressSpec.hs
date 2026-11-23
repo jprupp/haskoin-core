@@ -1,7 +1,7 @@
-{-# OPTIONS_GHC -Wno-deprecations #-}
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# OPTIONS_GHC -Wno-deprecations #-}
 
 module Haskoin.AddressSpec (spec) where
 
@@ -500,8 +500,10 @@ spec = do
       -- a push of the one byte of the commitment.
       let bytes =
             fromJust . decodeHex $
-              "ef" <> T.replicate 32 "51" <> "600151\
-              \76a9146e0810ceea13412b73feb41566a3d2d0ce54e10188ac"
+              "ef"
+                <> T.replicate 32 "51"
+                <> "600151\
+                   \76a9146e0810ceea13412b73feb41566a3d2d0ce54e10188ac"
       script <- either fail return (decodeSerial bytes)
       (addrToText bch =<< eitherToMaybe (scriptToAddress bch script))
         `shouldBe` Just "bitcoincash:qphqsyxwagf5z2mnl66p2e4r6tgvu48pqyhmvay0uy"

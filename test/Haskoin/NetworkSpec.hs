@@ -1,9 +1,9 @@
-{-# OPTIONS_GHC -Wno-deprecations #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE NoFieldSelectors #-}
+{-# OPTIONS_GHC -Wno-deprecations #-}
 
 module Haskoin.NetworkSpec (spec) where
 

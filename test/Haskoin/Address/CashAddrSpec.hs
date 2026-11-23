@@ -1,6 +1,6 @@
-{-# OPTIONS_GHC -Wno-deprecations #-}
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# OPTIONS_GHC -Wno-deprecations #-}
 
 module Haskoin.Address.CashAddrSpec (spec) where
 

@@ -1,6 +1,6 @@
+{-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE ImportQualifiedPost #-}
-{-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -213,7 +213,8 @@ raiseBestKnown bi = do
   s <- getS
   let bestWork = maybe (-1) (.work) (s.blocks.bestKnownBlock >>= e.lookupBlock)
   when (bi.work >= bestWork) $
-    modifyBlocks $ \b -> b {bestKnownBlock = Just bi.hash}
+    modifyBlocks $
+      \b -> b {bestKnownBlock = Just bi.hash}
 
 -- | The work of the best block known to the peer.
 bestKnownWork :: M (Maybe Integer)
@@ -308,7 +309,8 @@ blockInvs hs = do
         maybeSendGetHeaders (e.locatorFrom e.bestHeader.hash) $
           netProcessing 4425 "getheaders after block inv"
       unless s.blocks.syncStarted $
-        modifyBlocks $ \b -> b {invTriggeredGetHeaders = True}
+        modifyBlocks $
+          \b -> b {invTriggeredGetHeaders = True}
   where
     foldBest = go Nothing
     go acc [] = return acc
@@ -1057,21 +1059,21 @@ initialGetHeaders = do
   e <- env
   o <- opts
   sync <- syncFromPeer
-  when (not s.blocks.syncStarted && canServeBlocks s && not e.loadingBlocks) $
-    when
+  when (not s.blocks.syncStarted && canServeBlocks s && not e.loadingBlocks)
+    $ when
       ( (e.otherSyncStarted == 0 && sync)
           || fromIntegral e.bestHeader.time > e.now `div` 1000000 - 86400
       )
-      $ do
-        let startFrom = maybe e.bestHeader.hash (.prev) (e.headerOf e.bestHeader.hash)
-            startHash = if e.bestHeader.height == 0 then e.bestHeader.hash else startFrom
-        sent <- maybeSendGetHeaders (e.locatorFrom startHash) $ netProcessing 6159 "initial getheaders"
-        when sent $ do
-          let behind = max 0 (e.now `div` 1000000 - fromIntegral e.bestHeader.time)
-              spacing = max 1 (fromIntegral o.network.targetSpacing)
-              timeout =
-                e.now + headersDownloadTimeoutBase + headersDownloadTimeoutPerHeader * behind `div` spacing
-          modifyBlocks $ \b -> b {syncStarted = True, headersSyncTimeout = Just timeout}
+    $ do
+      let startFrom = maybe e.bestHeader.hash (.prev) (e.headerOf e.bestHeader.hash)
+          startHash = if e.bestHeader.height == 0 then e.bestHeader.hash else startFrom
+      sent <- maybeSendGetHeaders (e.locatorFrom startHash) $ netProcessing 6159 "initial getheaders"
+      when sent $ do
+        let behind = max 0 (e.now `div` 1000000 - fromIntegral e.bestHeader.time)
+            spacing = max 1 (fromIntegral o.network.targetSpacing)
+            timeout =
+              e.now + headersDownloadTimeoutBase + headersDownloadTimeoutPerHeader * behind `div` spacing
+        modifyBlocks $ \b -> b {syncStarted = True, headersSyncTimeout = Just timeout}
 
 -- | The block announcements of @SendMessages@ (lines 6178 to 6325): the
 -- new blocks queued by 'newTip' go out as one @cmpctblock@ to a peer that
@@ -1179,8 +1181,7 @@ blockTimeouts = do
         then
           when (t > deadline && e.otherSyncStarted == 0 && e.otherPreferredDownload >= 1) $
             if hasPermission PermNoBan s
-              then
-                modifyBlocks $ \b -> b {syncStarted = False, headersSyncTimeout = Just 0}
+              then modifyBlocks $ \b -> b {syncStarted = False, headersSyncTimeout = Just 0}
               else do
                 disconnect Timeout $ netProcessing 6481 "Timeout downloading headers"
                 stop
@@ -1210,8 +1211,9 @@ considerEviction = do
             then disconnect Unsuitable $ netProcessing 5538 "Outbound peer has old chain"
             else do
               let from = fromMaybe e.tip.hash (cs.workHeader >>= e.headerOf >>= Just . (.prev))
-              _ <- maybeSendGetHeaders (e.locatorFrom from) $
-                netProcessing 5545 "sending getheaders to outbound peer to verify chain work"
+              _ <-
+                maybeSendGetHeaders (e.locatorFrom from) $
+                  netProcessing 5545 "sending getheaders to outbound peer to verify chain work"
               setChainSync cs {sentGetHeaders = True, timeout = t + headersResponseTime}
       | otherwise -> return ()
   where
@@ -1276,4 +1278,5 @@ markStalling = do
   t <- now
   s <- getS
   when (isNothing s.blocks.stallingSince && not (null s.blocks.inFlight)) $
-    modifyBlocks $ \b -> b {stallingSince = Just t}
+    modifyBlocks $
+      \b -> b {stallingSince = Just t}

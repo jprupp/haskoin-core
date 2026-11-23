@@ -1,9 +1,9 @@
-{-# OPTIONS_GHC -Wno-deprecations #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# OPTIONS_GHC -Wno-deprecations #-}
 
 module Haskoin.BlockSpec
   ( spec,

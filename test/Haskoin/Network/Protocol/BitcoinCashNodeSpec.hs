@@ -1,19 +1,19 @@
-{-# OPTIONS_GHC -Wno-deprecations #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE NoFieldSelectors #-}
+{-# OPTIONS_GHC -Wno-deprecations #-}
 
 module Haskoin.Network.Protocol.BitcoinCashNodeSpec (spec) where
 
 import Data.ByteString qualified as B
+import Data.Int (Int32, Int64)
 import Data.List (foldl')
 import Data.Maybe (isJust, isNothing)
-import Data.Int (Int32, Int64)
 import Data.Sequence qualified as S
-import Data.Word (Word64)
 import Data.Set qualified as Set
+import Data.Word (Word64)
 import Haskoin.Block
 import Haskoin.Network
 import Haskoin.Network.Protocol.BitcoinCashNode qualified as BCHN

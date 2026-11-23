@@ -1,6 +1,6 @@
+{-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE ImportQualifiedPost #-}
-{-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE NoFieldSelectors #-}

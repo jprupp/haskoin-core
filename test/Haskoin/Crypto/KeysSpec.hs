@@ -1,8 +1,8 @@
-{-# OPTIONS_GHC -Wno-deprecations #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# OPTIONS_GHC -Wno-deprecations #-}
 
 module Haskoin.Crypto.KeysSpec (spec) where
 

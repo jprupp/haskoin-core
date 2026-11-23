@@ -1,6 +1,6 @@
+{-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE ImportQualifiedPost #-}
-{-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE OverloadedRecordDot #-}

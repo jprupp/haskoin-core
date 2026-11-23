@@ -1,10 +1,10 @@
-{-# OPTIONS_GHC -Wno-deprecations #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TupleSections #-}
+{-# OPTIONS_GHC -Wno-deprecations #-}
 
 -- | The PSBT format of BIP 174, and its version 2 of BIP 370: the vectors
 -- of both BIPs, the bytes of a PSBT and the refusals of what breaks the
@@ -17,14 +17,14 @@ import Control.Exception (evaluate)
 import Control.Monad (foldM, forM, forM_)
 import Crypto.Hash (Digest, SHA256, digestFromByteString)
 import Data.Aeson ((.:), (.:?), (.=))
-import Data.Aeson.Key qualified as Key
 import Data.Aeson qualified as Json
+import Data.Aeson.Key qualified as Key
 import Data.Bits (xor)
 import Data.ByteArray (convert)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as B
-import Data.Bytes.Put (runPutS)
 import Data.ByteString.Lazy qualified as BL
+import Data.Bytes.Put (runPutS)
 import Data.Bytes.Serial (serialize)
 import Data.List (isPrefixOf, isSuffixOf)
 import Data.Map.Strict qualified as Map

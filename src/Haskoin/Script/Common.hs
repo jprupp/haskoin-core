@@ -57,9 +57,9 @@ import Data.Bytes.Put
 import Data.Bytes.Serial
 import Data.Hashable
 import Data.Maybe (fromMaybe, isJust)
+import Data.Serialize (Serialize (..))
 import Data.Text (Text)
 import qualified Data.Text as T
-import Data.Serialize (Serialize (..))
 import Data.Word (Word8)
 import GHC.Generics (Generic)
 import Haskoin.Network.Data (Network (..))

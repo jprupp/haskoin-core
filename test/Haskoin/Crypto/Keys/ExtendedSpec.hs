@@ -1,9 +1,9 @@
-{-# OPTIONS_GHC -Wno-deprecations #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TupleSections #-}
+{-# OPTIONS_GHC -Wno-deprecations #-}
 
 module Haskoin.Crypto.Keys.ExtendedSpec (spec) where
 

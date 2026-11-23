@@ -1,8 +1,8 @@
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE NoFieldSelectors #-}
@@ -80,17 +80,17 @@ where
 import Control.DeepSeq (NFData)
 import Control.Monad (when)
 import Control.Monad.RWS.Strict (RWS, asks, get, gets, modify', runRWS, tell)
+import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
-import Data.Maybe (isJust)
-import Data.Text.Encoding qualified as TE
 import Data.Int (Int32, Int64)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (isJust)
 import Data.Sequence qualified as Seq
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
-import Data.ByteString (ByteString)
+import Data.Text.Encoding qualified as TE
 import Data.Word (Word16, Word64, Word8)
 import GHC.Generics (Generic)
 import Haskoin.Block.Common (BlockHash)

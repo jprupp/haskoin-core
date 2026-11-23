@@ -717,15 +717,14 @@ sendFeeFilter = do
           modifyRelay (\r -> r {lastSentFeeFilter = toSend})
         d <- randomDelay avgFeeFilterBroadcastInterval
         modifyRelay (\r -> r {nextFeeFilter = t + d})
-      else
-        when
-          ( t + maxFeeFilterChangeDelay < s.relay.nextFeeFilter
-              && (current < 3 * lastSent `div` 4 || current > 4 * lastSent `div` 3)
-          )
-          $ do
-            w <- randomWord
-            let secs = fromIntegral (w `mod` 300)
-            modifyRelay (\r -> r {nextFeeFilter = t + seconds secs})
+      else when
+        ( t + maxFeeFilterChangeDelay < s.relay.nextFeeFilter
+            && (current < 3 * lastSent `div` 4 || current > 4 * lastSent `div` 3)
+        )
+        $ do
+          w <- randomWord
+          let secs = fromIntegral (w `mod` 300)
+          modifyRelay (\r -> r {nextFeeFilter = t + seconds secs})
 
 -- | @FeeFilterRounder::round@ (@src\/policy\/fees.cpp:21-29@): the bucket at
 -- or above the fee, moved one bucket down two times in three. The buckets

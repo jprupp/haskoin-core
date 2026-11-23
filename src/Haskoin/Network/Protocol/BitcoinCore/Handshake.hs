@@ -1,6 +1,6 @@
+{-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE ImportQualifiedPost #-}
-{-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -261,9 +261,11 @@ handleVersion v = do
           netProcessing 3961 "does not support transaction relay (connected in vain)"
     stop
   when (common >= wtxidRelayVersion) $
-    send MWtxidRelay $ netProcessing 3967 "wtxidrelay"
+    send MWtxidRelay $
+      netProcessing 3967 "wtxidrelay"
   when (common >= 70016) $
-    send MSendAddrV2 $ netProcessing 3976 "sendaddrv2"
+    send MSendAddrV2 $
+      netProcessing 3976 "sendaddrv2"
   o <- opts
   s1 <- getS
   when
@@ -295,9 +297,11 @@ handleVersion v = do
       modifyS $ \s ->
         s {getAddrSent = True, addrTokens = s.addrTokens + fromIntegral maxAddrToSend}
   when (common <= 70012) $
-    send (MAlert finalAlert) $ netProcessing 4063 "final alert"
+    send (MAlert finalAlert) $
+      netProcessing 4063 "final alert"
   when (s0.connectionType == Feeler) $
-    disconnect Done $ netProcessing 4069 "feeler connection completed"
+    disconnect Done $
+      netProcessing 4069 "feeler connection completed"
   where
     nodeBloomBit = 4 :: Word64
 
@@ -325,10 +329,12 @@ handleVerAck = do
           netProcessing 3825 "P2P handshake completed, sending INV"
     stop
   when (s.commonVersion >= shortIdsBlocksVersion) $
-    send (MSendCompact (SendCompact False cmpctBlocksVersion)) $ netProcessing 4134 "sendcmpct"
+    send (MSendCompact (SendCompact False cmpctBlocksVersion)) $
+      netProcessing 4134 "sendcmpct"
   o <- opts
   when (o.txReconciliation && (not s.wtxidRelay || s.reconciliation /= Registered)) $
-    modifyS $ \st -> st {reconciliation = NoReconciliation}
+    modifyS $
+      \st -> st {reconciliation = NoReconciliation}
   modifyS $ \st -> st {successfullyConnected = True}
 
 -- | @wtxidrelay@ (from line 4192): allowed only before @verack@, and

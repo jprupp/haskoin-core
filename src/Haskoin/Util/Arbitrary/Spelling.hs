@@ -192,11 +192,13 @@ recipe net = \case
     nested <- arbitrary
     return (Recipe (coin, []) nested (return . signedBy net (coin, nested) secret))
   UncommittedScript ->
-    Recipe <$> oneof (arbitrarySHSigInput net : [arbitraryWSHSigInput net | net.segWit])
+    Recipe
+      <$> oneof (arbitrarySHSigInput net : [arbitraryWSHSigInput net | net.segWit])
       <*> arbitrary
       <*> pure (onShownScript longerPush)
   UnsignedScript ->
-    Recipe <$> oneof [wrapKey <$> arbitraryPKSigInput net, wrapKey <$> arbitraryPKHashSigInput net, bareMultisig]
+    Recipe
+      <$> oneof [wrapKey <$> arbitraryPKSigInput net, wrapKey <$> arbitraryPKHashSigInput net, bareMultisig]
       <*> pure False
       <*> pure (onCoinScript longerPush)
   where

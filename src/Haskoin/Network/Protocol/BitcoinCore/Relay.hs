@@ -1,6 +1,6 @@
+{-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE ImportQualifiedPost #-}
-{-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE NoFieldSelectors #-}
@@ -69,12 +69,12 @@ where
 
 import Control.Monad (forM_, unless, when)
 import Data.Bits ((.&.))
+import Data.ByteString (ByteString)
+import Data.ByteString qualified as B
 import Data.List (sortOn)
 import Data.Maybe (isJust, mapMaybe)
 import Data.Ord (Down (..))
 import Data.Set qualified as Set
-import Data.ByteString (ByteString)
-import Data.ByteString qualified as B
 import Data.Word (Word16, Word64, Word8)
 import Haskoin.Block.Common (BlockHash (..))
 import Haskoin.Network.Bloom
@@ -161,7 +161,8 @@ handleInv (Inv ivs) = do
               else do
                 addKnownTx (TxHash iv.invHash)
                 unless e.initialBlockDownload $
-                  process "transaction announcement" $ netProcessing 4404 "AddTxAnnouncement"
+                  process "transaction announcement" $
+                    netProcessing 4404 "AddTxAnnouncement"
                 go (Set.insert key seen) blocks rest
         | otherwise = do
             ignore $ netProcessing 4408 "Unknown inv type"
@@ -193,7 +194,8 @@ handleGetData (GetData ivs) = do
       let (txs, rest) = span (isTxInv . (.invType)) items
       missing <- concat <$> mapM serveTx txs
       unless (null missing) $
-        send (MNotFound (NotFound missing)) $ netProcessing 2831 "notfound"
+        send (MNotFound (NotFound missing)) $
+          netProcessing 2831 "notfound"
       case rest of
         [] -> return ()
         (iv : more) -> do
@@ -222,7 +224,9 @@ privateGetData ivs = do
   e <- env
   case (s.privateTx, e.privateBroadcastTx) of
     (Just h, Just tx)
-      | [iv] <- ivs, iv.invType == InvTx, TxHash iv.invHash == h -> do
+      | [iv] <- ivs,
+        iv.invType == InvTx,
+        TxHash iv.invHash == h -> do
           send (MTx tx) $ netProcessing 4473 "private broadcast: tx"
           modifyS $ \st -> st {pingQueued = True}
           maybeSendPing
@@ -418,10 +422,12 @@ handleAddrs v2 addrs = do
         getAddrSent = if length addrs < 1000 then False else s.getAddrSent
       }
   unless (null kept) $
-    process "addresses to the address manager" $ netProcessing 6049 "addrman Add"
+    process "addresses to the address manager" $
+      netProcessing 6049 "addrman Add"
   s' <- getS
   when (s'.connectionType == AddrFetch && length addrs > 1) $
-    disconnect Done $ netProcessing 6055 "addrfetch connection completed"
+    disconnect Done $
+      netProcessing 6055 "addrfetch connection completed"
 
 -- | @getaddr@ (line 5151): answered once, and only for an inbound peer.
 -- The answer, from the node's cache unless the peer has 'PermAddr', goes
@@ -539,7 +545,8 @@ maybeSendFeeFilter = do
     let maxFilter = truncate (last feeFilterBuckets) :: Word64
         current = if e.initialBlockDownload then maxMoney else e.mempoolMinFee
     when (not e.initialBlockDownload && s.feeFilterSent == maxFilter) $
-      modifyS $ \st -> st {nextFeeFilter = 0}
+      modifyS $
+        \st -> st {nextFeeFilter = 0}
     s1 <- getS
     if t > s1.nextFeeFilter
       then do
@@ -550,16 +557,15 @@ maybeSendFeeFilter = do
           modifyS $ \st -> st {feeFilterSent = toSend}
         d <- random (poissonDelay avgFeeFilterBroadcastInterval)
         modifyS $ \st -> st {nextFeeFilter = t + d}
-      else
-        when
-          ( t + maxFeeFilterChangeDelay < s1.nextFeeFilter
-              && ( current < 3 * s1.feeFilterSent `div` 4
-                     || current > 4 * s1.feeFilterSent `div` 3
-                 )
-          )
-          $ do
-            d <- random (randomBelow (fromIntegral maxFeeFilterChangeDelay))
-            modifyS $ \st -> st {nextFeeFilter = t + fromIntegral d}
+      else when
+        ( t + maxFeeFilterChangeDelay < s1.nextFeeFilter
+            && ( current < 3 * s1.feeFilterSent `div` 4
+                   || current > 4 * s1.feeFilterSent `div` 3
+               )
+        )
+        $ do
+          d <- random (randomBelow (fromIntegral maxFeeFilterChangeDelay))
+          modifyS $ \st -> st {nextFeeFilter = t + fromIntegral d}
 
 -- | The transaction part of the trickle (lines 6327 to 6436): when the
 -- timer of the peer fires (always, for a peer with 'PermNoBan'), the

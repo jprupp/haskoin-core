@@ -1,9 +1,9 @@
-{-# OPTIONS_GHC -Wno-deprecations #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE NoFieldSelectors #-}
+{-# OPTIONS_GHC -Wno-deprecations #-}
 
 -- | Scenario tests of the protocol machine of Bitcoin Core 32.1: each one
 -- drives the machine through 'step' and checks the effects, and where it
