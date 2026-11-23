@@ -149,6 +149,26 @@ Bitcoin testnet3 is deprecated and still works.
   is the function for a single digest, since it hashes the whole
   transaction at each call. Code that calls it for every input of a
   transaction should change to the two new functions.
+- **`txSigHashes` and `txSigHashForkIdWith` give the BIP 143 digests of one
+  transaction from the hashes that they share.** The digest of BIP 143 is
+  the one of a SegWit version 0 input on Bitcoin and of every input on
+  Bitcoin Cash. It holds three hashes over all the inputs and all the
+  outputs of the transaction (`hashPrevouts`, `hashSequence` and
+  `hashOutputs`), which are the same for every input. `txSigHashes`
+  computes them once, into a value of the new type `TxSigHashes`, and a
+  function takes that value in place of the transaction:
+  `txSigHashForkIdWith`, `txSigHashCashTokenWith` and `txSigHashWith` in
+  `Haskoin.Script.SigHash`, `makeSignatureWith` in
+  `Haskoin.Transaction.Builder`, and `makeSigHashWith` in
+  `Haskoin.Transaction.Builder.Sign`. Each gives what the function without
+  `With` gives, and fails as it does. `sigHashesTx` gives the transaction
+  back. The functions without `With` are unchanged: each is the function
+  for a single digest, since it hashes the whole transaction at each call.
+  The legacy digest of Bitcoin shares nothing between the inputs, so
+  `txSigHashWith` saves time on a network with a fork id only.
+  `inputSpends` in `Haskoin.Transaction.Builder.Sign` gives the input script
+  and the witness stack of each input of a transaction, which is what
+  signing an input changes.
 
 ### Deprecated
 
@@ -556,6 +576,41 @@ Bitcoin testnet3 is deprecated and still works.
   digests of a transaction that Bitcoin Core 32.1 relayed and mined on
   regtest, whose inputs have the sequence numbers 0xfffffffe and
   0xfffffffd.
+- **`verifyStdTx`, `judgeInputs`, `signTx`, `signPsbt` and `finalizePsbt` no
+  longer hash the whole transaction again for each SegWit version 0 input,
+  nor for each input on Bitcoin Cash.** The digest of BIP 143, which those
+  inputs use, holds three hashes over all the inputs and all the outputs of
+  the transaction. These functions computed them again for every input, so
+  a transaction with twice as many inputs took four times as long. They now
+  compute them once for a transaction, as Bitcoin Core and Bitcoin Cash
+  Node do, with the new `txSigHashes`. The seconds for a transaction of
+  2000 inputs, and of 5000:
+
+  | Function and coins          | 2000, before | 2000, now | 5000, before | 5000, now |
+  |-----------------------------|--------------|-----------|--------------|-----------|
+  | `verifyStdTx`, P2WPKH       | 0.56         | 0.06      | 3.3          | 0.14      |
+  | `judgeInputs`, P2WPKH       | 0.57         | 0.06      | 3.5          | 0.14      |
+  | `signTx`, P2WPKH            | 0.61         | 0.07      | 3.7          | 0.18      |
+  | `signPsbt`, P2WPKH          | 0.62         | 0.11      | 3.4          | 0.29      |
+  | `finalizePsbt`, P2WPKH      | 0.56         | 0.06      | 3.4          | 0.15      |
+  | `verifyStdTx`, Bitcoin Cash | 0.56         | 0.06      | 3.3          | 0.14      |
+  | `judgeInputs`, Bitcoin Cash | 0.59         | 0.06      | 3.4          | 0.14      |
+  | `signTx`, Bitcoin Cash      | 0.60         | 0.08      | 3.8          | 0.20      |
+
+  `judgeInputs` needs no valid signature to do that work, so a server that
+  judges transactions from the network paid it for whoever asked. The
+  digests, the signatures and the answers are the same as before. A legacy
+  input of Bitcoin is not faster: its digest hashes a copy of the whole
+  transaction by its design, in Bitcoin Core too.
+- **`verifyStdTx`, `judgeInputs` and `signTx` no longer walk the lists of a
+  transaction up to each input.** The verifier and `judgeInputs` read the
+  input script, the witness and the coin of an input by its index in
+  constant time. `signTx` signs each input on its own input script and
+  witness stack, and puts the transaction together once. This is for an
+  input of any kind: on a transaction of 5000 Taproot inputs, `verifyStdTx`
+  goes from 0.54 to 0.14 seconds, `judgeInputs` from 0.46 to 0.16 and
+  `signTx` from 0.74 to 0.34. The signed transactions, the answers and the
+  error messages are the same as before.
 - **`judgeInputs` verifies a multisig of Bitcoin Cash with Schnorr signatures
   whose field of bits is the byte 0x81.** That is two signatures of eight
   keys, by the first key and the last. The field of bits takes the place of

@@ -178,6 +178,9 @@ Read a file before any work on what its line names.
 - `claude-notes/psbt.md`: the PSBT decoder, signer and finalizer
   (`decodePsbt`, `signPsbt`, `finalizePsbt`): what they refuse and when,
   where they differ from Bitcoin Core, their cost and their tests.
+- `claude-notes/signing.md`: the signer and the verifier of whole
+  transactions (`signTx`, `signInput`, `verifyStdTx`, `judgeInputs`) and
+  the digests they share between inputs: their cost and its tests.
 - `claude-notes/slip39.md`: SLIP-39 shares (`Haskoin.Crypto.Keys.Slip39`),
   their tests and where the literal values of the tests come from.
 - `claude-notes/test-helpers.md`: `testIdentity` and the five identity tests
@@ -230,6 +233,8 @@ Read a file before any work on what its line names.
   GHC, and each of the eight test processes about 100 MB.
 - A test of a cost: `timeout` around `evaluate`, as `taprootCostSpec` of
   `PsbtSpec.hs`. Size it so that the old code, timed first, is 4 times over.
+  Time both with the built `spec` and nothing else running: a mutant run
+  beside it made a test of 1 s miss a limit of 3 s.
 - `--match "/Module/name/"` runs nothing unless `name` is the whole name of
   a `describe`. Without slashes, a part of the name is enough.
 - The seconds that `haskell-dev test` prints change with the load of the

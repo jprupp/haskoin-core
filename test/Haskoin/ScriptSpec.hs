@@ -171,6 +171,15 @@ bip143Tx =
   \c95a783a76ac7a6d5988ac9093510d000000001976a9143bde42dbee7e4dbe6a21b2d50ce2\
   \f0167faa815988ac11000000"
 
+-- | That transaction without its second output, so that its second input
+-- has no output at its index.
+bip143OneOutputTx :: Tx
+bip143OneOutputTx =
+  "0100000002fff7f7881a8099afa6940d42d1e7f6362bec38171ea3edf433541db4e4ad969f\
+  \0000000000eeffffffef51e1b804cc89d182d279655c3aa89e815b1b309fe287d9b2b55d57\
+  \b90ec68a0100000000ffffffff01202cb206000000001976a9148280b37df378db99f66f85\
+  \c95a783a76ac7a6d5988ac11000000"
+
 -- | The scriptCode of the second input of that transaction: the P2PKH script
 -- of the key that the P2WPKH output pays to.
 bip143ScriptCode :: Script
@@ -179,6 +188,13 @@ bip143ScriptCode =
     runGetS deserialize $
       hex "76a9141d0f172a0ecb48aee1be1f2687d2963ae33f71a188ac"
 
+-- | The private key of that input in BIP 143. Its public key hashes to
+-- 1d0f172a0ecb48aee1be1f2687d2963ae33f71a1.
+bip143Key :: PrivateKey
+bip143Key =
+  wrapSecKey True . fromJust . secKey $
+    hex "619c335025c7f4012e556c2a58b2506e30b8511b53ade95ea316fd8c3286feb9"
+
 -- | The value of the output that the second input spends: 6 BTC.
 bip143Value :: Word64
 bip143Value = 600000000
@@ -186,6 +202,19 @@ bip143Value = 600000000
 -- | The digest BIP 143 gives for that input with SIGHASH_ALL.
 bip143Digest :: Hash256
 bip143Digest = "c37af31116d1b27caf68aae9e3ac82f1477929014d5b917657d0eb49478cb670"
+
+-- | The fork id digest of Bitcoin Cash for the second input of that
+-- transaction, for each of the six hash types. They were computed with
+-- Python (hashlib) from the text of BIP 143.
+bip143CashDigests :: [(SigHash, Hash256)]
+bip143CashDigests =
+  [ (0x41, "467f411d178762db122a6aced76370a1c8324355bf0796502bf82eeaeda86a35"),
+    (0x42, "c0876aa9dfd131ac207be062e389741416a87a5d1b28e4857c178990454dd498"),
+    (0x43, "abb61ba86e14313425d25846ed3a30904de1f081e013d80c385e165c2af1e020"),
+    (0xc1, "a5890ce40dc95a89717ae6fa3c9d60bcf9372539058c7e9a0cd8ff7909723326"),
+    (0xc2, "e58ebfd50f957a45c5f68439e55c6ae6054a3310ff2a116efa07d2bda2527bd3"),
+    (0xc3, "4e303851715b6ee36582740f43cc288c969e88afc641f14e3e8e68d32c406c1b")
+  ]
 
 -- | Opcodes by their byte, from the script specification.
 namedOpcodes :: [(Word8, ScriptOp)]
@@ -930,6 +959,59 @@ sigHashTypeSpec = do
 
 {- Digests -}
 
+-- | The digests of every input of a transaction, from the hashes that the
+-- inputs share. Each digest is the one that the test of the function for
+-- one digest states.
+sharedHashesSpec :: Spec
+sharedHashesSpec = do
+  let hashes = txSigHashes bip143Tx
+  it "computes the BIP 143 digests of the P2WPKH example from the hashes that its inputs share" $ do
+    txSigHashForkIdWith btc hashes bip143ScriptCode bip143Value 1 sigHashAll
+      `shouldBe` Right bip143Digest
+    txSigHashForkIdWith btc hashes bip143ScriptCode bip143Value 1 (setAnyoneCanPay sigHashAll)
+      `shouldBe` Right "fc5b6bbc855883bcfdaefb77071740ccde4929f15e6a13286584e779b2529d91"
+  it "computes the fork id digests of Bitcoin Cash for its six hash types from those hashes" $
+    forM_ bip143CashDigests $ \(sh, digest) -> do
+      (sh, txSigHashWith bch hashes bip143ScriptCode bip143Value 1 sh) `shouldBe` (sh, Right digest)
+      (sh, txSigHashCashTokenWith bch hashes "" bip143ScriptCode bip143Value 1 sh) `shouldBe` (sh, Right digest)
+  it "computes the legacy digest of Bitcoin for the transaction of those hashes" $
+    txSigHashWith btc hashes bip143ScriptCode bip143Value 1 sigHashAll
+      `shouldBe` Right "c46030820cbc48402a47cc5b5d3d41648f4e3a711f56b804d601d09dc112a6a4"
+  it "puts no output in the digest of SIGHASH_SINGLE when the input has no output at its index, from those hashes" $ do
+    let oneOutput = txSigHashes bip143OneOutputTx
+    txSigHashForkIdWith btc oneOutput bip143ScriptCode bip143Value 1 sigHashSingle
+      `shouldBe` Right "471a6e7963aa0c328ee12392fb1a345148edf326b4223660e1a770fdc2826435"
+    txSigHashForkIdWith btc oneOutput bip143ScriptCode bip143Value 0 sigHashSingle
+      `shouldBe` Right "0ef4fc221b524ce37251444160588c6989d6bc88b60c47a6ff7ded04173636c4"
+  it "fails with those hashes for an input index the transaction does not have" $ do
+    let legacy i = txSigHashWith btc hashes bip143ScriptCode bip143Value i sigHashAll
+        bip143 i = txSigHashForkIdWith btc hashes bip143ScriptCode bip143Value i sigHashAll
+    legacy 2 `shouldBe` Left "txSigHash: input index out of range"
+    legacy (-1) `shouldBe` Left "txSigHash: input index out of range"
+    bip143 2 `shouldBe` Left "txSigHashForkId: input index out of range"
+    bip143 (-1) `shouldBe` Left "txSigHashForkId: input index out of range"
+  it "requires SIGHASH_FORKID on Bitcoin Cash with those hashes" $
+    txSigHashWith bch hashes bip143ScriptCode bip143Value 1 sigHashAll
+      `shouldBe` Left "txSigHash: SIGHASH_FORKID is required on this network"
+  it "gives back the transaction that the hashes were made from" $
+    sigHashesTx hashes `shouldBe` bip143Tx
+  -- The signature that BIP 143 gives for the second input of its example
+  it "makeSignatureWith signs the P2WPKH example of BIP 143 with the signature of the BIP, from those hashes" $ do
+    let coin = PayWitnessPKHash "1d0f172a0ecb48aee1be1f2687d2963ae33f71a1"
+        outpoint = (bip143Tx.inputs !! 1).outpoint
+        sigInput = SigInput coin bip143Value outpoint sigHashAll Nothing
+    fmap (encodeHex . encodeTxSig btc) (makeSignatureWith btc hashes 1 sigInput bip143Key)
+      `shouldBe` Right
+        "304402203609e17b84f6a7d30c80bfa610b5b4542f32a8a0d5447a12fb1366d7f01cc44a\
+        \0220573a954c4518331561406f90300e8f3358f51928d43c212a8caed02de67eebee01"
+  -- The digest of that case is the constant 1, which commits to nothing
+  it "makeSignatureWith refuses SIGHASH_SINGLE on a legacy input without an output at its index" $ do
+    let coin = PayPKHash "1d0f172a0ecb48aee1be1f2687d2963ae33f71a1"
+        outpoint = (bip143OneOutputTx.inputs !! 1).outpoint
+        sigInput = SigInput coin bip143Value outpoint sigHashSingle Nothing
+    makeSignatureWith btc (txSigHashes bip143OneOutputTx) 1 sigInput bip143Key
+      `shouldBe` Left "makeSignature: SIGHASH_SINGLE without an output at the input index"
+
 digestSpec :: Spec
 digestSpec = do
   it "computes the BIP 143 digest of the P2WPKH example" $
@@ -954,14 +1036,7 @@ digestSpec = do
     $
     -- The fork id of Bitcoin Cash is 0, so the last four bytes of the
     -- preimage are the hash type byte and three zero bytes
-    forM_
-      [ (0x41, "467f411d178762db122a6aced76370a1c8324355bf0796502bf82eeaeda86a35"),
-        (0x42, "c0876aa9dfd131ac207be062e389741416a87a5d1b28e4857c178990454dd498"),
-        (0x43, "abb61ba86e14313425d25846ed3a30904de1f081e013d80c385e165c2af1e020"),
-        (0xc1, "a5890ce40dc95a89717ae6fa3c9d60bcf9372539058c7e9a0cd8ff7909723326"),
-        (0xc2, "e58ebfd50f957a45c5f68439e55c6ae6054a3310ff2a116efa07d2bda2527bd3"),
-        (0xc3, "4e303851715b6ee36582740f43cc288c969e88afc641f14e3e8e68d32c406c1b")
-      ]
+    forM_ bip143CashDigests
     $ \(sh, digest) ->
       (sh, txSigHashForkId bch bip143Tx bip143ScriptCode bip143Value 1 sh) `shouldBe` (sh, Right digest)
   it "fails for an input index the transaction does not have" $ do
@@ -977,6 +1052,18 @@ digestSpec = do
     -- The script code is then 26 bytes: ab, then the 25 bytes of the script
     txSigHashForkId btc bip143Tx (Script (OP_CODESEPARATOR : bip143ScriptCode.ops)) bip143Value 1 sigHashAll
       `shouldBe` Right "f58633c60526565d17f4a38d202ab3cfc26fb900abd2f49cf2252488b5240964"
+  -- BIP 143: hashOutputs is 32 zero bytes when the type is SINGLE and the
+  -- input index is not below the number of outputs. The transaction is the
+  -- example without its second output, and the digests were computed with
+  -- Python (hashlib) from the text of the BIP.
+  it "puts no output in the BIP 143 digest of SIGHASH_SINGLE when the input has no output at its index" $ do
+    txSigHashForkId btc bip143OneOutputTx bip143ScriptCode bip143Value 1 sigHashSingle
+      `shouldBe` Right "471a6e7963aa0c328ee12392fb1a345148edf326b4223660e1a770fdc2826435"
+    txSigHashForkId btc bip143OneOutputTx bip143ScriptCode bip143Value 0 sigHashSingle
+      `shouldBe` Right "0ef4fc221b524ce37251444160588c6989d6bc88b60c47a6ff7ded04173636c4"
+    txSigHashForkId bch bip143OneOutputTx bip143ScriptCode bip143Value 1 0x43
+      `shouldBe` Right "655196fc3fcfa9cfc37922e03bf9ff86e1ad2892e18065f032b11afd6c9902d0"
+  sharedHashesSpec
   it "requires SIGHASH_FORKID on Bitcoin Cash" $
     txSigHash bch bip143Tx bip143ScriptCode bip143Value 1 sigHashAll `shouldSatisfy` isLeft
   it "uses the fork id digest on Bitcoin Cash" $

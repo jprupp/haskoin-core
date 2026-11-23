@@ -26,6 +26,7 @@ module Haskoin.Transaction.Builder
     signTx,
     signNestedWitnessTx,
     makeSignature,
+    makeSignatureWith,
     signInput,
     signNestedInput,
     signTaprootInput,
@@ -58,7 +59,7 @@ module Haskoin.Transaction.Builder
   )
 where
 
-import Control.Monad (foldM, mfilter, unless, when)
+import Control.Monad (foldM, join, mfilter, unless, when)
 import Control.Monad.Identity (runIdentity)
 import Crypto.Secp256k1
 import Data.Bits (popCount, testBit)
@@ -70,9 +71,11 @@ import Data.Conduit.List (sourceList)
 import Data.Either (fromRight, rights)
 import Data.List (nub)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes, isJust, isNothing)
+import Data.Maybe (catMaybes, fromMaybe, isJust, isNothing)
 import Data.String.Conversions (cs)
 import Data.Text (Text)
+import Data.Vector (Vector)
+import Data.Vector qualified as V
 import Data.Word (Word64)
 import Haskoin.Address
 import Haskoin.Crypto.Hash (Hash256, addressHash)
@@ -80,7 +83,14 @@ import Haskoin.Crypto.Keys.Common
 import Haskoin.Crypto.Signature
 import Haskoin.Network.Data
 import Haskoin.Script
-import Haskoin.Transaction.Builder.Sign (SigInput, buildInput, makeSignature, sigKeys, signTaprootInput)
+import Haskoin.Transaction.Builder.Sign
+  ( SigInput,
+    buildInput,
+    makeSignature,
+    makeSignatureWith,
+    sigKeys,
+    signTaprootInput,
+  )
 import Haskoin.Transaction.Builder.Sign qualified as Sign
 import Haskoin.Transaction.Common
 import Haskoin.Transaction.Segwit
@@ -744,26 +754,40 @@ mergeTxInput net txs tx ((so, val), i) = do
 -- 'True' is still no promise that nodes relay the transaction. The relay
 -- policy also has rules on the whole transaction, such as its size, its
 -- fee and its outputs, that are not looked at here.
+--
+-- __Cost.__ The time grows with the size of the transaction, and not with
+-- its square: each coin is looked up once, and the hashes that the digests
+-- of the inputs share are computed once ('TxSigHashes' for SegWit version 0
+-- and for a network with a fork id, 'TaprootTxHashes' for Taproot). A
+-- legacy input of Bitcoin is the exception: its digest hashes a copy of
+-- the whole transaction, in Bitcoin Core too.
 verifyStdTx ::
   Network -> Tx -> [(ScriptOutput, Word64, OutPoint)] -> Bool
 verifyStdTx net tx coins =
   not (null tx.inputs)
     && Map.size (Map.fromList [(i.outpoint, ()) | i <- tx.inputs]) == length tx.inputs
-    && all (verifyInput net tx spent) [0 .. length tx.inputs - 1]
-    && maybe False (\outs -> toSpend <= sum (map (toInteger . snd) outs)) (sequence spent.coins)
+    && all (verifyInput net spent) [0 .. length tx.inputs - 1]
+    && maybe False (\outs -> toSpend <= sum (fmap (toInteger . snd) outs)) (sequence spent.coins)
   where
     -- The coins are looked up once for the whole transaction
     spent = spentCoins tx coins
     toSpend = sum (map (toInteger . (.value)) tx.outputs)
 
--- | The coin of each input of a transaction, and the hashes that its
--- Taproot digests share. 'verifyStdTx' and 'judgeInputs' compute this once
--- for a transaction: they look up each coin once, and the digests of the
--- Taproot inputs hash the inputs and the outputs of the transaction once,
--- and not once for each input.
+-- | The coin of each input of a transaction, what each input gives to
+-- spend it, and the hashes that the digests of its inputs share.
+-- 'verifyStdTx' and 'judgeInputs' compute this once for a transaction:
+-- they look up each coin once, and the digests hash the inputs and the
+-- outputs of the transaction once, and not once for each input. The legacy
+-- digest of Bitcoin shares nothing. An input is read by its index in
+-- constant time, where a list is walked up to it.
 data SpentCoins = SpentCoins
   { -- | the coin of each input, in order, when it is among those given
-    coins :: [Maybe (ScriptOutput, Word64)],
+    coins :: Vector (Maybe (ScriptOutput, Word64)),
+    -- | the input script and the witness stack of each input, in order
+    spends :: Vector (B.ByteString, WitnessStack),
+    -- | the hashes of the BIP 143 digests: SegWit version 0, and every
+    -- input on a network with a fork id
+    sigHashes :: TxSigHashes,
     -- | the hashes of the Taproot digests, when every coin is given: the
     -- digest commits to the output that every input spends
     taproot :: Maybe TaprootTxHashes
@@ -772,7 +796,9 @@ data SpentCoins = SpentCoins
 spentCoins :: Tx -> [(ScriptOutput, Word64, OutPoint)] -> SpentCoins
 spentCoins tx given =
   SpentCoins
-    { coins = found,
+    { coins = V.fromList found,
+      spends = V.fromList (Sign.inputSpends tx),
+      sigHashes = txSigHashes tx,
       taproot = sharedHashes tx . map (\(so, val) -> TxOut val (encodeSerial so)) =<< sequence found
     }
   where
@@ -873,38 +899,32 @@ sharedHashes tx = eitherToMaybe . taprootTxHashes tx
 -- policy also has rules on the whole transaction, such as its size, its
 -- fee and its outputs, that are not looked at here.
 verifyStdInput :: Network -> Tx -> [(ScriptOutput, Word64, OutPoint)] -> Int -> Bool
-verifyStdInput net tx coins = verifyInput net tx (spentCoins tx coins)
+verifyStdInput net tx coins = verifyInput net (spentCoins tx coins)
 
 -- | 'verifyStdInput' on coins that are looked up already
-verifyInput :: Network -> Tx -> SpentCoins -> Int -> Bool
-verifyInput net tx spent i
-  | i < 0 || i >= length tx.inputs = False
-  | otherwise = case spent.coins !! i of
-      Nothing -> False
-      Just (so0, val)
-        | isSegwit so0 ->
-            net.segWit && fromRight False ((B.null inp &&) . verifySegwitInput so0 val <$> wp so0)
-        | isTaproot so0 ->
-            net.segWit && B.null inp && verifyTaprootInput so0
-        | otherwise ->
-            or $
-              rights
-                [ (\si -> null ws && minimalPushes inp && verifyLegacyInput so0 val si)
-                    <$> unmarshal net inp,
-                  nestedScriptOutput >>= \so -> verifyNestedInput so0 so val <$> wp so
-                ]
+verifyInput :: Network -> SpentCoins -> Int -> Bool
+verifyInput net spent i = case join (spent.coins V.!? i) of
+  Nothing -> False
+  Just (so0, val)
+    | isSegwit so0 ->
+        net.segWit && fromRight False ((B.null inp &&) . verifySegwitInput so0 val <$> wp so0)
+    | isTaproot so0 ->
+        net.segWit && B.null inp && verifyTaprootInput so0
+    | otherwise ->
+        or $
+          rights
+            [ (\si -> null ws && minimalPushes inp && verifyLegacyInput so0 val si)
+                <$> unmarshal net inp,
+              nestedScriptOutput >>= \so -> verifyNestedInput so0 so val <$> wp so
+            ]
   where
-    inp = (tx.inputs !! i).script
-    theTxSigHash so val = Sign.makeSigHash net tx i so val
+    (inp, ws) = fromMaybe (B.empty, []) (spent.spends V.!? i)
+    theTxSigHash so val = Sign.makeSigHashWith net spent.sigHashes i so val
+    legacyDigest out val = txSigHashWith net spent.sigHashes out val i
 
     -- A signature verifies only when its digest could be computed.
     checkSig :: Either String Hash256 -> Sig -> PubKey -> Bool
     checkSig h sig pub = either (const False) (\m -> verifyHashSig m sig pub) h
-
-    ws :: WitnessStack
-    ws
-      | length tx.witness > i = tx.witness !! i
-      | otherwise = []
 
     wp :: ScriptOutput -> Either String (Maybe ScriptOutput, SimpleInput)
     wp so = decodeWitnessInput net =<< viewWitnessProgram net so ws
@@ -936,7 +956,7 @@ verifyInput net tx spent i
         pubKeyAddr pub == p2pkhAddr h
           && checkSig (theTxSigHash so val sh Nothing) sig pub.point
       (PayMulSig pubs r, RegularInput (SpendMulSig sigs)) ->
-        either (const False) (\out -> multisigVerifies (txSigHash net tx out val i) ((.point) <$> pubs) r sigs) $
+        either (const False) (\out -> multisigVerifies (legacyDigest out val) ((.point) <$> pubs) r sigs) $
           encodeOutput so
       (PayScriptHash h, ScriptHashInput si' rdm) ->
         payToScriptAddress rdm == Right (p2shAddr h) && verifyLegacyInput rdm val (RegularInput si')
@@ -1139,6 +1159,13 @@ data InputVerdict
 -- to the hash of one, is 'InputUndecided' on every network: 'decodeOutput'
 -- does not read that script. On Bitcoin Cash no block holds a spend of
 -- such a coin.
+--
+-- __Cost.__ The time grows with the size of the transaction, and not with
+-- its square: each coin is looked up once, and the hashes that the digests
+-- of the inputs share are computed once ('TxSigHashes' for SegWit version 0
+-- and for a network with a fork id, 'TaprootTxHashes' for Taproot). A
+-- legacy input of Bitcoin is the exception: its digest hashes a copy of
+-- the whole transaction, in Bitcoin Core too.
 judgeInputs :: Network -> Tx -> [Maybe TxOut] -> [InputVerdict]
 judgeInputs net tx given = zipWith judge [0 ..] decoded
   where
@@ -1154,9 +1181,13 @@ judgeInputs net tx given = zipWith judge [0 ..] decoded
       return (prefix, so, o.value)
     spent =
       SpentCoins
-        { coins = [d >>= \(prefix, so, v) -> if B.null prefix then Just (so, v) else Nothing | d <- decoded],
+        { coins = V.fromList (map (>>= withoutTokens) decoded),
+          spends = V.fromList (Sign.inputSpends tx),
+          sigHashes = txSigHashes tx,
           taproot = sharedHashes tx =<< sequence prevs
         }
+    -- 'verifyInput' reads no coin that holds tokens
+    withoutTokens (prefix, so, v) = if B.null prefix then Just (so, v) else Nothing
     -- What the second reading of an input may answer. Without a fork id
     -- it does not say verified: 'verifyInput' reads every kind of input
     -- that is verified there, and the second reading only looks for a
@@ -1168,7 +1199,7 @@ judgeInputs net tx given = zipWith judge [0 ..] decoded
     judge :: Int -> Maybe (B.ByteString, ScriptOutput, Word64) -> InputVerdict
     judge _ Nothing = InputUndecided
     judge i (Just (prefix, so, val))
-      | B.null prefix && verifyInput net tx spent i = InputVerified
+      | B.null prefix && verifyInput net spent i = InputVerified
       | otherwise = secondReading $ case so of
           PayPKHash h
             | null ws, Just [sig, pub] <- pushes -> keyed (addressHash pub == h) sig pub legacy
@@ -1197,8 +1228,7 @@ judgeInputs net tx given = zipWith judge [0 ..] decoded
                 cashMultisig redeem keys asked bits sigs
           _ -> InputUndecided
       where
-        inp = (tx.inputs !! i).script
-        ws = if length tx.witness > i then tx.witness !! i else []
+        (inp, ws) = fromMaybe (B.empty, []) (spent.spends V.!? i)
         -- The items of an input script that only pushes data, in a form
         -- of push that a block holds. The empty item, a number from 1 to
         -- 16 and the byte 0x81 are each pushed by an opcode of their own
@@ -1215,8 +1245,10 @@ judgeInputs net tx given = zipWith judge [0 ..] decoded
           _ -> Nothing
         legacy sh = do
           script <- encodeOutput so
-          if forked then txSigHashCashToken net tx prefix script val i sh else txSigHash net tx script val i sh
-        segwit out sh = Sign.makeSigHash net tx i out val sh Nothing
+          if forked
+            then txSigHashCashTokenWith net spent.sigHashes prefix script val i sh
+            else txSigHashWith net spent.sigHashes script val i sh
+        segwit out sh = Sign.makeSigHashWith net spent.sigHashes i out val sh Nothing
         -- a coin that names the hash of its key: another key does not
         -- open it, whatever it signed
         keyed named sig pub digest
@@ -1278,7 +1310,7 @@ judgeInputs net tx given = zipWith judge [0 ..] decoded
                   (const False)
                   (verifyCashSchnorr key.point (B.init sig))
                   (encodeOutput script >>= \code -> cashDigest code (fromIntegral (B.last sig)))
-            cashDigest code = txSigHashCashToken net tx prefix code val i
+            cashDigest code = txSigHashCashTokenWith net spent.sigHashes prefix code val i
         taproot program sig = fromRight InputUndecided $ do
           key <- maybe (Left "not a key") Right (importXOnlyPubKey program)
           hashes <- maybe (Left "a spent output is missing") Right spent.taproot

@@ -42,6 +42,14 @@ module Haskoin.Script.SigHash
     txSigHash,
     txSigHashForkId,
     txSigHashCashToken,
+
+    -- * Digests of every input of a transaction
+    TxSigHashes,
+    txSigHashes,
+    sigHashesTx,
+    txSigHashWith,
+    txSigHashForkIdWith,
+    txSigHashCashTokenWith,
     splitTokenPrefix,
     TxSignature (..),
     decodeTxSig,
@@ -63,6 +71,8 @@ import Data.Bytes.Serial
 import Data.Hashable
 import Data.Maybe
 import Data.Scientific
+import Data.Vector (Vector)
+import Data.Vector qualified as V
 import Data.Word
 import GHC.Generics (Generic)
 import Haskoin.Crypto.Hash
@@ -270,6 +280,10 @@ sigHashGetForkId (SigHash n) = fromIntegral $ n `shiftR` 8
 -- accepts.
 --
 -- Fails when the input index is not an index of the transaction.
+--
+-- This is the function for one digest. For the digests of several inputs
+-- of one transaction, 'txSigHashWith' does not hash the transaction again
+-- for each of them on a network with a fork id.
 txSigHash ::
   Network ->
   -- | transaction to sign
@@ -284,13 +298,35 @@ txSigHash ::
   SigHash ->
   -- | hash to be signed
   Either String Hash256
-txSigHash net tx out v i sh
-  | i < 0 || i >= length tx.inputs =
+txSigHash net = txSigHashWith net . txSigHashes
+
+-- | 'txSigHash' for the transaction of the t'TxSigHashes'. It gives the
+-- digest that 'txSigHash' gives, and fails as it does.
+--
+-- On a network with a fork id the digest is that of 'txSigHashForkIdWith',
+-- which takes the hashes that the inputs share. Without a fork id nothing
+-- is shared: the legacy digest hashes a copy of the whole transaction for
+-- each input by its design, in Bitcoin Core too.
+txSigHashWith ::
+  Network ->
+  TxSigHashes ->
+  -- | script from output being spent
+  Script ->
+  -- | value of output being spent
+  Word64 ->
+  -- | index of input being signed
+  Int ->
+  -- | what to sign
+  SigHash ->
+  -- | hash to be signed
+  Either String Hash256
+txSigHashWith net hashes out v i sh
+  | i < 0 || i >= V.length hashes.inputs =
       Left "txSigHash: input index out of range"
   | isJust net.sigHashForkId && not (hasForkIdFlag sh) =
       Left "txSigHash: SIGHASH_FORKID is required on this network"
   | isJust net.sigHashForkId =
-      txSigHashForkId net tx out v i sh
+      txSigHashForkIdWith net hashes out v i sh
   | otherwise = do
       let newIn = buildInputs tx.inputs fout i sh
       -- When SigSingle and input index > outputs, then sign integer 1
@@ -301,6 +337,7 @@ txSigHash net tx out v i sh
           serialize newTx
           putWord32le $ fromIntegral sh
   where
+    tx = hashes.tx
     fout = Script $ filter (/= OP_CODESEPARATOR) out.ops
     one = "0100000000000000000000000000000000000000000000000000000000000000"
 
@@ -370,6 +407,11 @@ buildOutputs txos i sh
 --   'Haskoin.Transaction.Builder.judgeInputs' in an input.
 --
 -- Fails when the input index is not an index of the transaction.
+--
+-- This is the function for one digest. It hashes every input and every
+-- output of the transaction, so the digests of all the inputs take time
+-- by the square of its size: 'txSigHashForkIdWith' is the function for
+-- them.
 txSigHashForkId ::
   Network ->
   -- | transaction to sign
@@ -384,7 +426,26 @@ txSigHashForkId ::
   SigHash ->
   -- | hash to be signed
   Either String Hash256
-txSigHashForkId net tx = txSigHashCashToken net tx B.empty
+txSigHashForkId net = txSigHashForkIdWith net . txSigHashes
+
+-- | 'txSigHashForkId' for the transaction of the t'TxSigHashes', from the
+-- hashes that the inputs share. It gives the digest that 'txSigHashForkId'
+-- gives, and fails as it does. Its time does not depend on the size of the
+-- transaction.
+txSigHashForkIdWith ::
+  Network ->
+  TxSigHashes ->
+  -- | script from output being spent
+  Script ->
+  -- | value of output being spent
+  Word64 ->
+  -- | index of input being signed
+  Int ->
+  -- | what to sign
+  SigHash ->
+  -- | hash to be signed
+  Either String Hash256
+txSigHashForkIdWith net hashes = txSigHashCashTokenWith net hashes B.empty
 
 -- | 'txSigHashForkId' for a coin of Bitcoin Cash that holds tokens. The
 -- digest of such a coin also covers its token prefix, the bytes that
@@ -410,38 +471,53 @@ txSigHashCashToken ::
   SigHash ->
   -- | hash to be signed
   Either String Hash256
-txSigHashCashToken net tx prefix out v i sh
-  | i < 0 || i >= length tx.inputs =
-      Left "txSigHashForkId: input index out of range"
-  | otherwise = Right . doubleSHA256 . runPutS $ do
-      putWord32le tx.version
-      serialize hashPrevouts
-      serialize hashSequence
-      serialize (tx.inputs !! i).outpoint
-      putByteString prefix
-      putScript out
-      putWord64le v
-      putWord32le (tx.inputs !! i).sequence
-      serialize hashOutputs
-      putWord32le tx.locktime
-      putWord32le $ fromIntegral hashType
+txSigHashCashToken net = txSigHashCashTokenWith net . txSigHashes
+
+-- | 'txSigHashCashToken' for the transaction of the t'TxSigHashes', from
+-- the hashes that the inputs share. It gives the digest that
+-- 'txSigHashCashToken' gives, and fails as it does.
+txSigHashCashTokenWith ::
+  Network ->
+  TxSigHashes ->
+  -- | token prefix of the output being spent, or empty
+  ByteString ->
+  -- | script from output being spent, without the prefix
+  Script ->
+  -- | value of output being spent
+  Word64 ->
+  -- | index of input being signed
+  Int ->
+  -- | what to sign
+  SigHash ->
+  -- | hash to be signed
+  Either String Hash256
+txSigHashCashTokenWith net hashes prefix out v i sh = do
+  input <- maybe (Left "txSigHashForkId: input index out of range") Right (hashes.inputs V.!? i)
+  return . doubleSHA256 . runPutS $ do
+    putWord32le hashes.tx.version
+    serialize hashPrevouts
+    serialize hashSequence
+    serialize input.outpoint
+    putByteString prefix
+    putScript out
+    putWord64le v
+    putWord32le input.sequence
+    serialize hashOutputs
+    putWord32le hashes.tx.locktime
+    putWord32le $ fromIntegral hashType
   where
     hashType = case net.sigHashForkId of
       Just forkId -> sigHashAddForkId sh forkId
       Nothing -> sh
     hashPrevouts
-      | not (anyoneCanPay sh) =
-          doubleSHA256 . runPutS $ mapM_ (serialize . (.outpoint)) tx.inputs
+      | not (anyoneCanPay sh) = hashes.hashPrevouts
       | otherwise = zeros
     hashSequence
-      | not (anyoneCanPay sh || isSigHashSingle sh || isSigHashNone sh) =
-          doubleSHA256 . runPutS $ mapM_ (putWord32le . (.sequence)) tx.inputs
+      | not (anyoneCanPay sh || isSigHashSingle sh || isSigHashNone sh) = hashes.hashSequence
       | otherwise = zeros
     hashOutputs
-      | not (isSigHashSingle sh || isSigHashNone sh) =
-          doubleSHA256 . runPutS $ mapM_ serialize tx.outputs
-      | isSigHashSingle sh && i < length tx.outputs =
-          doubleSHA256 . runPutS $ serialize $ tx.outputs !! i
+      | not (isSigHashSingle sh || isSigHashNone sh) = hashes.hashOutputs
+      | isSigHashSingle sh, Just output <- hashes.outputs V.!? i = doubleSHA256 (runPutS (serialize output))
       | otherwise = zeros
     putScript s = do
       let encodedScript = runPutS $ serialize s
@@ -449,6 +525,57 @@ txSigHashCashToken net tx prefix out v i sh
       putByteString encodedScript
     zeros :: Hash256
     zeros = "0000000000000000000000000000000000000000000000000000000000000000"
+
+-- | A transaction with what the digests of its inputs share: the three
+-- hashes of BIP 143 that are the same for every input (@hashPrevouts@,
+-- @hashSequence@ and @hashOutputs@). They are in the digest of a SegWit
+-- version 0 input on Bitcoin and of every input on Bitcoin Cash.
+--
+-- The three hashes cover every input and every output, so a digest that
+-- computes them again takes time by the size of the transaction, and the
+-- digests of all the inputs by its square. Bitcoin Core computes them once
+-- for a transaction (@PrecomputedTransactionData@), and so does Bitcoin
+-- Cash Node. With a value of this type, a BIP 143 digest takes time by the
+-- size of its own input. t'Haskoin.Transaction.Taproot.TaprootTxHashes' is
+-- the same thing for the digest of a Taproot input.
+--
+-- Make it with 'txSigHashes', which is the only way, so that the hashes
+-- are always those of the transaction. A hash is computed when the first
+-- digest needs it: one with @SIGHASH_ANYONECANPAY@ needs none of the two
+-- over the inputs, and one with @SIGHASH_NONE@ or @SIGHASH_SINGLE@ does not
+-- need the one over all the outputs.
+--
+-- No digest of this module commits to the input scripts nor to the
+-- witnesses of the transaction: BIP 143 leaves them out, and the legacy
+-- digest empties them. So the value stays right while the inputs of the
+-- transaction are signed. After any other change of the transaction, make
+-- it again.
+data TxSigHashes = TxSigHashes
+  { tx :: !Tx,
+    inputs :: !(Vector TxIn),
+    outputs :: !(Vector TxOut),
+    hashPrevouts :: Hash256,
+    hashSequence :: Hash256,
+    hashOutputs :: Hash256
+  }
+
+-- | The transaction with the hashes that the digests of its inputs share
+txSigHashes :: Tx -> TxSigHashes
+txSigHashes tx =
+  TxSigHashes
+    { tx = tx,
+      inputs = V.fromList tx.inputs,
+      outputs = V.fromList tx.outputs,
+      hashPrevouts = hashOf (mapM_ (serialize . (.outpoint)) tx.inputs),
+      hashSequence = hashOf (mapM_ (putWord32le . (.sequence)) tx.inputs),
+      hashOutputs = hashOf (mapM_ serialize tx.outputs)
+    }
+  where
+    hashOf = doubleSHA256 . runPutS
+
+-- | The transaction that the hashes were made from
+sigHashesTx :: TxSigHashes -> Tx
+sigHashesTx hashes = hashes.tx
 
 -- | Split the script field of an output of Bitcoin Cash into its token
 -- prefix and the output script after it. An output without tokens has an

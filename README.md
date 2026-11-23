@@ -561,6 +561,32 @@ Fill in `SigInput` and pick the signing function by the type of the coin:
 For multisig, each signer can call `signTx` with their own keys. `mergeTxs`
 combines the results for legacy inputs. For SegWit multisig, use a [PSBT](#psbt).
 
+The digest of a SegWit version 0 input, and of every input on Bitcoin Cash, is
+the one of BIP 143. It holds three hashes over all the inputs and all the
+outputs of the transaction, which are the same for every input. `signTx`,
+`verifyStdTx`, `judgeInputs`, `signPsbt` and `finalizePsbt` compute them once
+for a transaction. Code that computes the digests itself does the same:
+`txSigHashes` takes the transaction once, and `txSigHashForkIdWith` gives the
+digest of one input. `txSigHashForkId` computes the three hashes at each call,
+so it is the function for one digest.
+
+```haskell
+-- The hashes that the digests of the inputs share, computed once.
+let hashes = txSigHashes unsigned
+
+print $ do
+  -- The script code of a P2WPKH coin is the P2PKH script of its key.
+  code <- case coinScript of
+    PayWitnessPKHash keyHash -> encodeOutput (PayPKHash keyHash)
+    _ -> Left "not a P2WPKH coin"
+  mapM (\i -> txSigHashForkIdWith btc hashes code amount i sigHashAll) [0 .. length unsigned.inputs - 1]
+-- => Right ["06c4ab89d1c30437a3f32fb31384d908bc9902f09a294dffd54a820942d8152d"]
+```
+
+`makeSignatureWith` signs one input from the same hashes. The legacy digest of
+Bitcoin shares nothing between the inputs: it hashes a copy of the whole
+transaction for each of them, by its design.
+
 ### Coin selection and fees
 
 Make your coin type an instance of `Coin`. The library then picks coins and

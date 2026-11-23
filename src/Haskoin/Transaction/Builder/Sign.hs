@@ -21,12 +21,15 @@
 module Haskoin.Transaction.Builder.Sign
   ( SigInput (..),
     makeSignature,
+    makeSignatureWith,
     makeSigHash,
+    makeSigHashWith,
     signTx,
     findInputIndex,
     signInput,
     signTaprootInput,
     buildInput,
+    inputSpends,
     sigKeys,
   )
 where
@@ -45,6 +48,7 @@ import Data.Hashable
 import Data.List
 import qualified Data.Map.Strict as Map
 import Data.Maybe
+import qualified Data.Vector as V
 import Data.Word
 import GHC.Generics
 import Haskoin.Address
@@ -138,6 +142,12 @@ instance FromJSON SigInput where
 --
 -- An input signed with 'SIGHASH_SINGLE' needs an output at its index, or
 -- the whole call fails: see 'signInput'.
+--
+-- The hashes that the digests of the inputs share are computed once for the
+-- transaction ('TxSigHashes' for SegWit version 0 and for a network with a
+-- fork id, 'TaprootTxHashes' for Taproot), and not once for each input. A
+-- legacy input of Bitcoin shares nothing: its digest hashes a copy of the
+-- whole transaction, in Bitcoin Core too.
 signTx ::
   Network ->
   -- | transaction to sign
@@ -150,29 +160,58 @@ signTx ::
   Either String Tx
 signTx net otx sigis allKeys
   | null ti = Left "signTx: Transaction has no inputs"
-  | otherwise = foldM go otx $ findInputIndex ((.outpoint) . fst) sigis ti
+  | otherwise = do
+      signed <- forM (zip [0 ..] (inputSpends otx)) $ \(i, spend) ->
+        maybe (Right (spend, False)) (go i spend) (Map.lookup i found)
+      let spends = map fst signed
+      return
+        otx
+          { inputs = zipWith (\TxIn {..} (signedScript, _) -> TxIn {script = signedScript, ..}) ti spends,
+            witness = if any snd signed then map snd spends else otx.witness
+          }
   where
     ti = otx.inputs
+    -- The signing parameters of each input, by its index
+    found = Map.fromList [(i, sigi) | (sigi, i) <- findInputIndex ((.outpoint) . fst) sigis ti]
     -- The public keys of the secret keys are derived once for the whole
     -- transaction, not once per input
     index = keyIndex allKeys
-    go tx (sigi@(SigInput so _ _ sh rdmM, _), i) = do
+    -- An input signed with the keys that its coin asks for, and whether
+    -- that gave it a witness. Each input is signed on its own input script
+    -- and witness stack, and the transaction is put together once: its
+    -- lists would be walked up to the input for each signature.
+    go i spend (sigi@(SigInput so _ _ sh rdmM, _)) = do
       keys <- indexedSigKeys index so rdmM
       if isTaprootOutput so
         then do
           unless net.segWit $ Left "signTx: this network has no Taproot"
           (spent, hashes) <- taprootCoins
           let digest = taprootSigHashWith hashes i sh Nothing Nothing
-          foldM (\t k -> digest >>= signTaprootDigest t i sh k.key (spent !! i)) tx keys
-        else foldM (\t k -> signInput net t i sigi k) tx keys
+              sign (script, _) k = do
+                stack <- digest >>= taprootKeyWitness sh k.key (spent V.! i)
+                when wrongStackCount $ Left "signTaprootInput: Invalid number of witness stacks"
+                return (script, stack)
+          signedSpend <- foldM sign spend keys
+          return (signedSpend, not (null keys))
+        else do
+          let sign s k = do
+                s' <- signSpend net sigHashes i sigi k s
+                when (isSegwit so && wrongStackCount) $ Left "Invalid number of witness stacks"
+                return s'
+          signedSpend <- foldM sign spend keys
+          return (signedSpend, isSegwit so && not (null keys))
+    -- A transaction that has witness stacks must have one for each input
+    wrongStackCount = not (null otx.witness) && length otx.witness /= length ti
+    -- What the digests of the inputs share. No digest commits to an input
+    -- script or to a witness, so the hashes of the unsigned transaction
+    -- hold while its inputs are signed.
+    sigHashes = txSigHashes otx
     -- The outputs every input spends, which a Taproot signature commits
-    -- to, and the hashes that the digests of the Taproot inputs share. The
-    -- digest commits to no input script and to no witness, so the hashes
-    -- of the unsigned transaction hold while its inputs are signed.
+    -- to, and the hashes that the digests of the Taproot inputs share.
     taprootCoins = do
       spent <- spentOutputs
       hashes <- taprootTxHashes otx spent
-      return (spent, hashes)
+      return (V.fromList spent, hashes)
     -- A nested SegWit program is spent as its P2SH wrapper
     spentOutputs =
       forM ti $ \txin ->
@@ -184,6 +223,30 @@ signTx net otx sigis allKeys
     coinScript s nested
       | nested && isSegwit s.script = toP2SH =<< encodeOutput s.script
       | otherwise = Right s.script
+
+-- | The input script and the witness stack of each input of a transaction,
+-- in order: what signing an input changes. The stack is empty when the
+-- transaction has no stack for the input.
+inputSpends :: Tx -> [(B.ByteString, WitnessStack)]
+inputSpends tx = zip (map (.script) tx.inputs) (tx.witness <> repeat [])
+
+-- | The input script and the witness stack of one input. An index that the
+-- transaction does not have gives empty ones: the digest refuses it.
+inputSpend :: Tx -> Int -> (B.ByteString, WitnessStack)
+inputSpend tx i
+  | i < 0 = (B.empty, [])
+  | otherwise = fromMaybe (B.empty, []) (listToMaybe (drop i (inputSpends tx)))
+
+-- | The witness of a transaction with the stack of one input replaced. A
+-- transaction without witness gets an empty stack for every other input.
+-- Fails with the message when it has stacks, and not one for each input.
+withStack :: String -> Tx -> Int -> WitnessStack -> Either String WitnessData
+withStack wrongCount tx i stack
+  | null tx.witness = Right (updateIndex i (replicate n []) (const stack))
+  | length tx.witness /= n = Left wrongCount
+  | otherwise = Right (updateIndex i tx.witness (const stack))
+  where
+    n = length tx.inputs
 
 -- | Whether the output is a Taproot output: a witness program of version 1
 -- that is 32 bytes long
@@ -220,24 +283,22 @@ signTaprootInput ::
 signTaprootInput tx spent i sh secret = do
   -- The digest checks the index and the number of spent outputs
   h <- taprootSigHash tx spent i sh Nothing Nothing
-  signTaprootDigest tx i sh secret (spent !! i) h
+  stack <- taprootKeyWitness sh secret (spent !! i) h
+  stacks <- withStack "signTaprootInput: Invalid number of witness stacks" tx i stack
+  return tx {witness = stacks}
 
--- | 'signTaprootInput' on the output that the input spends and the digest
--- of the input, which the caller computed for the hash type
-signTaprootDigest :: Tx -> Int -> SigHash -> SecKey -> TxOut -> Hash256 -> Either String Tx
-signTaprootDigest tx i sh secret coin h = do
+-- | The witness of a Taproot input spent by its key path: the signature of
+-- the digest of the input, which the caller computed for the hash type,
+-- by the secret key of the output that the input spends
+taprootKeyWitness :: SigHash -> SecKey -> TxOut -> Hash256 -> Either String WitnessStack
+taprootKeyWitness sh secret coin h = do
   outputKey <- case B.unpack coin.script of
     0x51 : 0x20 : program | length program == 32 -> Right (B.pack program)
     _ -> Left "signTaprootInput: the output spent is not a Taproot output"
   unless (exportXOnlyPubKey (derivePubKey secret) == outputKey) $
     Left "signTaprootInput: the key is not the key of the output"
   signature <- taprootSignature (signSchnorr secret (hashToMsg h)) sh
-  let stacks
-        | null tx.witness = replicate (length tx.inputs) []
-        | otherwise = tx.witness
-  unless (length stacks == length tx.inputs) $
-    Left "signTaprootInput: Invalid number of witness stacks"
-  return tx {witness = updateIndex i stacks (const [encodeTaprootSig signature])}
+  return [encodeTaprootSig signature]
 
 -- | Sign a single input in a transaction deterministically (RFC-6979).  The
 -- nesting flag only affects the behavior of segwit inputs.
@@ -266,25 +327,38 @@ signInput ::
   (SigInput, Bool) ->
   PrivateKey ->
   Either String Tx
-signInput net tx i (sigIn@(SigInput so val _ sh rdmM), nest) key = do
+signInput net tx i sigi@(SigInput so _ _ _ _, _) key = do
+  (signedScript, stack) <- signSpend net (txSigHashes tx) i sigi key (inputSpend tx i)
+  stacks <- if isSegwit so then withStack "Invalid number of witness stacks" tx i stack else Right tx.witness
+  return tx {inputs = updateIndex i tx.inputs (\TxIn {..} -> TxIn {script = signedScript, ..}), witness = stacks}
+
+-- | 'signInput' on the input script and the witness stack of the input,
+-- with what the digests of the inputs share. It gives the two as the
+-- signature leaves them. The hashes are those of the transaction before
+-- any input was signed, which hold for it afterwards: see 'TxSigHashes'.
+signSpend ::
+  Network ->
+  TxSigHashes ->
+  Int ->
+  (SigInput, Bool) ->
+  PrivateKey ->
+  (B.ByteString, WitnessStack) ->
+  Either String (B.ByteString, WitnessStack)
+signSpend net hashes i (sigIn@(SigInput so val _ sh rdmM), nest) key spend@(script, stack) = do
   when (isTaprootOutput so) $
     Left "signInput: a Taproot input is signed with signTaprootInput"
-  when (isSigHashSingle sh && i >= length tx.outputs) $
+  when (isSigHashSingle sh && i >= length (sigHashesTx hashes).outputs) $
     Left "signInput: SIGHASH_SINGLE without an output at the input index"
   let pub = derivePublicKey key
   unless (keyOfCoin so rdmM pub) $
     Left "signInput: the key is not a key of the coin"
-  sig <- makeSignature net tx i sigIn key
-  si <- buildInput net tx i so val rdmM sig pub
-  w <- updatedWitnessData net tx i so si
-  return tx {inputs = nextTxIn so si, witness = w}
-  where
-    f si TxIn {..} = TxIn {script = marshal net si, ..}
-    g so' = f (NestedWitnessInput so')
-    nextTxIn so' si
-      | isSegwit so' && nest = updateIndex i tx.inputs (g so')
-      | isSegwit so' = tx.inputs
-      | otherwise = updateIndex i tx.inputs (f si)
+  sig <- makeSignatureWith net hashes i sigIn key
+  si <- spendInput net hashes i so val rdmM sig pub spend
+  if isSegwit so
+    then do
+      signedStack <- toWitnessStack net <$> calcWitnessProgram net so si
+      return (if nest then marshal net (NestedWitnessInput so) else script, signedStack)
+    else return (marshal net si, stack)
 
 -- | Whether the public key is one that the coin asks a signature of
 keyOfCoin :: ScriptOutput -> Maybe RedeemScript -> PublicKey -> Bool
@@ -298,29 +372,6 @@ keyOfCoin so rdmM pub = case (so, rdmM) of
   _ -> False
   where
     keyHash = addressHash (encodeSerial pub)
-
--- | Add the witness data of the transaction given segwit parameters for an input.
---
--- @since 0.11.0.0
-updatedWitnessData ::
-  Network ->
-  Tx ->
-  Int ->
-  ScriptOutput ->
-  ScriptInput ->
-  Either String WitnessData
-updatedWitnessData net tx i so si
-  | isSegwit so =
-      updateWitness . toWitnessStack net =<< calcWitnessProgram net so si
-  | otherwise =
-      return tx.witness
-  where
-    updateWitness w
-      | null tx.witness = return $ updateIndex i defaultStack (const w)
-      | length tx.witness /= n = Left "Invalid number of witness stacks"
-      | otherwise = return $ updateIndex i tx.witness (const w)
-    defaultStack = replicate n $ toWitnessStack net EmptyWitnessProgram
-    n = length tx.inputs
 
 -- | Associate an input index to each value in a list
 findInputIndex ::
@@ -428,6 +479,23 @@ buildInput ::
   Either String ScriptInput
 buildInput net tx i so val rdmM sig pub = do
   when (i < 0 || i >= length tx.inputs) $ Left "buildInput: Invalid input index"
+  spendInput net (txSigHashes tx) i so val rdmM sig pub (inputSpend tx i)
+
+-- | 'buildInput' on the input script and the witness stack of the input,
+-- which hold the signatures that a multisig input has already, with what
+-- the digests of the inputs share: see 'signSpend'
+spendInput ::
+  Network ->
+  TxSigHashes ->
+  Int ->
+  ScriptOutput ->
+  Word64 ->
+  Maybe RedeemScript ->
+  TxSignature ->
+  PublicKey ->
+  (B.ByteString, WitnessStack) ->
+  Either String ScriptInput
+spendInput net hashes i so val rdmM sig pub spend = do
   when (isTaprootOutput so) $ Left "buildInput: a Taproot input has no input script"
   case (so, rdmM) of
     (PayScriptHash _, Just rdm) ->
@@ -445,7 +513,7 @@ buildInput net tx i so val rdmM sig pub = do
       PayPKHash _ -> return $ RegularInput $ SpendPKHash sig pub
       PayMulSig msPubs r -> do
         let mSigs = take r $ catMaybes $ matchTemplate allSigs msPubs f
-            allSigs = nub $ sig : parseExistingSigs net tx so i
+            allSigs = nub $ sig : existingSigs net so spend
         return $ RegularInput $ SpendMulSig mSigs
       _ -> Left "buildInput: Invalid output/redeem script combination"
     buildScriptHashInput rdm = do
@@ -453,25 +521,21 @@ buildInput net tx i so val rdmM sig pub = do
       return $ ScriptHashInput inp.get rdm
     f (TxSignature x sh) p =
       either (const False) (\m -> verifyHashSig m x p.point) $
-        makeSigHash net tx i so val sh rdmM
+        makeSigHashWith net hashes i so val sh rdmM
     f TxSignatureEmpty _ = False
 
--- | Apply heuristics to extract the signatures for a particular input that are
--- embedded in the transaction.
---
--- @since 0.11.0.0
-parseExistingSigs :: Network -> Tx -> ScriptOutput -> Int -> [TxSignature]
-parseExistingSigs net tx so i = insSigs <> witSigs
+-- | Apply heuristics to extract the signatures that an input holds, in its
+-- input script and in its witness stack.
+existingSigs :: Network -> ScriptOutput -> (B.ByteString, WitnessStack) -> [TxSignature]
+existingSigs net so (script, stack) = insSigs <> witSigs
   where
-    insSigs = case unmarshal net scp of
+    insSigs = case unmarshal net script of
       Right (ScriptHashInput (SpendMulSig xs) _) -> xs
       Right (RegularInput (SpendMulSig xs)) -> xs
       _ -> []
-    scp = (tx.inputs !! i).script
     witSigs
       | not $ isSegwit so = []
-      | length tx.witness <= i = []
-      | otherwise = rights $ decodeTxSig net <$> (tx.witness !! i)
+      | otherwise = rights $ decodeTxSig net <$> stack
 
 -- | Produce a structured representation of a deterministic (RFC-6979)
 -- signature over an input. On a network with a fork id, such as Bitcoin
@@ -511,8 +575,18 @@ parseExistingSigs net tx so i = insSigs <> witSigs
 -- its transaction signer does.
 --
 -- The key is not checked against the coin here: 'signInput' does that.
+--
+-- This is the function for one signature. For the signatures of several
+-- inputs of one transaction, 'makeSignatureWith' does not hash the
+-- transaction again for each of them.
 makeSignature :: Network -> Tx -> Int -> SigInput -> PrivateKey -> Either String TxSignature
-makeSignature net tx i (SigInput so val _ sh rdmM) key = do
+makeSignature net = makeSignatureWith net . txSigHashes
+
+-- | 'makeSignature' for the transaction of the 'TxSigHashes', from the
+-- hashes that the digests of its inputs share. It gives the signature that
+-- 'makeSignature' gives, and fails as it does.
+makeSignatureWith :: Network -> TxSigHashes -> Int -> SigInput -> PrivateKey -> Either String TxSignature
+makeSignatureWith net hashes i (SigInput so val _ sh rdmM) key = do
   when (isSegwit so && not net.segWit) $
     Left "makeSignature: this network has no SegWit"
   when (sh > 0xff) $
@@ -525,8 +599,8 @@ makeSignature net tx i (SigInput so val _ sh rdmM) key = do
     Left $
       "makeSignature: the hash type " <> shown <> " is not one a node accepts"
   committedScript
-  m <- makeSigHash net tx i so val sh' rdmM
-  when (signsConstantDigest && i >= length tx.outputs) $
+  m <- makeSigHashWith net hashes i so val sh' rdmM
+  when (signsConstantDigest && i >= length (sigHashesTx hashes).outputs) $
     Left "makeSignature: SIGHASH_SINGLE without an output at the input index"
   let sig = signHash key.key m
   when (isJust net.sigHashForkId && isCashSchnorrLength sig) $
@@ -567,15 +641,29 @@ makeSigHash ::
   SigHash ->
   Maybe RedeemScript ->
   Either String Hash256
-makeSigHash net tx i so val sh rdmM = do
+makeSigHash net = makeSigHashWith net . txSigHashes
+
+-- | 'makeSigHash' for the transaction of the 'TxSigHashes', from the
+-- hashes that the digests of its inputs share. It gives the digest that
+-- 'makeSigHash' gives, and fails as it does.
+makeSigHashWith ::
+  Network ->
+  TxSigHashes ->
+  Int ->
+  ScriptOutput ->
+  Word64 ->
+  SigHash ->
+  Maybe RedeemScript ->
+  Either String Hash256
+makeSigHashWith net hashes i so val sh rdmM = do
   when (isTaprootOutput so) $
     Left "makeSigHash: the digest of a Taproot input is taprootSigHash"
   script <- encodeOutput so'
-  h net tx script val i sh
+  h net hashes script val i sh
   where
     so' = case so of
       PayWitnessPKHash h' -> PayPKHash h'
       _ -> fromMaybe so rdmM
     h
-      | isSegwit so = txSigHashForkId
-      | otherwise = txSigHash
+      | isSegwit so = txSigHashForkIdWith
+      | otherwise = txSigHashWith
