@@ -35,6 +35,42 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
   The names of the module are not exported by `Haskoin`, where `Coin` is
   already a class.
 
+### Changed
+
+- **`generateSharesWith` and `splitSecret` of `Haskoin.Crypto.Keys.Slip39`
+  refuse a random value that is given twice.** `generateSharesWith` takes
+  the random values of a SLIP-39 split from its caller, one `SplitRandom`
+  for each split of the scheme. The random shares of a split are handed
+  out as they are, to its first members. So one `SplitRandom` given to
+  several splits, a mistake that compiles and gives shares that combine,
+  gave the first member of every group the same share, which was also the
+  share of the first group: one person then held what a threshold of
+  members of that group are needed for. The same holds for a random share
+  given twice to one split, and for a source of `generateSharesFrom` that
+  is stuck on the same bytes. Each of them is now refused: "Two of the
+  random values are equal: each one must be drawn on its own". Values that
+  are drawn at random have at least 96 bits and are never equal, so no
+  honest caller is refused. The check cannot tell a value that is not
+  random, such as zeros, from one that is. The documentation of
+  `SplitRandom` and of `generateSharesWith` now says what the values must
+  be: uniform, secret, drawn independently, and used for one split only.
+  It said only "with the random values given".
+
+### Fixed
+
+- **`combineShares` and `combineMnemonics` of `Haskoin.Crypto.Keys.Slip39`
+  refuse more than 256 shares, before any other work.** A backup has at
+  most 16 groups of 16 members, so a longer list rebuilds nothing. It was
+  refused for another reason, but only after its shares were put in groups
+  in time that grew with the square of their number: 6.7 seconds for 32,000
+  copies of one share in a build without optimisation, which are 4 MB of
+  text, and four times as long for twice as many. `combineMnemonics` also
+  read every mnemonic first. Both now count their input before anything
+  else, and answer "There are 32000 shares, but a backup has at most 256"
+  in the time it takes to walk the list. The shares of a group are also
+  gathered in time by their number. No answer changes for 256 shares or
+  fewer.
+
 ## [3.0.0] - 2026-11-20
 
 This release breaks backwards compatibility in three places:
