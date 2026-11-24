@@ -69,7 +69,7 @@ import Data.Bytes.Serial (deserialize)
 import Data.Conduit (ConduitT, Void, await, runConduit, (.|))
 import Data.Conduit.List (sourceList)
 import Data.Either (fromRight, rights)
-import Data.List (nub)
+import Data.List (nub, transpose, zip4)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes, fromMaybe, isJust, isNothing)
 import Data.String.Conversions (cs)
@@ -655,6 +655,15 @@ findSigInput = Sign.findInputIndex (.outpoint)
 -- The witness is not merged: the transactions must have the same one, and
 -- the result keeps it, so that a SegWit input signed before the multisig
 -- signers took their copies stays signed.
+--
+-- __Cost.__ Each input is merged on its own input scripts, and the
+-- transaction is put together once. On a network with a fork id, the
+-- hashes that the digests of the inputs share are computed once
+-- ('txSigHashes'), and the time grows with the size of the transaction.
+-- On Bitcoin the digest of a legacy input hashes a copy of the whole
+-- transaction, in Bitcoin Core too, so the time grows with the square of
+-- the number of inputs. The coins are best given in the order of the
+-- inputs: each input looks for its coin from the start of the list.
 mergeTxs ::
   Network ->
   [Tx] ->
@@ -664,26 +673,40 @@ mergeTxs net txs os = case txs of
   [] -> Left "Transaction list is empty"
   [tx] -> return tx
   tx : _
-    | length (nub emptyTxs) /= 1 -> Left "Transactions do not match"
-    | otherwise -> foldM (mergeTxInput net txs) (clearAll tx) (outs tx)
+    | length (nub (map cleared txs)) /= 1 -> Left "Transactions do not match"
+    | otherwise -> do
+        -- No digest commits to an input script, so the hashes of the
+        -- first transaction hold for all of them
+        let merged = mergedInput (txSigHashes tx)
+            -- A left fold, and not 'mapM', which keeps a stack frame for
+            -- each input while it works on the next ones: a call into
+            -- libsecp256k1 takes longer on a deep stack
+            next done item = (: done) <$> merged item
+        inputs <- foldM next [] (zip4 [0 ..] tx.inputs (coinsOf tx) scriptsByInput)
+        return tx {inputs = reverse inputs}
   where
-    zipOp tx = zip (matchTemplate os tx.inputs f) [0 ..]
-    outs tx =
-      [ ((o, v), i)
-      | (Just (o, v, _), i) <- zipOp tx
-      ]
-    f (_, _, o) txin = o == txin.outpoint
-    emptyTxs = map clearAll txs
-    clearAll tx = foldl clearInput tx (outs tx)
-    ins is i = updateIndex i is (\TxIn {..} -> TxIn {script = B.empty, ..})
-    clearInput tx (_, i) =
-      Tx tx.version (ins tx.inputs i) tx.outputs tx.witness tx.locktime
+    -- The coin of each input, when the caller gave one for its outpoint
+    coinsOf tx = matchTemplate os tx.inputs (\(_, _, o) txin -> o == txin.outpoint)
+    -- The transaction without the input scripts that are merged
+    cleared tx = tx {inputs = zipWith (maybe id (const (withScript B.empty))) (coinsOf tx) tx.inputs}
+    -- For each input, its input script in each transaction. The
+    -- transactions match, so they have the same number of inputs.
+    scriptsByInput = transpose (map (map (.script) . (.inputs)) txs)
+    -- An input without coin stays as it is, and an input with a coin that
+    -- nobody signed gets an empty input script
+    mergedInput _ (_, input, Nothing, _) = Right input
+    mergedInput sigHashes (i, input, Just (so, val, _), signed) = do
+      script <- mergeScripts net sigHashes so val i signed
+      return (withScript (fromMaybe B.empty script) input)
 
 -- | Merge input from partially-signed multisig transactions.  This function
 -- does not support segwit and P2SH-segwit inputs. When no transaction has a
 -- script for the input, the input is left as it is. Fails when one of the
 -- transactions has no input at the index. The witness of the transaction
 -- is kept.
+--
+-- This is the function for one input. 'mergeTxs' merges every input of a
+-- transaction and does the work that the inputs share once.
 mergeTxInput ::
   Network ->
   [Tx] ->
@@ -693,16 +716,38 @@ mergeTxInput ::
 mergeTxInput net txs tx ((so, val), i) = do
   when (i < 0 || any ((<= i) . length . (.inputs)) (tx : txs)) $
     Left "mergeTxInput: input index out of range"
-  -- Ignore transactions with empty inputs
-  let ins = map ((.script) . (!! i) . (.inputs)) txs
-  sigRes <- mapM extractSigs $ filter (not . B.null) ins
+  merged <- mergeScripts net (txSigHashes tx) so val i (map ((.script) . (!! i) . (.inputs)) txs)
+  return $ case merged of
+    Nothing -> tx
+    Just script -> tx {inputs = updateIndex i tx.inputs (withScript script)}
+
+-- | The input with another input script
+withScript :: B.ByteString -> TxIn -> TxIn
+withScript newScript TxIn {..} = TxIn {script = newScript, ..}
+
+-- | The input script of a multisig input with the signatures of the input
+-- scripts given, which are those of the input in each transaction to
+-- merge. An empty input script is passed over, and there is no result
+-- when all of them are empty. The hashes are those of the transaction
+-- that the signatures sign: see t'TxSigHashes'.
+mergeScripts ::
+  Network ->
+  TxSigHashes ->
+  ScriptOutput ->
+  Word64 ->
+  Int ->
+  [B.ByteString] ->
+  Either String (Maybe B.ByteString)
+mergeScripts net sigHashes so val i scripts = do
+  sigRes <- mapM extractSigs $ filter (not . B.null) scripts
   case sigRes of
-    [] -> return tx
+    [] -> return Nothing
     (_, rdm) : _ -> do
       unless (all ((== rdm) . snd) sigRes) $ Left "Redeem scripts do not match"
-      si <- marshal net <$> go (nub $ concatMap fst sigRes) so rdm
-      let ins' = updateIndex i tx.inputs (\TxIn {..} -> TxIn {script = si, ..})
-      return $ Tx tx.version ins' tx.outputs tx.witness tx.locktime
+      -- The script is computed here, and not when the caller reads it:
+      -- what was read from the scripts to merge is not kept until then
+      merged <- marshal net <$> go (nub $ concatMap fst sigRes) so rdm
+      return $! Just $! merged
   where
     go allSigs out rdmM =
       case out of
@@ -729,7 +774,7 @@ mergeTxInput net txs tx ((so, val), i) = do
         _ -> Left "Invalid script input type"
     f out (TxSignature x sh) p =
       either (const False) (\h -> verifyHashSig h x p.point) $
-        encodeOutput out >>= \s -> txSigHash net tx s val i sh
+        encodeOutput out >>= \s -> txSigHashWith net sigHashes s val i sh
     f _ TxSignatureEmpty _ = False
 
 {- Tx verification -}

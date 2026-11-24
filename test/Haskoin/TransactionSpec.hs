@@ -992,7 +992,64 @@ mergeSpec =
           tx = buildTx [coinAt 0] []
           short = buildTx [] []
       mergeTxInput btc [tx] tx ((ms, 100000), 3) `shouldBe` Left "mergeTxInput: input index out of range"
+      mergeTxInput btc [tx] tx ((ms, 100000), -1) `shouldBe` Left "mergeTxInput: input index out of range"
       mergeTxInput btc [tx, short] tx ((ms, 100000), 0) `shouldBe` Left "mergeTxInput: input index out of range"
+
+    it "mergeTxInput merges the signatures of one input, and leaves the other inputs as they are" $ do
+      let (k1, p1) = fixedKey 1
+          (k2, p2) = fixedKey 2
+          ms = PayMulSig [p1, p2] 2
+          tx = buildTx [coinAt 0, coinAt 1] [(PayPKHash (keyHash p1), 150000)]
+          sigis = [SigInput ms 100000 (coinAt i) sigHashAll Nothing | i <- [0, 1]]
+          coins = [(ms, 100000, coinAt 0), (ms, 100000, coinAt 1)]
+      a <- either fail return (signTx btc tx sigis [k1.key])
+      b <- either fail return (signTx btc tx sigis [k2.key])
+      merged <- either fail return (mergeTxInput btc [a, b] a ((ms, 100000), 1))
+      verifyStdInput btc merged coins 1 `shouldBe` True
+      (head merged.inputs).script `shouldBe` (head a.inputs).script
+      verifyStdInput btc merged coins 0 `shouldBe` False
+
+    it "mergeTxInput leaves the transaction as it is when no transaction to merge has signed the input" $ do
+      let (k1, p1) = fixedKey 1
+          (_, p2) = fixedKey 2
+          ms = PayMulSig [p1, p2] 2
+          tx = buildTx [coinAt 0] [(PayPKHash (keyHash p1), 90000)]
+      a <- either fail return (signTx btc tx [SigInput ms 100000 (coinAt 0) sigHashAll Nothing] [k1.key])
+      mergeTxInput btc [tx, tx] a ((ms, 100000), 0) `shouldBe` Right a
+
+    it "finds the coin of each input by its outpoint, whatever the order of the coins" $ do
+      let (k1, p1) = fixedKey 1
+          (k2, p2) = fixedKey 2
+          (k3, p3) = fixedKey 3
+          -- Each input has a multisig of its own, so the coin of the other does not merge it
+          ms0 = PayMulSig [p1, p2] 2
+          ms1 = PayMulSig [p1, p3] 2
+          tx = buildTx [coinAt 0, coinAt 1] [(PayPKHash (keyHash p1), 150000)]
+          sigis = [SigInput ms 100000 (coinAt i) sigHashAll Nothing | (ms, i) <- [(ms0, 0), (ms1, 1)]]
+          coins = [(ms1, 100000, coinAt 1), (ms0, 100000, coinAt 0)]
+      a <- either fail return (signTx btc tx sigis [k1.key])
+      b <- either fail return (signTx btc tx sigis [k2.key, k3.key])
+      merged <- either fail return (mergeTxs btc [a, b] coins)
+      verifyStdTx btc merged coins `shouldBe` True
+
+    it "keeps the input script of an input that has no coin, and refuses transactions that differ in it" $ do
+      let (k1, p1) = fixedKey 1
+          (k2, p2) = fixedKey 2
+          (k3, p3) = fixedKey 3
+          ms = PayMulSig [p1, p2] 2
+          pkh = PayPKHash (keyHash p3)
+          tx = buildTx [coinAt 0, coinAt 1] [(PayPKHash (keyHash p1), 150000)]
+          msSigi = SigInput ms 100000 (coinAt 0) sigHashAll Nothing
+          coins = [(ms, 100000, coinAt 0), (pkh, 100000, coinAt 1)]
+      -- The second input is signed before the cosigners take their copies
+      withKey <- either fail return (signTx btc tx [SigInput pkh 100000 (coinAt 1) sigHashAll Nothing] [k3.key])
+      a <- either fail return (signTx btc withKey [msSigi] [k1.key])
+      b <- either fail return (signTx btc withKey [msSigi] [k2.key])
+      merged <- either fail return (mergeTxs btc [a, b] [(ms, 100000, coinAt 0)])
+      (merged.inputs !! 1).script `shouldBe` (withKey.inputs !! 1).script
+      verifyStdTx btc merged coins `shouldBe` True
+      -- A copy with another script in the second input
+      mergeTxs btc [a, withInputScript b 1 "\x51"] [(ms, 100000, coinAt 0)] `shouldBe` Left "Transactions do not match"
 
     it "refuses to merge inputs that carry different redeem scripts" $ do
       let (k1, p1) = fixedKey 1
@@ -1198,6 +1255,12 @@ sharedHashesCostSpec =
           cashCoin = PayPKHash h
           signed = signedOn btc witnessCoin
           cashSigned = signedOn bch cashCoin
+          -- Two cosigners of Bitcoin Cash each sign a copy for coins of
+          -- the multisig 2 of 2
+          (key2, public2) = fixedKey 2
+          multisigCoin = PayMulSig [public, public2] 2
+          cosignedBy k = either error id (signTx bch unsigned (sigInputs multisigCoin) [k.key])
+          cosigned = [cosignedBy key, cosignedBy key2]
           -- The PSBT of the transaction: each input has its coin
           psbt =
             let empty = psbtOf unsigned
@@ -1266,6 +1329,13 @@ sharedHashesCostSpec =
       it "judgeInputs says of every input of the signed transaction of Bitcoin Cash that it is verified" $
         answers (sizeOf cashSigned) (judgeInputs bch cashSigned (spent cashCoin)) (replicate 5000 InputVerified)
           `shouldReturn` Just True
+
+      it "mergeTxs gives every multisig input of Bitcoin Cash the signatures of its two cosigners" $ do
+        let signatureCount input = case unmarshal bch input.script of
+              Right (RegularInput (SpendMulSig sigs)) -> Just (length sigs)
+              _ -> Nothing
+            counts = map signatureCount . (.inputs) <$> mergeTxs bch cosigned (coins multisigCoin)
+        answers (sum (map sizeOf cosigned)) counts (Right (replicate 5000 (Just 2))) `shouldReturn` Just True
 
 genesisSpec :: Spec
 genesisSpec =

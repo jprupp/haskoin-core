@@ -611,6 +611,33 @@ Bitcoin testnet3 is deprecated and still works.
   goes from 0.54 to 0.14 seconds, `judgeInputs` from 0.46 to 0.16 and
   `signTx` from 0.74 to 0.34. The signed transactions, the answers and the
   error messages are the same as before.
+- **`mergeTxs` no longer hashes the whole transaction again for each input
+  on Bitcoin Cash, and no longer walks the lists of the transactions up to
+  each input.** It merged each input with `txSigHash`, which on a network
+  with a fork id computed the three hashes of BIP 143 again at each call,
+  and it read and wrote each input by its place in the lists. It now takes
+  the hashes once (`txSigHashes`), merges each input on its own input
+  scripts, and puts the transaction together once. The seconds for a
+  transaction of 2000 inputs, and of 5000, that two cosigners each signed
+  in a copy, for coins of the P2SH multisig 2 of 3:
+
+  | Network and hash type            | 2000, before | 2000, now | 5000, before | 5000, now |
+  |----------------------------------|--------------|-----------|--------------|-----------|
+  | Bitcoin Cash, `SIGHASH_ALL`      | 0.95         | 0.19      | 5.5          | 0.49      |
+  | Bitcoin, `SIGHASH_ALL`           | 2.3          | 2.1       | 14.8         | 13.1      |
+  | Bitcoin, with `ANYONECANPAY`     | 0.43         | 0.22      | 2.4          | 0.58      |
+
+  On Bitcoin Cash the time now grows with the size of the transaction. On
+  Bitcoin the digest of a legacy input hashes a copy of the whole
+  transaction by its design, in Bitcoin Core too. That is most of the time
+  of a merge there, so `mergeTxs` gains little on Bitcoin, unless the
+  signatures are `ANYONECANPAY`. A transaction that nodes relay holds about
+  340 such inputs: for 250 of them the merge goes from 0.035 to 0.023
+  seconds on Bitcoin Cash, and stays at 0.06 on Bitcoin. The merged
+  transactions and the error messages are the same as before, and
+  `mergeTxInput` keeps its type and its results. The coins are best given
+  in the order of the inputs: each input still looks for its coin from the
+  start of the list.
 - **`judgeInputs` verifies a multisig of Bitcoin Cash with Schnorr signatures
   whose field of bits is the byte 0x81.** That is two signatures of eight
   keys, by the first key and the last. The field of bits takes the place of
