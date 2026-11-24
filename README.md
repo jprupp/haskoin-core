@@ -1167,6 +1167,8 @@ test network before you use it on mainnet.
 - **Untrusted text.** The cost of `decodeBase58` and `decodeBase58Check` grows
   with the square of the input length. Limit the length of input you pass to them
   directly. The address and key decoders of the library already do.
+  `cash32decode` reads data of any length by design, and holds hundreds of
+  bytes for each character: limit its input too.
 
 ## Development
 

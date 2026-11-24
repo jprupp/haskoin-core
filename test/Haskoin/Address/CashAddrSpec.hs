@@ -252,6 +252,18 @@ spec = do
       cash32encodeType "pref" 1 (B.replicate 21 1) `shouldBe` Nothing
     it "cash32decodeType rejects mixed case" $
       cash32decodeType "pref:pr6m7j9njldwwzlg9v7v53unlr4jkmx6ey65nvtkS5" `shouldBe` Nothing
+    it "cash32decodeType rejects a string of megabytes at once" $
+      -- 20 million characters after the colon, where the largest hash takes
+      -- 112. The checksum is wrong, so that a decoder without the bound
+      -- stops after the checksum and does not hold gigabytes.
+      timeout 1000000 (evaluate (cash32decodeType ("pref:" <> T.replicate 20000000 "q")))
+        `shouldReturn` Just Nothing
+    it "cash32decodeType decodes under a prefix of any length" $
+      -- A prefix of 200 letters, then the version byte and hash20 with the
+      -- checksum for that prefix (Python transcription of the CashAddr
+      -- specification)
+      cash32decodeType (T.replicate 200 "a" <> ":qpm2qsznhks23z7629mms6s4cwef74vcwvw08n49vg")
+        `shouldBe` Just (T.replicate 200 "a", 0, hash20)
   describe "version byte" $ do
     it "decodeVersionByte splits the type and the hash size" $ do
       -- type in the high four bits, size code in the low three bits

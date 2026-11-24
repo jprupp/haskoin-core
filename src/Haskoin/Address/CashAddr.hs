@@ -137,14 +137,35 @@ cashAddrEncode net cv bs = do
 -- version byte before the 'ByteString' that encodes type and length. The
 -- string must be the canonical encoding of its payload: padding bits must be
 -- zero and there must be fewer than five of them.
+--
+-- A string with more than 'maxCashAddrDataLength' characters after its colon
+-- is refused before any other work, in a time that does not depend on its
+-- length. No such string is valid, since the largest hash that a version
+-- byte can name is 64 bytes, so the bound changes no answer. It is there for
+-- a string from outside: the conversion of the data to bytes holds hundreds
+-- of bytes for each character, which a megabyte of text would turn into
+-- hundreds of megabytes, only to be refused. The prefix has no limit, as in
+-- the specification and in Bitcoin Cash Node, and it is never converted: the
+-- time and the memory grow in proportion to its length, by about a dozen
+-- bytes for each character. A caller that knows its prefixes can compare the
+-- whole length first, as 'cashAddrDecode' does.
 cash32decodeType :: Cash32 -> Maybe (CashPrefix, CashVersion, ByteString)
 cash32decodeType ca = do
+  guard (dataPartFits ca)
   (dpfx, groups) <- cash32decodeGroups ca
   bs <- toBase256 groups
   (vb, pay) <- B.uncons bs
   (ver, len) <- decodeVersionByte vb
   guard (B.length pay == len)
   return (dpfx, ver, pay)
+
+-- | Whether the part of a 'Cash32' string after its colon has at most
+-- 'maxCashAddrDataLength' characters: whether the colon is among the last
+-- 'maxCashAddrDataLength' + 1 characters. Only those are read, whatever the
+-- length of the string. A string without a colon has no prefix, so it is no
+-- 'Cash32' string, and the answer is 'False' for it too.
+dataPartFits :: Cash32 -> Bool
+dataPartFits = T.any (== ':') . T.takeEnd (maxCashAddrDataLength + 1)
 
 -- | Mid-Level: encode 'CashAddr' string containing arbitrary prefix and
 -- 'CashVersion'. Length must be among those allowed by the standard.
@@ -164,7 +185,9 @@ cash32encodeType pfx cv bs = do
 -- The prefix must be one or more letters, and the string has one colon, as
 -- in the decoder of Bitcoin Cash Node. There is no limit on the length here,
 -- since the data is arbitrary. The time and the memory grow in proportion to
--- the length.
+-- the length, by hundreds of bytes for each character of data: limit the
+-- length of a string from outside. 'cash32decodeType' has a limit, because
+-- an address has a longest form.
 cash32decode :: Cash32 -> Maybe (CashPrefix, ByteString)
 cash32decode text = do
   (pfx, groups) <- cash32decodeGroups text
