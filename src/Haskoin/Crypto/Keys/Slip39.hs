@@ -35,7 +35,8 @@
 -- A share is a secret. The 'Show' instances of this module leave the share
 -- values out, and an error names the position of a wrong word, never the
 -- word. A mnemonic can come from an untrusted source, so its length is
--- checked before anything else: a share has at most 1023 words.
+-- checked before anything else: a share has at most 1023 words. So is the
+-- number of the shares to combine: a backup has at most 256.
 --
 -- The field arithmetic looks bytes of the secret up in tables, as the
 -- reference implementation does, so its timing depends on them. Hardware
@@ -109,6 +110,7 @@ import Data.Char (isAscii, ord)
 import Data.List (nub, transpose)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as M
+import Data.Set qualified as S
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as E
@@ -211,6 +213,12 @@ digestBytes = 4
 maxShares :: Int
 maxShares = 16
 
+-- | The most shares that rebuild a backup: as many groups as the highest
+-- group threshold, and in each as many members as the highest member
+-- threshold, 16 times 16.
+maxCombinedShares :: Int
+maxCombinedShares = maxShares * maxShares
+
 -- | The fewest bytes of a master secret: 128 bits.
 minSecretBytes :: Int
 minSecretBytes = 16
@@ -305,6 +313,15 @@ interpolate x points = do
 -- | The random values a split draws: the T - 2 random shares, each as long
 -- as the secret, and the random part of the digest share, four bytes
 -- shorter. A split with a threshold of 1 draws none.
+--
+-- The security of the split rests on these values. Each one must be
+-- uniform, drawn independently of every other from a source fit for keys,
+-- kept as secret as the shares, and used for one split only: the
+-- specification says "generated randomly, independently with uniform
+-- distribution". A random share is handed out as it is, as the share of
+-- the member of its index. So a value given to two splits, or twice to
+-- one, gives one member the share of another, and a value that somebody
+-- can guess gives that person a share.
 data SplitRandom = SplitRandom
   { randomShares :: ![ByteString],
     digestRandom :: !ByteString
@@ -334,12 +351,33 @@ digestOf randomPart secret = B.take digestBytes (hmacSha256 randomPart secret)
 hmacSha256 :: ByteString -> ByteString -> ByteString
 hmacSha256 key msg = BA.convert (hmac key msg :: HMAC SHA256)
 
+-- | Refuses random values of which two are equal, among the splits given.
+-- Values drawn as t'SplitRandom' asks have at least 96 bits each and are
+-- never equal, so this refuses no honest caller. It catches the mistakes
+-- that give working shares: one set of values passed to every split, or a
+-- source of random bytes that is stuck. It cannot tell a value that is
+-- not random from one that is, so it replaces none of what t'SplitRandom'
+-- asks.
+--
+-- A random share has the length of the secret and a random part is four
+-- bytes shorter, so one is never taken for the other. The empty random
+-- part of a split at a threshold of 1 is no value.
+checkDrawnOnce :: [SplitRandom] -> Either String ()
+checkDrawnOnce randoms =
+  when (S.size (S.fromList values) /= length values) $
+    Left "Two of the random values are equal: each one must be drawn on its own"
+  where
+    values = [v | r <- randoms, v <- r.digestRandom : r.randomShares, not (B.null v)]
+
 -- | SplitSecret of the specification: the shares of a secret at the given
 -- threshold and count, with their indices from 0, computed from the random
 -- values given. With a threshold of 1 every share is the secret itself.
 -- Otherwise the random shares take the first indices, the digest share
 -- sits at 254 and the secret at 255, and the remaining shares are the
 -- polynomials through those points.
+--
+-- The random values must be as t'SplitRandom' says. Two random shares that
+-- are equal are refused.
 splitSecret :: Int -> Int -> ByteString -> SplitRandom -> Either String [(Word8, ByteString)]
 splitSecret threshold count secret random = do
   when (threshold < 1) $ Left "The threshold must be at least 1"
@@ -353,6 +391,7 @@ splitSecret threshold count secret random = do
     Left "A random share must be as long as the secret"
   unless (B.length random.digestRandom == randomPartLength) $
     Left ("The random part of the digest share must have " <> show randomPartLength <> " bytes")
+  checkDrawnOnce [random]
   if threshold == 1
     then return [(i, secret) | i <- indicesUpTo count]
     else do
@@ -645,6 +684,17 @@ roundIterations iterExponent = 2500 `shiftL` iterExponent
 -- groups and one for each group's split among its members, in that order.
 -- GenerateShares of the specification, with the identifier and the
 -- extendable flag as arguments. The shares come as one list per group.
+--
+-- This function is for a caller with random values of its own, such as
+-- the values of the system with dice rolls mixed in. Every value must be
+-- as t'SplitRandom' says: uniform, secret, and drawn for one split alone.
+-- Each split needs a t'SplitRandom' of its own. With one given to several
+-- splits at a threshold of 3 or more, the first member of each group gets
+-- the same share, which is also the share of the first group: one person
+-- then holds what a threshold of members of that group are needed for. A
+-- list in which a value comes twice is refused. Nothing can refuse values
+-- that are not random, such as zeros: use 'generateShares' unless you
+-- have a reason not to.
 generateSharesWith :: Scheme -> Int -> Bool -> Int -> Text -> ByteString -> [SplitRandom] -> Either String [[Share]]
 generateSharesWith scheme identifier ext iterExponent passphrase secret randoms = do
   checkScheme scheme
@@ -658,6 +708,7 @@ generateSharesWith scheme identifier ext iterExponent passphrase secret randoms 
           <> " groups takes "
           <> show (groupCount + 1)
           <> " sets of random values: one for the split among the groups, then one per group"
+  checkDrawnOnce randoms
   groupShares <- splitSecret scheme.groupThreshold groupCount ems.ciphertext groupRandom
   forM (zip3 scheme.groups groupShares memberRandoms) $ \((threshold, members), (gi, groupSecret), random) -> do
     memberShares <- splitSecret threshold members groupSecret random
@@ -713,6 +764,7 @@ generateShares = generateSharesFrom (liftIO . getEntropy)
 -- | 'generateShares' with the source of random bytes as its first
 -- argument: a function from a number of bytes to that many random bytes.
 -- Use it to draw from a generator of your own, which must be fit for keys.
+-- A source that gives the same bytes for two of the values is refused.
 -- With @getRandomBytes@ of crypton it runs in any @MonadRandom@. Mind that
 -- in 'IO' that function takes its bytes from the RDRAND instruction of the
 -- processor alone when the processor has one, and does not mix in the
@@ -777,9 +829,14 @@ generateMnemonics scheme ext iterExponent passphrase secret =
 -- the member threshold, have distinct member indices and be exactly as many
 -- as that threshold. Each group's secret is recovered from its members,
 -- then the master secret from the groups.
+--
+-- The shares are counted before anything else is done with them: 16 groups
+-- of 16 members are 256 shares, so a longer list rebuilds nothing, and it
+-- is refused in the time it takes to walk it.
 combineShares :: [Share] -> Either String EncryptedMasterSecret
 combineShares [] = Left "There are no shares to combine"
 combineShares shares@(first : _) = do
+  checkShareCount shares
   mapM_ checkShare shares
   agree "identifier" (.identifier)
   agree "extendable flag" (.extendable)
@@ -787,7 +844,10 @@ combineShares shares@(first : _) = do
   agree "group threshold" (.groupThreshold)
   agree "group count" (.groupCount)
   agree "length of their values" (B.length . (.value))
-  let groups = M.toList (M.fromListWith (flip (++)) [(s.groupIndex, [s]) | s <- shares])
+  -- Each share goes in front of the list of its group, which takes
+  -- constant time, so the shares are taken from the last one to keep their
+  -- order
+  let groups = M.toList (M.fromListWith (++) [(s.groupIndex, [s]) | s <- reverse shares])
   unless (length groups == first.groupThreshold) $
     Left ("The shares come from " <> counted (length groups) "group" <> ", but the group threshold is " <> show first.groupThreshold)
   groupSecrets <- forM groups $ \(gi, members) -> do
@@ -817,6 +877,14 @@ combineShares shares@(first : _) = do
         Left ("The shares do not have the same " <> what)
     duplicates xs = nub [x | (i, x) <- zip [0 :: Int ..] xs, x `elem` take i xs]
 
+-- | Refuses more shares, or more mnemonics, than a backup can have.
+checkShareCount :: [a] -> Either String ()
+checkShareCount shares =
+  when (count > maxCombinedShares) $
+    Left ("There are " <> show count <> " shares, but a backup has at most " <> show maxCombinedShares)
+  where
+    count = length shares
+
 -- | The master secret the mnemonics rebuild, decrypted with the passphrase,
 -- which must be printable ASCII (see 'decryptMasterSecret').
 --
@@ -827,8 +895,12 @@ combineShares shares@(first : _) = do
 -- milliseconds. The specification allows it. A program that reads shares
 -- from an untrusted source should look at the @iterationExponent@ that
 -- 'decodeShare' gives before it combines them.
+--
+-- More than 256 mnemonics are refused by their number, before any of them
+-- is read.
 combineMnemonics :: Text -> [Text] -> Either String ByteString
 combineMnemonics passphrase mnemonics = do
+  checkShareCount mnemonics
   shares <- mapM decodeShare mnemonics
   ems <- combineShares shares
   decryptMasterSecret passphrase ems

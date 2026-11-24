@@ -386,6 +386,11 @@ spec = do
       splitSecret 3 4 secret (SplitRandom [B.take 15 secret] digestRandom) `shouldBe` Left "A random share must be as long as the secret"
     it "refuses a random part of another length" $
       splitSecret 2 3 secret (SplitRandom [] (B.take 11 digestRandom)) `shouldBe` Left "The random part of the digest share must have 12 bytes"
+    it "refuses a random share given twice in one split" $
+      -- two members would hold the same value, so each knows the share of
+      -- the other and the threshold of 4 is in truth 3
+      splitSecret 4 4 secret (SplitRandom [B.replicate 16 0x61, B.replicate 16 0x61] digestRandom)
+        `shouldBe` Left "Two of the random values are equal: each one must be drawn on its own"
     it "shows the random values of a split without their bytes" $
       -- the random shares are real shares, and the random part is most of
       -- the digest share
@@ -551,6 +556,38 @@ spec = do
     it "refuses random values for the wrong number of splits" $
       generateSharesWith (Scheme 1 [(1, 1)]) 1 True 0 "" "ABCDEFGHIJKLMNOP" [SplitRandom [] B.empty]
         `shouldBe` Left "A scheme of 1 groups takes 2 sets of random values: one for the split among the groups, then one per group"
+    it "refuses one random share given to every split" $
+      -- Four splits at a threshold of 3: each takes one random share, and
+      -- a random part that is its own here. The member of index 0 of each
+      -- group would get the random share as its share, and it is also the
+      -- share of the group of index 0: one member of another group would
+      -- hold what three members of that group are needed for.
+      generateSharesWith
+        (Scheme 3 [(3, 3), (3, 3), (3, 3)])
+        1
+        True
+        0
+        ""
+        "ABCDEFGHIJKLMNOP"
+        (map (SplitRandom [B.pack [0x61 .. 0x70]] . B.replicate 12) [0x41, 0x42, 0x43, 0x44])
+        `shouldBe` Left "Two of the random values are equal: each one must be drawn on its own"
+    it "refuses one random part of a digest share given to two splits" $
+      -- three splits at a threshold of 2: each takes a random part of
+      -- 16 - 4 = 12 bytes and no random share
+      generateSharesWith
+        (Scheme 2 [(2, 2), (2, 2)])
+        1
+        True
+        0
+        ""
+        "ABCDEFGHIJKLMNOP"
+        (map (SplitRandom [] . B.replicate 12) [0x41, 0x42, 0x41])
+        `shouldBe` Left "Two of the random values are equal: each one must be drawn on its own"
+    it "refuses a source of random bytes that gives the same bytes twice" $
+      -- a source that gives zeros: the random parts of the three splits at
+      -- a threshold of 2 are equal
+      evalState (generateSharesFrom recordedZeros (Scheme 2 [(2, 2), (2, 2)]) True 0 "" "ABCDEFGHIJKLMNOP") []
+        `shouldBe` Left "Two of the random values are equal: each one must be drawn on its own"
     it "asks its source for nothing when the master secret has 15 bytes" $
       runState (generateSharesFrom recordedZeros (Scheme 1 [(2, 3)]) True 0 "" "ABCDEFGHIJKLMNO") []
         `shouldBe` (Left "The master secret must have at least 16 bytes, not 15", [])
@@ -660,6 +697,28 @@ spec = do
         `shouldBe` Left "The shares come from 2 groups, but the group threshold is 1"
     it "refuses more shares than the member threshold of a group" $
       combineShares [vector1, vector1 {memberIndex = 1}] `shouldBe` Left "Group 0 has 2 shares, but its member threshold is 1"
+
+    it "names the member index whose second share comes first, when two indices come twice" $ do
+      let member i = vector1 {memberIndex = i, memberThreshold = 2}
+      combineShares [member 1, member 2, member 1, member 2]
+        `shouldBe` Left "Group 0 has two shares with the member index 1"
+    it "refuses 257 shares, one more than 16 groups of 16 members give" $
+      combineShares (replicate 257 vector1)
+        `shouldBe` Left "There are 257 shares, but a backup has at most 256"
+    it "refuses 257 mnemonics by their number, before it reads them" $
+      combineMnemonics "" (replicate 257 "not a share")
+        `shouldBe` Left "There are 257 shares, but a backup has at most 256"
+    it "rebuilds a secret from 256 shares, all the members of 16 groups of 16" $ do
+      let secret = "ABCDEFGHIJKLMNOP"
+      drawn <- generateMnemonics (Scheme 16 (replicate 16 (16, 16))) True 0 "" secret
+      fmap (map length) drawn `shouldBe` Right (replicate 16 16)
+      (combineMnemonics "" . concat =<< drawn) `shouldBe` Right secret
+    it "refuses 100,000 shares within a second" $
+      -- The shares of each group used to be put in a list one after the
+      -- other, each at its end, in time that grew with the square of their
+      -- number: 6.7 seconds for 32,000 shares.
+      timeout 1000000 (evaluate (force (fmap (const ()) (combineShares (replicate 100000 vector1)))))
+        `shouldReturn` Just (Left "There are 100000 shares, but a backup has at most 256")
 
   describe "the shares of another implementation" $ do
     -- From the tests of Sparrow's library: eight groups of one member, five

@@ -17,5 +17,11 @@ files `data/slip39_*` and the verifier
   source that gives a fixed stream of bytes, and `drawnBytes` is the stream
   of a case of `data/slip39_split.json`. A 1-of-1 scheme draws the two bytes
   of the identifier and nothing more.
+- "Two of the random values are equal" in a test with fixed random values:
+  `generateSharesWith` and `splitSecret` refuse a value given twice
+  (`checkDrawnOnce`). Give each split its own bytes. `recordedZeros` only
+  works on a scheme that draws one value of each length, such as 3-of-5.
+- A test of `combineShares` on a long list: more than 256 shares are refused
+  by their number first, so no test can time the grouping of the shares.
 - To see a test fail on a changed `Slip39.hs`: `haskell-dev test Slip39`
   builds and runs it in 25 seconds, and no other spec imports the module.
