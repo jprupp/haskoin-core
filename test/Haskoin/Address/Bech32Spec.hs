@@ -59,6 +59,18 @@ spec = do
     it "should not encode long data string" $
       assert . isNothing $
         bech32Encode Bech32 "bc" (replicate 82 (word5 (1 :: Word8)))
+    it "encodes the longest string, of 90 characters" $
+      -- "bc", the separator, 81 words and the checksum of 6: 2 + 1 + 81 + 6 = 90.
+      -- The checksum is from a Python transcription of BIP 173.
+      bech32Encode Bech32 "bc" (replicate 81 (word5 (0 :: Word8)))
+        `shouldBe` Just ("bc1" <> Text.replicate 81 "q" <> "755kml")
+    it "refuses a word after a human-readable part that leaves no room for it" $
+      -- A part of 83 characters, the separator, one word and the checksum
+      -- of 6: 83 + 1 + 1 + 6 = 91
+      bech32Encode Bech32 (Text.replicate 83 "a") [word5 (0 :: Word8)] `shouldBe` Nothing
+    it "refuses a list of words that is too long before it reads it to its end" $
+      bech32Encode Bech32 "bc" (replicate 1000 (word5 (0 :: Word8)) ++ error "the list was read to its end")
+        `shouldBe` Nothing
     it "should not encode bad version number" $
       assert $
         isNothing $

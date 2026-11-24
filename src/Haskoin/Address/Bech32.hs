@@ -186,17 +186,26 @@ checksumLength = 6
 -- | Encode string of five-bit words into 'Bech32' using a provided
 -- human-readable part. Can fail if 'HRP' is invalid or result would be longer
 -- than 90 characters.
+--
+-- The length is checked before any other work on the words, and a list that
+-- is too long is not read to its end: the cost of a refusal does not grow
+-- with the list.
 bech32Encode :: Bech32Encoding -> HRP -> [Word5] -> Maybe Bech32
 bech32Encode enc hrp dat = do
   guard $ checkHRP hrp
+  -- One word more than the room is enough to know that the list is too long
+  guard $ length (take (room + 1) dat) <= room
   -- The constructor of 'Word5' can hold any byte, and only 0 to 31 have a
   -- character.
   guard $ all (\(UnsafeWord5 w) -> w <= 31) dat
   let dat' = dat ++ bech32CreateChecksum enc (T.toLower hrp) dat
       rest = map (\(UnsafeWord5 w) -> BU.unsafeIndex charsetBytes (fromIntegral w)) dat'
-      result = T.concat [T.toLower hrp, T.pack "1", E.decodeLatin1 (B.pack rest)]
-  guard $ T.length result <= maxBech32Length
-  return result
+  return $ T.concat [T.toLower hrp, T.pack "1", E.decodeLatin1 (B.pack rest)]
+  where
+    -- The words that fit between the human-readable part with its separator
+    -- and the checksum. The part is ASCII when this is read, so its lowercase
+    -- form has as many characters.
+    room = maxBech32Length - T.length hrp - 1 - checksumLength
 
 -- | BIP-173 allows only US-ASCII characters in the range 33 to 126 anywhere
 -- in a 'Bech32' string.
