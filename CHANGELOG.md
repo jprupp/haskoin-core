@@ -7,71 +7,7 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
-### Added
-
-- **What can be said of a transaction without a full node.** The new module
-  `Haskoin.Transaction.Judge`, a separate import, has the checks that a
-  program can make of a transaction with no interpreter of scripts, given
-  the outputs that it spends.
-  - `judge` is for a transaction that somebody wants to publish: its coins
-    are there and unspent, it pays no more than it holds, its lock time has
-    passed, it is no larger than nodes relay and has no dust, its input
-    scripts only push data, its version is one that nodes take, its tokens
-    follow the rules of Bitcoin Cash, and no signature of a coin locked to
-    one key is forged. It moved here from haskoin-store, where it has
-    judged what clients post since 1.13, with `Coin`, `Refusal`, `Rules`,
-    `maxTxSize`, `maxStandardSize`, `isDust` and `tokenRules`. `rulesAt`
-    gives the rules at a height and a median time.
-  - `judgeRelayed` is new, for a transaction that a peer sent as one that
-    its node took. It refuses only what no node takes whatever its policy:
-    no inputs or outputs, an output spent twice, a coinbase, more paid than
-    held, tokens of Bitcoin Cash that break their rules, and a forged
-    signature of a coin locked to one key. It leaves out every rule of
-    relay, since the policy of a node is its own, and the lock time, which
-    a node holds to the block that it is at.
-  - Both say whether every signature was verified, or name the first input
-    that could not be judged, which is no refusal: what to do with such a
-    transaction depends on who vouches for it.
-  The names of the module are not exported by `Haskoin`, where `Coin` is
-  already a class.
-
-### Changed
-
-- **`generateSharesWith` and `splitSecret` of `Haskoin.Crypto.Keys.Slip39`
-  refuse a random value that is given twice.** `generateSharesWith` takes
-  the random values of a SLIP-39 split from its caller, one `SplitRandom`
-  for each split of the scheme. The random shares of a split are handed
-  out as they are, to its first members. So one `SplitRandom` given to
-  several splits, a mistake that compiles and gives shares that combine,
-  gave the first member of every group the same share, which was also the
-  share of the first group: one person then held what a threshold of
-  members of that group are needed for. The same holds for a random share
-  given twice to one split, and for a source of `generateSharesFrom` that
-  is stuck on the same bytes. Each of them is now refused: "Two of the
-  random values are equal: each one must be drawn on its own". Values that
-  are drawn at random have at least 96 bits and are never equal, so no
-  honest caller is refused. The check cannot tell a value that is not
-  random, such as zeros, from one that is. The documentation of
-  `SplitRandom` and of `generateSharesWith` now says what the values must
-  be: uniform, secret, drawn independently, and used for one split only.
-  It said only "with the random values given".
-
-### Fixed
-
-- **`combineShares` and `combineMnemonics` of `Haskoin.Crypto.Keys.Slip39`
-  refuse more than 256 shares, before any other work.** A backup has at
-  most 16 groups of 16 members, so a longer list rebuilds nothing. It was
-  refused for another reason, but only after its shares were put in groups
-  in time that grew with the square of their number: 6.7 seconds for 32,000
-  copies of one share in a build without optimisation, which are 4 MB of
-  text, and four times as long for twice as many. `combineMnemonics` also
-  read every mnemonic first. Both now count their input before anything
-  else, and answer "There are 32000 shares, but a backup has at most 256"
-  in the time it takes to walk the list. The shares of a group are also
-  gathered in time by their number. No answer changes for 256 shares or
-  fewer.
-
-## [3.0.0] - 2026-11-20
+## [3.0.0] - 2026-11-25
 
 This release breaks backwards compatibility in three places:
 
@@ -235,6 +171,32 @@ Bitcoin testnet3 is deprecated and still works.
   `inputSpends` in `Haskoin.Transaction.Builder.Sign` gives the input script
   and the witness stack of each input of a transaction, which is what
   signing an input changes.
+
+- **What can be said of a transaction without a full node.** The new module
+  `Haskoin.Transaction.Judge`, a separate import, has the checks that a
+  program can make of a transaction with no interpreter of scripts, given
+  the outputs that it spends.
+  - `judge` is for a transaction that somebody wants to publish: its coins
+    are there and unspent, it pays no more than it holds, its lock time has
+    passed, it is no larger than nodes relay and has no dust, its input
+    scripts only push data, its version is one that nodes take, its tokens
+    follow the rules of Bitcoin Cash, and no signature of a coin locked to
+    one key is forged. It moved here from haskoin-store, where it has
+    judged what clients post since 1.13, with `Coin`, `Refusal`, `Rules`,
+    `maxTxSize`, `maxStandardSize`, `isDust` and `tokenRules`. `rulesAt`
+    gives the rules at a height and a median time.
+  - `judgeRelayed` is new, for a transaction that a peer sent as one that
+    its node took. It refuses only what no node takes whatever its policy:
+    no inputs or outputs, an output spent twice, a coinbase, more paid than
+    held, tokens of Bitcoin Cash that break their rules, and a forged
+    signature of a coin locked to one key. It leaves out every rule of
+    relay, since the policy of a node is its own, and the lock time, which
+    a node holds to the block that it is at.
+  - Both say whether every signature was verified, or name the first input
+    that could not be judged, which is no refusal: what to do with such a
+    transaction depends on who vouches for it.
+  The names of the module are not exported by `Haskoin`, where `Coin` is
+  already a class.
 
 ### Deprecated
 
@@ -530,6 +492,25 @@ Bitcoin testnet3 is deprecated and still works.
 - The test suite needs hspec 2.10 or later, for the functions that run the
   identity helpers apart from the suite. The library still builds with
   hspec 2.7.1.
+
+- **`generateSharesWith` and `splitSecret` of `Haskoin.Crypto.Keys.Slip39`
+  refuse a random value that is given twice.** `generateSharesWith` takes
+  the random values of a SLIP-39 split from its caller, one `SplitRandom`
+  for each split of the scheme. The random shares of a split are handed
+  out as they are, to its first members. So one `SplitRandom` given to
+  several splits, a mistake that compiles and gives shares that combine,
+  gave the first member of every group the same share, which was also the
+  share of the first group: one person then held what a threshold of
+  members of that group are needed for. The same holds for a random share
+  given twice to one split, and for a source of `generateSharesFrom` that
+  is stuck on the same bytes. Each of them is now refused: "Two of the
+  random values are equal: each one must be drawn on its own". Values that
+  are drawn at random have at least 96 bits and are never equal, so no
+  honest caller is refused. The check cannot tell a value that is not
+  random, such as zeros, from one that is. The documentation of
+  `SplitRandom` and of `generateSharesWith` now says what the values must
+  be: uniform, secret, drawn independently, and used for one split only.
+  It said only "with the random values given".
 
 ### Fixed
 
@@ -924,6 +905,19 @@ Bitcoin testnet3 is deprecated and still works.
   three answers are `False`, `False` and `InputUndecided`. A coin that does
   commit to such a script was not verified before and is not now: a block
   may hold its spend, and nodes do not relay it.
+
+- **`combineShares` and `combineMnemonics` of `Haskoin.Crypto.Keys.Slip39`
+  refuse more than 256 shares, before any other work.** A backup has at
+  most 16 groups of 16 members, so a longer list rebuilds nothing. It was
+  refused for another reason, but only after its shares were put in groups
+  in time that grew with the square of their number: 6.7 seconds for 32,000
+  copies of one share in a build without optimisation, which are 4 MB of
+  text, and four times as long for twice as many. `combineMnemonics` also
+  read every mnemonic first. Both now count their input before anything
+  else, and answer "There are 32000 shares, but a backup has at most 256"
+  in the time it takes to walk the list. The shares of a group are also
+  gathered in time by their number. No answer changes for 256 shares or
+  fewer.
 
 ## [2.0.1] - 2026-11-18
 

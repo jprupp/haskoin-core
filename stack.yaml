@@ -4,7 +4,7 @@ extra-deps:
   - secp256k1-haskell-3.0.0
   # Not on Hackage yet: it must be before haskoin-core is released
   - git: https://github.com/jprupp/podman-test.git
-    commit: 607ddbe2c503b67a25581ed9e167f94fdf27c785
+    commit: 923fc08d57b29f0dbd7ff37080b3c0f1df619d04
 nix:
   packages:
     - secp256k1
