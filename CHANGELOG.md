@@ -7,29 +7,6 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
-### Fixed
-
-- **`cash32decodeType` of `Haskoin.Address.CashAddr` refuses a string that
-  is too long before any other work.** No valid string has more than 112
-  characters after its colon, since the largest hash that a version byte
-  can name is 64 bytes. A longer one was refused too, but only after its
-  data was turned into bytes through a list: one megabyte of text with a
-  valid checksum took a second in a build without optimisation and held
-  564 MB. The function now reads the last 113 characters and refuses the
-  string if the colon is not among them, in a time that does not depend on
-  its length. `cashAddrDecode`, `cashToAddr` and `textToAddr` already had
-  that bound. This one is for a program that reads a CashAddr under
-  another prefix than those of the library, which is what the function is
-  exported for. The prefix keeps no limit, as in the specification, and
-  costs about a dozen bytes for each character. No answer changes.
-- **`bech32Encode` of `Haskoin.Address.Bech32` checks the length first.**
-  It built the whole string, then refused it if it had more than 90
-  characters: a million words took a third of a second in a build without
-  optimisation and held 178 MB. It now counts the words up to the first one
-  that does not fit, so a list that is too long is not read to its end. No
-  answer changes. `segwitEncode` checked the witness program before the
-  call, so no address function of the library was open to it.
-
 ## [3.0.0] - 2026-11-25
 
 This release breaks backwards compatibility in three places:
@@ -941,6 +918,27 @@ Bitcoin testnet3 is deprecated and still works.
   in the time it takes to walk the list. The shares of a group are also
   gathered in time by their number. No answer changes for 256 shares or
   fewer.
+
+- **`cash32decodeType` of `Haskoin.Address.CashAddr` refuses a string that
+  is too long before any other work.** No valid string has more than 112
+  characters after its colon, since the largest hash that a version byte
+  can name is 64 bytes. A longer one was refused too, but only after its
+  data was turned into bytes through a list: one megabyte of text with a
+  valid checksum took a second in a build without optimisation and held
+  564 MB. The function now reads the last 113 characters and refuses the
+  string if the colon is not among them, in a time that does not depend on
+  its length. `cashAddrDecode`, `cashToAddr` and `textToAddr` already had
+  that bound. This one is for a program that reads a CashAddr under
+  another prefix than those of the library, which is what the function is
+  exported for. The prefix keeps no limit, as in the specification, and
+  costs about a dozen bytes for each character. No answer changes.
+- **`bech32Encode` of `Haskoin.Address.Bech32` checks the length first.**
+  It built the whole string, then refused it if it had more than 90
+  characters: a million words took a third of a second in a build without
+  optimisation and held 178 MB. It now counts the words up to the first one
+  that does not fit, so a list that is too long is not read to its end. No
+  answer changes. `segwitEncode` checked the witness program before the
+  call, so no address function of the library was open to it.
 
 ## [2.0.1] - 2026-11-18
 
