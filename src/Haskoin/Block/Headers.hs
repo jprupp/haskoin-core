@@ -682,6 +682,13 @@ minDiffGap net par bh =
 
 -- | Returns the work required on a block header given the previous block. This
 -- corresponds to @GetNextWorkRequired@ in Bitcoin Core and Bitcoin Cash Node.
+--
+-- On Bitcoin Cash the rule depends on the block: aserti3-2d once the chain
+-- has its anchor ('asertAnchor'), the DAA from 'daaHeight', the EDA from
+-- 'edaHeight', and the retarget rule of Bitcoin below. That last step is
+-- where the library differs from Bitcoin Cash Node, which applies the EDA to
+-- every block below the DAA. The field 'edaHeight' says why, and how to get
+-- the rule of the node.
 nextWorkRequired ::
   (BlockHeaders m) =>
   Network ->

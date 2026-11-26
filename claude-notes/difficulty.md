@@ -22,3 +22,11 @@ retarget of Bitcoin, and the EDA, DAA and aserti3-2d rules of Bitcoin Cash.
   of work, and `requiredAfter` gives the bits asked of the next block.
 - A test that must connect a header with every rule checked mines it:
   `mineOn`, `mineChain`, then `connectHeight` or `connectAll`.
+- A test of a header that `isValidPOW` must refuse for its bits: `mineBlock`
+  and `mineOn` cannot make it, since they look for a nonce with `isValidPOW`.
+  Take a literal header and state its hash, as the test of the limit in
+  `proofOfWorkSpec`. The hash comes from a SHA-256 of the 80 bytes in Python.
+- A test of the upper limit of a result: the bits must differ without the
+  limit. At `0x207fffff` a block has 2 of work, and a DAA window of blocks
+  every ten minutes gives `0x207fffff` with or without the limit. Every
+  twenty minutes it gives `0x2100ffff` without it.

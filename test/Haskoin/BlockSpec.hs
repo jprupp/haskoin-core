@@ -320,6 +320,21 @@ compactSpec = describe "compact number" $ do
     -- shifts down one byte and the exponent becomes 256, which cannot be
     -- represented either
     evaluate (encodeCompact (2 ^ (2040 :: Int) - 1)) `shouldThrow` anyErrorCall
+  it "flags a number of 2^256, written with a size of 33, 34 or 35 bytes" $
+    -- 0x010000 * 2^240, 0x000100 * 2^248 and 0x000001 * 2^256 are all 2^256,
+    -- one more than 256 bits can hold
+    map (snd . decodeCompact) [0x21010000, 0x22000100, 0x23000001] `shouldBe` [True, True, True]
+  it "does not flag the largest numbers that 256 bits can hold" $ do
+    -- 0x00ff00 * 2^240 and 0x0000ff * 2^248 are both 0xff * 2^248
+    decodeCompact 0x2100ff00
+      `shouldBe` (0xff00000000000000000000000000000000000000000000000000000000000000, False)
+    decodeCompact 0x220000ff
+      `shouldBe` (0xff00000000000000000000000000000000000000000000000000000000000000, False)
+    -- 0x00ffff * 2^240: the largest mantissa that a size of 33 bytes takes
+    decodeCompact 0x2100ffff
+      `shouldBe` (0xffff000000000000000000000000000000000000000000000000000000000000, False)
+  it "does not flag a zero, whatever its size" $
+    map decodeCompact [0x23000000, 0xff000000] `shouldBe` [(0, False), (0, False)]
 
 serializationLimitSpec :: Spec
 serializationLimitSpec = describe "serialization limits" $ do
@@ -352,9 +367,14 @@ proofOfWorkSpec = describe "proof of work" $ do
   it "rejects a header whose hash is above its target" $
     -- a 32-bit nonce change leaves a hash with 32 leading zero bits with probability 2^-32
     isValidPOW btc (btc.genesisHeader :: BlockHeader) {nonce = 0} `shouldBe` False
-  it "rejects a target above the proof of work limit" $
-    -- exponent 0x1e makes the target 256 times the limit
-    isValidPOW btc (btc.genesisHeader :: BlockHeader) {bits = 0x1e00ffff} `shouldBe` False
+  it "rejects a target above the proof of work limit, even when the hash is below that target" $ do
+    -- Bits 0x2100ffff are the target 0xffff * 2^240, above the regtest limit
+    -- 0x7fffff * 2^232. The hash of this header starts with 0xa1ad, which is
+    -- below 0xffff: the header meets its own target, and only the limit
+    -- refuses it.
+    let hdr = headerOn btcRegTest.genesisHeader 1296689202 0x2100ffff
+    headerHash hdr `shouldBe` "a1adcb808e937e93ad21ac0c691fde757100329480f141939e293404c2a38413"
+    isValidPOW btcRegTest hdr `shouldBe` False
   it "rejects a negative target" $
     isValidPOW btc (btc.genesisHeader :: BlockHeader) {bits = 0x03800001} `shouldBe` False
   it "rejects an overflowing target" $
@@ -816,8 +836,11 @@ cashDifficultySpec = describe "bitcoin cash difficulty" $ do
     it "raises the target by a quarter when the last six blocks took twelve hours" $
       -- 0x400000 + 0x100000 = 0x500000
       requiredOn edaNet (evenlySpaced edaNet 7200 20 0x1f400000) (t0 + 7200 * 21) `shouldBe` 0x1f500000
-    it "does not raise the target above the limit" $
+    it "keeps a target that is at the limit" $
       requiredOn edaNet (evenlySpaced edaNet 7200 20 0x207fffff) (t0 + 7200 * 21) `shouldBe` 0x207fffff
+    it "does not raise the target above the limit" $
+      -- 0x700000 + 0x1c0000 = 0x8c0000, above the 0x7fffff of the limit
+      requiredOn edaNet (evenlySpaced edaNet 7200 20 0x20700000) (t0 + 7200 * 21) `shouldBe` 0x207fffff
     it "retargets normally at the end of a period" $
       -- 5400 of 6000 seconds: 0x400000 * 0.9 = 0x399999.9
       let shortNet = (edaNet :: Network) {targetTimespan = 10 * 600}
@@ -853,6 +876,11 @@ cashDifficultySpec = describe "bitcoin cash difficulty" $ do
     it "doubles the target at most over a window" $
       -- 144 * 2400 = 345600 seconds is clamped to 288 * 600 = 172800
       requiredOn daaNet (window 2400) (t0 + 2400 * 2201) `shouldBe` 0x2000ffff
+    it "does not raise the target above the limit" $
+      -- 144 blocks at the limit 0x207fffff are 2 of work each. In the longest
+      -- time that counts, 172800 seconds, that is 288 * 600 / 172800 = 1 of
+      -- work for each block time: (2^256 - 1) / 1 is above the limit.
+      requiredOn daaNet (evenlySpaced daaNet 1200 2200 0x207fffff) (t0 + 1200 * 2201) `shouldBe` 0x207fffff
     it "ignores the gap to the parent on mainnet" $
       requiredOn daaNet (window 600) (t0 + 600 * 2200 + 1201) `shouldBe` 0x1f7fffff
     it "allows the minimum difficulty after twice the target spacing on test networks" $
@@ -1739,8 +1767,8 @@ chainConstantsSpec = describe "chain parameters of the reference nodes" $ do
 
 activationSpec :: Spec
 activationSpec = describe "first block of each Bitcoin Cash difficulty rule" $ do
-  -- Expected bits come from a Python port of GetNextEDAWorkRequired and
-  -- GetNextCashWorkRequired of Bitcoin Cash Node.
+  -- The bits expected at the height of a rule come from a Python port of
+  -- GetNextEDAWorkRequired and GetNextCashWorkRequired of Bitcoin Cash Node.
   it "uses the DAA for the block at the DAA height, and not for the block before" $ do
     -- DAA from block 150. Blocks every 300 seconds at bits 0x1f00ffff.
     -- Block 149 keeps the bits of its parent. Block 150 gets the DAA: 144
@@ -1754,8 +1782,11 @@ activationSpec = describe "first block of each Bitcoin Cash difficulty rule" $ d
   it "uses the EDA for the block at the EDA height, and not for the block before" $ do
     -- EDA from block 20. Blocks every three hours at bits 0x1f00ffff, so the
     -- median time past moves 18 hours in six blocks, more than 12. Block 19
-    -- keeps the bits of its parent. Block 20 gets a target a quarter higher:
-    -- 0x00ffff + 0x003fff = 0x013ffe.
+    -- keeps the bits of its parent: below the EDA height the rule of Bitcoin
+    -- applies, since the UAHF specification makes the EDA a rule of the fork
+    -- block and of the blocks after it. Bitcoin Cash Node has no such height:
+    -- it would give block 19 the higher target too. Block 20 gets a target a
+    -- quarter higher: 0x00ffff + 0x003fff = 0x013ffe.
     let net = (cashNet :: Network) {edaHeight = Just 20}
         required n = withChain net (storeChain (evenlySpaced net 10800 n 0x1f00ffff) >> requiredAfter net (net.genesisHeader.timestamp + 10800 * (fromIntegral n + 1)))
     required 18 `shouldBe` 0x1f00ffff

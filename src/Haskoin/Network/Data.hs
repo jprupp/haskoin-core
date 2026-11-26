@@ -105,8 +105,18 @@ data Network = Network
     seeds :: ![String],
     -- | fork id for replay protection
     sigHashForkId :: !(Maybe Word32),
-    -- | height of the first block that uses the EDA
-    -- (one above @uahfHeight@ in Bitcoin Cash Node)
+    -- | height of the first block that uses the EDA, the emergency difficulty
+    -- rule of Bitcoin Cash (one above @uahfHeight@ in Bitcoin Cash Node).
+    --
+    -- Below this height the retarget rule of Bitcoin applies. The UAHF
+    -- specification makes the EDA a rule of the fork block and of the blocks
+    -- after it, and the blocks below were mined under the rule of Bitcoin.
+    -- Bitcoin Cash Node has no such height: it applies the EDA to every
+    -- block below the DAA. Both accept the real chains. They differ only on
+    -- a made-up chain that leaves the real one below this height. There the
+    -- library is the stricter side: the EDA only ever asks for less work.
+    -- Set this field to @Just 1@ on a network of your own to get the rule of
+    -- the node at every height.
     edaHeight :: !(Maybe Word32),
     -- | height of the first block that uses the DAA
     -- (one above @daaHeight@ in Bitcoin Cash Node)
