@@ -1093,6 +1093,47 @@ learn how many more bytes to take from the socket, and refuse a length above
 `Message` has a constructor for each message type. `bloomCreate`, `bloomInsert`
 and `bloomContains` build BIP-37 filters for `filterload`.
 
+A node that serves such a client tests a transaction that it relays with
+`bloomRelevantUpdate`, and the transactions of a block with
+`bloomRelevantBlock`. The second gives one flag for each transaction, and the
+filter as the block left it, which the node keeps for the peer.
+
+```haskell
+-- The key that the first block of Bitcoin pays to.
+let key =
+      fromJust . decodeHex $
+        "04678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61de\
+        \b649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5f"
+    wanted = bloomInsert (bloomCreate 10 0.0001 0 BloomUpdateP2PubKeyOnly) key
+    block = genesisBlock btc
+    (flags, after) = bloomRelevantBlock btc wanted block.txs
+
+print flags
+-- => [True]
+-- The filter now holds the outpoint of the output that pays to the key, so
+-- the transaction that spends it will match too.
+print (after == wanted)
+-- => False
+-- A merkleblock message is built from the flags.
+print (fst (buildPartialMerkle (zip (map txHash block.txs) flags)))
+-- => [True]
+```
+
+Both functions take the network, because Bitcoin Cash Node does not match as
+Bitcoin Core does. A block of Bitcoin Cash holds its transactions in the order
+of their ids, so a transaction may stand before the one it spends. The node
+reads the outputs of the whole block first and the inputs after, and
+`bloomRelevantBlock` does the same. A fold of `bloomRelevantUpdate` over such a
+block misses that transaction: use it for one transaction, not for a block. On
+Bitcoin Cash the tokens that an output carries in front of its locking script
+are not matched, and the bare multisig that `BloomUpdateP2PubKeyOnly` follows
+has at most 16 keys, each a direct push, where Bitcoin takes 20 keys pushed in
+any way.
+
+`bloomCreate` is total. A count of 0 or less, or a rate of 1 or more, gives the
+filter of no bytes, which matches everything. A rate of 0 or less gives the
+largest filter.
+
 ### Protocol machines
 
 The messages are half of the protocol. The other half is what a node does with

@@ -174,6 +174,8 @@ Read a file before any work on what its line names.
 - `claude-notes/addresses.md`: `Haskoin.Address` and the address functions
   of extended keys: what exists on which network, the legacy and nested
   forms, the limit of a P2SH redeem script, and their tests.
+- `claude-notes/bloom.md`: Bloom filters (`Haskoin.Network.Bloom`): the match
+  of a transaction and of a block on each chain, `bloomCreate`, their tests.
 - `claude-notes/difficulty.md`: the work a new header must show, on Bitcoin
   or on Bitcoin Cash (EDA, DAA, aserti3-2d), and the tests of those rules.
 - `claude-notes/protocol.md`: the protocol machines of the reference nodes

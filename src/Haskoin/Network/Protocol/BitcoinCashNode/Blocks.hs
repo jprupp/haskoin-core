@@ -94,7 +94,7 @@ import Haskoin.Block.Common
     headerHash,
   )
 import Haskoin.Block.Merkle (MerkleBlock (..), buildPartialMerkle)
-import Haskoin.Network.Bloom (bloomRelevantUpdate)
+import Haskoin.Network.Bloom (bloomRelevantBlock)
 import Haskoin.Network.Common
   ( GetData (..),
     Inv (..),
@@ -590,10 +590,9 @@ getBlockData inv = do
         modifyBlocks (\x -> x {hashContinue = Nothing})
     filtered blk = do
       f0 <- gets (.relay.bloom)
-      let step (f, acc) tx = case bloomRelevantUpdate f tx of
-            Just f' -> (f', acc <> [(tx, True)])
-            Nothing -> (f, acc <> [(tx, False)])
-          (f1, marked) = foldl' step (f0, []) blk.txs
+      o <- options
+      let (matches, f1) = bloomRelevantBlock o.network f0 blk.txs
+          marked = zip blk.txs matches
           (flags, hashes) = buildPartialMerkle [(txHash tx, m) | (tx, m) <- marked]
           mb =
             MerkleBlock

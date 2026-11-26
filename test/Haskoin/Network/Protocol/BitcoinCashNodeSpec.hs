@@ -7,6 +7,7 @@
 
 module Haskoin.Network.Protocol.BitcoinCashNodeSpec (spec) where
 
+import Control.Exception (evaluate)
 import Data.ByteString qualified as B
 import Data.Int (Int32, Int64)
 import Data.List (foldl')
@@ -20,6 +21,7 @@ import Haskoin.Network.Protocol.BitcoinCashNode qualified as BCHN
 import Haskoin.Network.Protocol.Types
 import Haskoin.Transaction
 import Network.Socket (SockAddr (..))
+import System.Timeout (timeout)
 import Test.Hspec
 
 -- Helpers -------------------------------------------------------------------
@@ -524,6 +526,45 @@ blockSpec = describe "blocks" $ do
     let iv = InvVector InvBlock g.get
         (_, es) = feed 2 (Receive (MGetData (GetData [iv]))) (inboundReady bch [])
     sent es `shouldBe` [MBlock (genesisBlock bch)]
+  it "serves a filtered block with the transaction that stands before the one it spends" $ do
+    -- The parent pushes 20 bytes that the filter holds. The spender has no
+    -- such data: it matches by the outpoint that the parent adds to the
+    -- filter. A block of Bitcoin Cash may hold the spender first.
+    let pushed = B.replicate 20 0xa1
+        parent = Tx 1 someTx.inputs [TxOut 1000 ("\x14" <> pushed <> "\x87")] [] 0
+        spender = Tx 1 [TxIn (OutPoint (txHash parent) 0) "" 0] [TxOut 900 "\x51"] [] 0
+        blk = Block child [spender, parent]
+        info = BlockInfo childHash 1 HaveData True 2 1700000000
+        f e =
+          e
+            { lookupBlock = \h -> if h == childHash then Just info else e.lookupBlock h,
+              blockData = \h -> if h == childHash then Just blk else e.blockData h,
+              tip = info
+            }
+        load = MFilterLoad (FilterLoad (bloomInsert (bloomCreate 10 0.000001 0 BloomUpdateAll) pushed))
+        (p, _) = feedWith f 2 (Receive load) (inboundReady bch [])
+        iv = InvVector InvMerkleBlock childHash.get
+        (_, es) = feedWith f 2 (Receive (MGetData (GetData [iv]))) p
+    sentCommands es `shouldBe` [MCMerkleBlock, MCTx, MCTx]
+    [tx | MTx tx <- sent es] `shouldBe` [spender, parent]
+  it "serves a filtered block of 60000 transactions within six seconds" $ do
+    -- The time grows with the number of transactions, and not with its
+    -- square. The filter matches none of them, so the partial tree of the
+    -- merkleblock is one hash, the root.
+    let spend n = Tx 1 [TxIn (OutPoint (txHash someTx) n) "" 0] [TxOut 1000 "\x51"] [] 0
+        blk = Block child (map spend [1 .. 60000])
+        info = BlockInfo childHash 1 HaveData True 2 1700000000
+        f e =
+          e
+            { lookupBlock = \h -> if h == childHash then Just info else e.lookupBlock h,
+              blockData = \h -> if h == childHash then Just blk else e.blockData h,
+              tip = info
+            }
+        filterOfPeer = bloomInsert (bloomCreate 10 0.000001 0 BloomUpdateAll) (B.replicate 20 0xa1)
+        (p, _) = feedWith f 2 (Receive (MFilterLoad (FilterLoad filterOfPeer))) (inboundReady bch [])
+        iv = InvVector InvMerkleBlock childHash.get
+        (_, es) = feedWith f 2 (Receive (MGetData (GetData [iv]))) p
+    timeout 6000000 (evaluate [length mb.hashes | MMerkleBlock mb <- sent es]) `shouldReturn` Just [1]
   it "sends nothing for an unknown block" $ do
     let iv = InvVector InvBlock childHash.get
         (_, es) = feed 2 (Receive (MGetData (GetData [iv]))) (inboundReady bch [])

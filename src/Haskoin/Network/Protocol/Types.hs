@@ -531,6 +531,8 @@ data Env = Env
     fillCompact :: CompactBlock -> [Tx] -> CompactVerdict,
     -- | a filtered block for a Bloom filter: the @merkleblock@, the matching
     -- transactions and the filter as the matches updated it
+    -- ('Haskoin.Network.Bloom.bloomRelevantBlock' gives the matches and the
+    -- filter)
     filteredBlock :: BloomFilter -> BlockHash -> Maybe (MerkleBlock, [Tx], BloomFilter),
     -- | fee rate of a transaction of the mempool, in satoshi per 1000 bytes
     txFeeRate :: TxHash -> Maybe Word64,

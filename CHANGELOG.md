@@ -7,10 +7,11 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
-This version breaks backwards compatibility in three places: the six
+This version breaks backwards compatibility in four places: the six
 functions that give a nested SegWit address take the network, six functions
-of the difficulty rules return `Either`, and the map of the memory header
-store is keyed by the whole block hash. See "Changed" below.
+of the difficulty rules return `Either`, the map of the memory header store
+is keyed by the whole block hash, and `bloomRelevantUpdate` takes the
+network. See "Changed" below.
 
 ### Changed
 
@@ -126,8 +127,72 @@ store is keyed by the whole block hash. See "Changed" below.
   lookups took 0.71 s where they took 0.76 s, and adding 400,000 headers
   1.8 s where it took 2.0 s.
 
+- **`bloomRelevantUpdate` takes the network, and the new
+  `bloomRelevantBlock` matches the transactions of a block.** The function
+  that tests a transaction against the Bloom filter of a peer followed
+  Bitcoin Core on every network. Bitcoin Cash Node does not match as Bitcoin
+  Core does, in three places, each seen on a regtest chain of Bitcoin Cash
+  Node 29.2.0:
+
+  - A block of Bitcoin Cash holds its transactions in the order of their
+    ids, so a transaction may stand before the one it spends. The node reads
+    the outputs of the whole block first, which update the filter, and the
+    inputs after. A fold of `bloomRelevantUpdate` over the block tested such
+    a transaction before the output it spends was in the filter, and missed
+    it: in a block `B D C A`, where `B`, `C` and `D` spend `A`, the node
+    matched all four for a key that `A` pays to, and the fold matched `C`
+    and `A`. A light client then did not hear of a spend of its own coin.
+  - An output may carry tokens in front of its locking script. The node
+    matches the locking script alone. The library scanned the whole field
+    as a script, so a payment to a key or to its hash that carried tokens
+    did not match, and its outpoint was not followed.
+  - With `BloomUpdateP2PubKeyOnly`, the node inserts the outpoint of a bare
+    multisig of at most 16 keys, each a direct push. The library took the
+    multisig of Bitcoin Core there: up to 20 keys, pushed in any way.
+
+  The types now:
+
+  ```haskell
+  bloomRelevantUpdate :: Network -> BloomFilter -> Tx -> Maybe BloomFilter
+  bloomRelevantBlock :: Network -> BloomFilter -> [Tx] -> ([Bool], BloomFilter)
+  ```
+
+  Before, `bloomRelevantUpdate` took no network. To migrate, pass the
+  network. Nothing changes on a Bitcoin network. For the transactions of a
+  block, call `bloomRelevantBlock` in place of a fold: it gives one flag for
+  each transaction, in the order of the block, and the filter as the block
+  left it. On Bitcoin it tests each transaction once, in order, as Bitcoin
+  Core. On a network with a fork id it makes the two passes of Bitcoin Cash
+  Node. Its time grows with the size of the block.
+
 ### Fixed
 
+- **The Bitcoin Cash Node machine serves the filtered block of the node.**
+  For a `getdata` of a filtered block, `Haskoin.Network.Protocol.BitcoinCashNode`
+  marked the transactions with one pass of `bloomRelevantUpdate`, so its
+  `merkleblock` left out a transaction that stands before the one it spends,
+  and the transaction was not sent. It now marks them with
+  `bloomRelevantBlock`. It also appended to a list for each transaction, so
+  the time grew with the square of their number: 2.2 s for a block of 20,000
+  transactions without optimisation, where the marking now takes 0.15 s, and
+  1.5 s for 200,000.
+- **`bloomCreate` is total.** A rate above 1 or a count below 0 gave a filter
+  that threw `replicate takes a nonnegative integer argument` when it was
+  used, and both together could give a filter with 4,294,967,295 hash
+  functions, which no peer takes and `bloomInsert` cannot finish. The
+  reference nodes give no value to follow there. A count of 0 or less, or a
+  rate of 1 or more, now gives the filter of no bytes, which matches
+  everything, as a count of 0 and a rate of 1 already did: a caller with a
+  wrong argument hears of every transaction and misses none. A rate of 0 or
+  less, or one that is not a number, gives the largest filter, as before.
+  `bloomCreate 0 0` gives the filter of no bytes, where it gave 36,000 bytes
+  and no hash function, which matched everything too.
+- **The comments of the Bloom filter say "a filter of no bytes" for the
+  filter that matches everything.** The word "empty" stood for that filter
+  in `bloomContains`, and for a filter with no bit set in `isBloomEmpty`,
+  which matches nothing. The Haddocks of `isBloomEmpty` and `isBloomFull`
+  now say what such a filter matches, and that both are true for a filter
+  of no bytes.
 - **The legacy Base58 form of a P2SH32 address of Bitcoin Cash is read and
   written.** Bitcoin Cash Node writes the address of a pay-to-script-hash
   output with a 256-bit hash in the legacy format when it runs with

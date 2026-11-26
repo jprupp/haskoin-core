@@ -156,8 +156,9 @@ addTxAnnouncement h = do
 -- @IsRelevantAndUpdate@ does.
 filterMatches :: Tx -> M Bool
 filterMatches tx = do
+  o <- options
   f <- gets (.relay.bloom)
-  case bloomRelevantUpdate f tx of
+  case bloomRelevantUpdate o.network f tx of
     Nothing -> return False
     Just f' -> do
       modifyRelay (\r -> r {bloom = f'})
