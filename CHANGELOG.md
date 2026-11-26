@@ -81,6 +81,18 @@ that give a nested SegWit address take the network. See "Changed" below.
   README, now say that the limit is stricter than that network, and why it
   stays: one limit for every chain cannot give an address that only one
   chain can spend, and a refusal loses no coins.
+- **The documentation says where the emergency difficulty rule of Bitcoin
+  Cash (EDA) starts, and that Bitcoin Cash Node starts it elsewhere.** The
+  library applies the EDA from `edaHeight`, the block of the fork of August
+  2017, and the retarget rule of Bitcoin below it. Bitcoin Cash Node applies
+  the EDA to every block below the DAA. No code changed: the UAHF
+  specification makes the EDA a rule of the fork block and of the blocks
+  after it, the blocks below were mined under the rule of Bitcoin, and the
+  library is the stricter side, since the EDA only ever asks for less work.
+  Both accept the real chains, and the two differ only on a made-up chain
+  that leaves the real one below the fork. The Haddocks of `edaHeight` and
+  `nextWorkRequired` and the README say so, and say that `edaHeight = Just 1`
+  on a network of your own gives the rule of the node at every height.
 
 ## [3.0.0] - 2026-11-25
 

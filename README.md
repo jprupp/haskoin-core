@@ -1021,6 +1021,15 @@ about 1,500 reads at height 100,000.
 `connectBlocks` finds it once for the whole run, so either way it pays this
 cost once rather than for each header.
 
+The emergency difficulty rule of Bitcoin Cash (EDA) starts at `edaHeight`, the
+block of the fork of August 2017, and the retarget rule of Bitcoin applies
+below it. This is what the UAHF specification says, and it is the rule under
+which those blocks were mined. Bitcoin Cash Node applies the EDA to every block
+below the DAA. Both accept the real chains. They differ only on a made-up chain
+that leaves the real one below the fork, where the library asks for more work,
+since the EDA only ever asks for less. A `Network` of your own with
+`edaHeight = Just 1` follows the node at every height.
+
 Once the best block has the `minimumChainWork` of the network, a fork with less
 work is refused. Below that work nothing bounds the side chains a peer can send,
 so a node that is still syncing should not keep headers from a peer it does not
