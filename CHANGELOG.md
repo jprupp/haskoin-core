@@ -7,8 +7,9 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
-This version breaks backwards compatibility in one place: the six functions
-that give a nested SegWit address take the network. See "Changed" below.
+This version breaks backwards compatibility in two places: the six functions
+that give a nested SegWit address take the network, and six functions of the
+difficulty rules return `Either`. See "Changed" below.
 
 ### Changed
 
@@ -52,6 +53,43 @@ that give a nested SegWit address take the network. See "Changed" below.
   `xPubWitnessAddr`, `payToWitnessScriptAddress` and the others) keep their
   types: their address has no text on a network without SegWit, so it cannot
   be shown to a payer there.
+- **The difficulty rules of Bitcoin Cash answer `Left` where they threw an
+  exception.** `connectBlock` and `connectBlocks` promise `Either String`,
+  and they work out the difficulty of a header before they check its proof
+  of work. On a `Network` made by hand, a header from a peer could make them
+  throw in five places: the EDA for a parent below height 6, which has no
+  sixth block below it; the DAA for a parent below the retarget interval;
+  the DAA for a parent below height 147 on a network with a shorter
+  interval, in two places; and a division by zero in the DAA, when the work
+  of its window rounds down to zero, as with blocks at the limit of regtest.
+  Bitcoin Cash Node stops on an assertion or on a division by zero in the
+  same places. None of the eight networks of the library reaches them: their
+  heights and their limits keep every header away. The two functions now
+  refuse such a header with the reason, as for any other header they do not
+  accept.
+
+  The types now:
+
+  ```haskell
+  nextWorkRequired ::
+    (BlockHeaders m) => Network -> BlockNode -> BlockHeader -> m (Either String Word32)
+  nextWorkRequiredWith ::
+    (BlockHeaders m) =>
+    Network -> Maybe BlockNode -> BlockNode -> BlockHeader -> m (Either String Word32)
+  nextEdaWorkRequired ::
+    (BlockHeaders m) => Network -> BlockNode -> BlockHeader -> m (Either String Word32)
+  nextDaaWorkRequired ::
+    (BlockHeaders m) => Network -> BlockNode -> BlockHeader -> m (Either String Word32)
+  getSuitableBlock :: (BlockHeaders m) => BlockNode -> m (Either String BlockNode)
+  computeTarget :: Network -> BlockNode -> BlockNode -> Either String Integer
+  ```
+
+  Before, each gave its result without `Either`. To migrate, handle `Left`
+  as "this chain has no required work for that header". On the eight
+  networks of the library the result is always `Right`, with the value it
+  had. `connectBlock`, `connectBlocks`, `nextPowWorkRequired` and
+  `nextAsertWorkRequired` keep their types. The new `daaFirstParent` gives
+  the lowest height of a parent for which the DAA has an answer.
 
 ### Fixed
 

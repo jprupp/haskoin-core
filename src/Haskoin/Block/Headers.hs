@@ -64,6 +64,7 @@ module Haskoin.Block.Headers
     diffInterval,
     nextEdaWorkRequired,
     nextDaaWorkRequired,
+    daaFirstParent,
     computeTarget,
     getSuitableBlock,
     nextAsertWorkRequired,
@@ -86,7 +87,7 @@ where
 
 import Control.DeepSeq
 import Control.Monad (guard, mzero, unless, when)
-import Control.Monad.Except (ExceptT (..), runExceptT, throwError)
+import Control.Monad.Except (ExceptT (..), liftEither, runExceptT, throwError)
 import Control.Monad.State.Strict as State (StateT, get, gets, lift, modify)
 import Control.Monad.Trans.Maybe
 import Data.Binary (Binary (..))
@@ -455,7 +456,7 @@ connectNewHeader net t cache best bh =
       if needsAnchor net
         then lift $ cachedAnchor net cache par
         else return (Nothing, cache)
-    requiredBits <- lift $ nextWorkRequiredWith net anchor par bh
+    requiredBits <- ExceptT $ nextWorkRequiredWith net anchor par bh
     node <- ExceptT . return $ validBlock net t best par pars bh skipNode requiredBits
     lift $ addBlockHeader node
     return (node, cache')
@@ -689,12 +690,17 @@ minDiffGap net par bh =
 -- where the library differs from Bitcoin Cash Node, which applies the EDA to
 -- every block below the DAA. The field 'edaHeight' says why, and how to get
 -- the rule of the node.
+--
+-- The result is 'Left' where a rule of Bitcoin Cash has no answer for the
+-- parent, on a 'Network' made by hand: see 'nextEdaWorkRequired' and
+-- 'nextDaaWorkRequired'. 'connectBlock' and 'connectBlocks' then refuse the
+-- header with that reason.
 nextWorkRequired ::
   (BlockHeaders m) =>
   Network ->
   BlockNode ->
   BlockHeader ->
-  m Word32
+  m (Either String Word32)
 nextWorkRequired net par bh
   | needsAnchor net = asertAnchor net par >>= \a -> nextWorkRequiredWith net a par bh
   | otherwise = nextWorkRequiredWith net Nothing par bh
@@ -717,38 +723,45 @@ nextWorkRequiredWith ::
   Maybe BlockNode ->
   BlockNode ->
   BlockHeader ->
-  m Word32
+  m (Either String Word32)
 nextWorkRequiredWith net anchor par bh
   -- Bitcoin Cash Node never retargets on regtest, before picking an algorithm.
-  | usesCashRules net && net.powNoRetarget = return par.header.bits
+  | usesCashRules net && net.powNoRetarget = return $ Right par.header.bits
   | otherwise =
       case anchor of
-        Just a -> nextAsertWorkRequired net a par bh
+        Just a -> Right <$> nextAsertWorkRequired net a par bh
         Nothing
           | activeAt net.daaHeight -> nextDaaWorkRequired net par bh
           | activeAt net.edaHeight -> nextEdaWorkRequired net par bh
-          | otherwise -> nextPowWorkRequired net par bh
+          | otherwise -> Right <$> nextPowWorkRequired net par bh
   where
     activeAt = maybe False (\h -> par.height + 1 >= h)
 
 -- | Find out the next amount of work required according to the Emergency
 -- Difficulty Adjustment (EDA) algorithm from Bitcoin Cash. This corresponds to
 -- @GetNextEDAWorkRequired@ in Bitcoin Cash Node.
+--
+-- The rule compares the parent with the sixth block below it, so it has no
+-- answer for a parent below height 6 whose bits are not the limit: the result
+-- is then 'Left'. Bitcoin Cash Node stops on an assertion there. No network
+-- of the library reaches that case; a 'Network' made by hand can.
 nextEdaWorkRequired ::
-  (BlockHeaders m) => Network -> BlockNode -> BlockHeader -> m Word32
+  (BlockHeaders m) => Network -> BlockNode -> BlockHeader -> m (Either String Word32)
 nextEdaWorkRequired net par bh
   | (par.height + 1) `mod` diffInterval net == 0 =
-      nextPowWorkRequired net par bh
+      Right <$> nextPowWorkRequired net par bh
   | net.minDiffBlocks =
       if minDiffGap net par bh
-        then return powLimitBits
-        else (.header.bits) <$> lastNoMinDiff net par
+        then return $ Right powLimitBits
+        else Right . (.header.bits) <$> lastNoMinDiff net par
   | par.header.bits == powLimitBits =
-      return powLimitBits
-  | otherwise = do
-      par6 <- fromMaybe e1 <$> getAncestor (par.height - 6) par
-      parMtp <- mtp par
-      par6Mtp <- mtp par6
+      return $ Right powLimitBits
+  | par.height < 6 =
+      return . Left $ "The EDA cannot look six blocks below a parent at height " ++ show par.height
+  | otherwise = runExceptT $ do
+      par6 <- ancestorOr "Could not get seventh ancestor of block" (par.height - 6) par
+      parMtp <- lift $ mtp par
+      par6Mtp <- lift $ mtp par6
       -- If producing the last six blocks took less than twelve hours the
       -- difficulty stays. Otherwise the target grows by a quarter.
       if toInteger parMtp - toInteger par6Mtp < 12 * 3600
@@ -759,28 +772,54 @@ nextEdaWorkRequired net par bh
           return $ encodeCompact (min net.powLimit target')
   where
     powLimitBits = encodeCompact net.powLimit
-    e1 = error "Could not get seventh ancestor of block"
+
+-- | The ancestor of a block at a height, or the given reason when the store
+-- has none.
+ancestorOr :: (BlockHeaders m) => String -> BlockHeight -> BlockNode -> ExceptT String m BlockNode
+ancestorOr reason height = maybeToExceptT reason . MaybeT . getAncestor height
 
 -- | Find the next amount of work required according to the Difficulty
 -- Adjustment Algorithm (DAA) from Bitcoin Cash. This corresponds to
--- @GetNextCashWorkRequired@ in Bitcoin Cash Node. The parent must be at or
--- above the difficulty interval height.
+-- @GetNextCashWorkRequired@ in Bitcoin Cash Node.
+--
+-- The result is 'Left' where the rule has no answer, and where Bitcoin Cash
+-- Node stops on an assertion or on a division by zero:
+--
+-- * The parent is below 'daaFirstParent': the node requires a parent at or
+--   above the retarget interval, and the window of the rule needs 147 blocks
+--   below the new one.
+-- * The work of the window rounds down to zero ('computeTarget').
+--
+-- No network of the library reaches either case. A 'Network' made by hand
+-- can, and then a header from a peer chooses the case, so the caller must
+-- get an answer and not an exception.
 nextDaaWorkRequired ::
-  (BlockHeaders m) => Network -> BlockNode -> BlockHeader -> m Word32
+  (BlockHeaders m) => Network -> BlockNode -> BlockHeader -> m (Either String Word32)
 nextDaaWorkRequired net par bh
-  | net.minDiffBlocks && minDiffGap net par bh = return (encodeCompact net.powLimit)
-  | otherwise = do
-      unless (par.height >= diffInterval net) $
-        error "Block height below difficulty interval"
-      l <- getSuitableBlock par
-      par144 <- fromMaybe e1 <$> getAncestor (par.height - 144) par
-      f <- getSuitableBlock par144
-      let nextTarget = computeTarget net f l
+  | net.minDiffBlocks && minDiffGap net par bh = return . Right $ encodeCompact net.powLimit
+  | par.height < daaFirstParent net =
+      return . Left . unwords $
+        [ "The DAA needs a parent at height",
+          show (daaFirstParent net),
+          "or above: the parent is at height",
+          show par.height
+        ]
+  | otherwise = runExceptT $ do
+      l <- ExceptT $ getSuitableBlock par
+      par144 <- ancestorOr "Cannot get ancestor at parent - 144 height" (par.height - 144) par
+      f <- ExceptT $ getSuitableBlock par144
+      nextTarget <- liftEither $ computeTarget net f l
       if nextTarget > net.powLimit
         then return $ encodeCompact net.powLimit
         else return $ encodeCompact nextTarget
-  where
-    e1 = error "Cannot get ancestor at parent - 144 height"
+
+-- | Lowest height of a parent for which the DAA has an answer. Bitcoin Cash
+-- Node asserts that the parent is at or above the retarget interval. The rule
+-- itself needs more than that on a network with a short interval: its window
+-- starts at the suitable block of the block 144 below the parent, and a block
+-- has a suitable block from height 3 ('getSuitableBlock').
+daaFirstParent :: Network -> BlockHeight
+daaFirstParent net = max (diffInterval net) 147
 
 firstGreaterOrEqual ::
   (BlockHeaders m) =>
@@ -987,33 +1026,46 @@ computeAsertBits powLimit halflife anchorBits timeDiff heightDiff
 
 -- | Compute Bitcoin Cash DAA target for a new block, like @ComputeTarget@ in
 -- Bitcoin Cash Node.
+--
+-- The target is the largest hash divided by the work that the window shows
+-- for one block time. That work is a whole number, and it rounds down to
+-- zero when the window holds less than one unit of work for each block time:
+-- blocks at the limit of regtest, 2 of work each, in a window that the choice
+-- of suitable blocks makes shorter than 144 blocks. The node then divides by
+-- zero. The result here is 'Left': there is no target to give.
 computeTarget ::
   Network ->
   -- | first suitable block of the window
   BlockNode ->
   -- | last suitable block of the window
   BlockNode ->
-  Integer
-computeTarget net firstBlock lastBlock =
-  let spacing = toInteger net.targetSpacing
-      work = (lastBlock.work - firstBlock.work) * spacing
-      actual = toInteger lastBlock.header.timestamp - toInteger firstBlock.header.timestamp
-      clamped = max (72 * spacing) (min (288 * spacing) actual)
-      work' = work `div` clamped
-   in -- (2^256 - work) / work, as the unsigned negation in the reference code
-      (2 ^ (256 :: Int) - work') `div` work'
+  Either String Integer
+computeTarget net firstBlock lastBlock
+  | work' <= 0 = Left "The DAA window holds too little work to give a target"
+  -- (2^256 - work) / work, as the unsigned negation in the reference code
+  | otherwise = Right $ (2 ^ (256 :: Int) - work') `div` work'
+  where
+    spacing = toInteger net.targetSpacing
+    work = (lastBlock.work - firstBlock.work) * spacing
+    actual = toInteger lastBlock.header.timestamp - toInteger firstBlock.header.timestamp
+    clamped = max (72 * spacing) (min (288 * spacing) actual)
+    work' = work `div` clamped
 
 -- | Get suitable block for Bitcoin Cash DAA computation: the block with the
 -- median timestamp among the given block, its parent and its grandparent. On
 -- equal timestamps the same block as Bitcoin Cash Node's sorting network is
--- chosen.
-getSuitableBlock :: (BlockHeaders m) => BlockNode -> m BlockNode
-getSuitableBlock par = do
-  unless (par.height >= 3) $ error "Block height is less than three"
-  parents <- getParents 2 par
-  case parents of
-    [parent, grandparent] -> return $ medianOfThree grandparent parent par
-    _ -> error "Could not get the two parents of the block"
+-- chosen. A block below height 3 has no suitable block, as in the node, which
+-- asserts that height: the result is 'Left'.
+getSuitableBlock :: (BlockHeaders m) => BlockNode -> m (Either String BlockNode)
+getSuitableBlock par
+  | par.height < 3 =
+      return . Left $
+        "The DAA cannot pick a suitable block at height " ++ show par.height ++ ", below height 3"
+  | otherwise = do
+      parents <- getParents 2 par
+      return $ case parents of
+        [parent, grandparent] -> Right $ medianOfThree grandparent parent par
+        _ -> Left "Could not get the two parents of the block"
   where
     later x y = x.header.timestamp > y.header.timestamp
     -- Oldest first, swapping only on a strictly later timestamp.
