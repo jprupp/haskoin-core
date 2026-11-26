@@ -20,6 +20,7 @@ import Data.Bytes.Put (runPutS)
 import Data.Bytes.Serial (deserialize, serialize)
 import Data.Default (def)
 import Data.Either (isLeft)
+import qualified Data.HashMap.Strict as HashMap
 import Data.Hashable (hash)
 import Data.List (isInfixOf, isPrefixOf)
 import Data.Maybe (fromJust)
@@ -163,6 +164,28 @@ headerWithVersion v (BlockHeader _ p m t b n) = BlockHeader v p m t b n
 -- | Mine a chain of headers with the given timestamps and bits.
 mineChain :: Network -> BlockHeader -> [(Timestamp, Word32)] -> [BlockHeader]
 mineChain net parent = drop 1 . scanl (\p (time, bits) -> mineOn net p time bits) parent
+
+-- | Two children of the regtest genesis block whose hashes share their first
+-- eight bytes, the last sixteen digits of a hash as it is displayed. Both
+-- have a valid proof of work. The header store once held one block for each
+-- value of those eight bytes. A search of 4.7 billion headers found the pair.
+twinA, twinB :: BlockHeader
+twinA =
+  BlockHeader
+    4
+    "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206"
+    "3ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa188e2078"
+    1296689202
+    0x207fffff
+    579745721
+twinB =
+  BlockHeader
+    4
+    "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206"
+    "3ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aacce54cf5"
+    1296689202
+    0x207fffff
+    3752975603
 
 -- | Put a chain of unvalidated headers in the store on top of the best block,
 -- one per (timestamp, bits) pair. Heights, work and skip pointers are filled
@@ -453,6 +476,15 @@ headerStoreSpec = describe "header store" $ do
   it "finds nothing for a hash that only shares its first eight bytes with a block" $
     -- the last eight bytes of this display form are those of the genesis hash
     withChain btc (getBlockHeader "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa72b3f1b60a8ce26f") `shouldBe` Nothing
+  it "finds nothing under a hash where a store made by hand holds the node of another block" $
+    let other = "0000000000000000000000000000000000000000000000000000000000000001"
+        moved = HashMap.fromList [(other, node) | node <- HashMap.elems (genesisMap btc)]
+        byHand = HeaderMemory {blocks = moved, best = genesisNode btc}
+     in evalState (getBlockHeader other) byHand `shouldBe` Nothing
+  it "replaces a node that is added again" $
+    let again = (genesisNode btc :: BlockNode) {work = 7}
+        stored = withChain btc (addBlockHeader again >> getBlockHeader genesisHash)
+     in fmap (.work) stored `shouldBe` Just 7
   it "reads a stored node whose chain work fits 256 bits, and no other" $ do
     -- chain work is a 256-bit unsigned number in Bitcoin Core
     let stored w = runPutS (serialize (genesisNode btc :: BlockNode) {work = w})
@@ -469,9 +501,30 @@ headerStoreSpec = describe "header store" $ do
   it "finds an added node by hash" $
     withChain btcRegTest (storeChain (evenlySpaced btcRegTest 600 3 0x207fffff) >>= \ns -> getBlockHeader (headerHash (last ns).header))
       `shouldSatisfy` maybe False ((== 3) . (.height))
-  it "takes the short hash from the high-entropy end of the hash" $
-    -- the first eight bytes of the internal order, as a big-endian number
-    shortBlockHash genesisHash `shouldBe` 0x6fe28c0ab6f1b372
+  it "keeps both of two headers whose hashes share their first eight bytes, in either order" $ do
+    headerHash twinA `shouldBe` "5e70e7468bfd78294aed23c97418eba0bbb65d6cbf18ac1faffc45200c720ab7"
+    headerHash twinB `shouldBe` "0c99d3516aa44c88c3eb41f2fe3132929b63fa12ca01cc6faffc45200c720ab7"
+    forM_ [[twinA, twinB], [twinB, twinA]] $ \arrival ->
+      let found = withChain btcRegTest $ do
+            mapM_ (connectAll btcRegTest . pure) arrival
+            mapM (getBlockHeader . headerHash) [twinA, twinB]
+       in map (fmap (.header)) found `shouldBe` [Just twinA, Just twinB]
+  it "connects a block whose grandparent shares eight hash bytes with a header that came later" $
+    -- genesis, twinA, child: then twinB arrives, and then a block on child
+    let child = mineOn btcRegTest twinA 1296689802 0x207fffff
+        grandchild = mineOn btcRegTest child 1296690402 0x207fffff
+        connected = withChain btcRegTest $ do
+          connectAll btcRegTest [twinA, child]
+          connectAll btcRegTest [twinB]
+          connectHeight btcRegTest myTime grandchild
+     in connected `shouldBe` Right 3
+  it "finds an ancestor that shares eight hash bytes with a header that came later" $
+    let child = mineOn btcRegTest twinA 1296689802 0x207fffff
+        ancestor = withChain btcRegTest $ do
+          connectAll btcRegTest [twinA, child]
+          connectAll btcRegTest [twinB]
+          getBestBlockHeader >>= getAncestor 1
+     in fmap (.header) ancestor `shouldBe` Just twinA
   it "gets best block on bchRegTest" $
     let net = bchRegTest
         bb =
