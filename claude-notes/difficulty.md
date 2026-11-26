@@ -30,3 +30,13 @@ retarget of Bitcoin, and the EDA, DAA and aserti3-2d rules of Bitcoin Cash.
   limit. At `0x207fffff` a block has 2 of work, and a DAA window of blocks
   every ten minutes gives `0x207fffff` with or without the limit. Every
   twenty minutes it gives `0x2100ffff` without it.
+
+## A rule with no answer
+
+- A new place where a rule cannot answer (too few blocks below, a division):
+  return `Left` through `nextWorkRequiredWith`, never `error`. A header is
+  given its required bits before its proof of work is checked, so on a
+  network made by hand a peer chooses the case. Tests: `requiredOrRefusal`.
+- A DAA test at the regtest limit: the work of the window is 288 over 144
+  blocks, and `computeTarget` gives `Left` once the window is shorter. Use
+  `0x1f7fffff` (512 of work) unless the test is about that refusal.

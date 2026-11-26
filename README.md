@@ -1030,6 +1030,13 @@ that leaves the real one below the fork, where the library asks for more work,
 since the EDA only ever asks for less. A `Network` of your own with
 `edaHeight = Just 1` follows the node at every height.
 
+On such a network a rule of Bitcoin Cash can have no answer for a header: the
+DAA needs a parent at or above the retarget interval and at height 147 at
+least (`daaFirstParent`), and the EDA needs six blocks below the parent.
+Bitcoin Cash Node stops on an assertion there. `connectBlocks` refuses the
+header with the reason, as `Left`. The eight networks of the library never
+reach those cases.
+
 Once the best block has the `minimumChainWork` of the network, a fork with less
 work is refused. Below that work nothing bounds the side chains a peer can send,
 so a node that is still syncing should not keep headers from a peer it does not

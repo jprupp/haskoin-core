@@ -198,7 +198,12 @@ evenlySpaced net spacing n bits =
 -- | The work required for a block with the given timestamp on top of the
 -- stored chain.
 requiredAfter :: Network -> Timestamp -> State HeaderMemory Word32
-requiredAfter net time = do
+requiredAfter net time = either error id <$> requiredOrRefusal net time
+
+-- | The same, or the reason why the chain gives no required work: a rule of
+-- Bitcoin Cash that needs more blocks below the new one than the chain has.
+requiredOrRefusal :: Network -> Timestamp -> State HeaderMemory (Either String Word32)
+requiredOrRefusal net time = do
   par <- getBestBlockHeader
   nextWorkRequired net par (headerOn par.header time par.header.bits)
 
@@ -847,6 +852,15 @@ cashDifficultySpec = describe "bitcoin cash difficulty" $ do
        in requiredOn shortNet (evenlySpaced shortNet 600 9 0x1f400000) (t0 + 6000) `shouldBe` 0x1f399999
     it "ignores the gap to the parent on mainnet" $
       requiredOn edaNet (evenlySpaced edaNet 600 20 0x1f400000) (t0 + 600 * 20 + 1201) `shouldBe` 0x1f400000
+    it "gives no answer for a parent below height 6, which has no sixth block below it" $
+      refusalOn edaNet (evenlySpaced edaNet 14400 5 0x1f400000) (t0 + 14400 * 6)
+        `shouldBe` Left "The EDA cannot look six blocks below a parent at height 5"
+    it "keeps the limit for the first block of a chain, where nothing is below the parent" $
+      requiredOn edaNet [] (t0 + 600) `shouldBe` 0x207fffff
+    it "looks down to the genesis block for a parent at height 6" $
+      -- the median time of blocks 0 to 6 is that of block 3, 3 * 14400 = 43200
+      -- seconds after the genesis block: twelve hours, so 0x400000 + 0x100000
+      requiredOn edaNet (evenlySpaced edaNet 14400 6 0x1f400000) (t0 + 14400 * 7) `shouldBe` 0x1f500000
     describe "on test networks" $ do
       let testNet = (edaNet :: Network) {minDiffBlocks = True}
           withMinDiffBlock = evenlySpaced testNet 600 5 0x1f400000 ++ [(t0 + 600 * 5 + 1300, 0x207fffff)]
@@ -886,16 +900,57 @@ cashDifficultySpec = describe "bitcoin cash difficulty" $ do
     it "allows the minimum difficulty after twice the target spacing on test networks" $
       let testNet = (daaNet :: Network) {minDiffBlocks = True}
        in requiredOn testNet (window 600) (t0 + 600 * 2200 + 1201) `shouldBe` 0x207fffff
+    it "gives no answer for a parent below the retarget interval, where Bitcoin Cash Node stops" $ do
+      refusalOn daaNet (evenlySpaced daaNet 600 2015 0x1f7fffff) (t0 + 600 * 2016)
+        `shouldBe` Left "The DAA needs a parent at height 2016 or above: the parent is at height 2015"
+      refusalOn daaNet (evenlySpaced daaNet 600 2016 0x1f7fffff) (t0 + 600 * 2017) `shouldBe` Right 0x1f7fffff
+    it "gives no answer for a parent below height 147, whatever the retarget interval" $ do
+      -- The window starts 144 blocks below the parent, at a block with two
+      -- blocks below it and the genesis block under those. Here the retarget
+      -- interval is 100 blocks.
+      let shortNet = (daaNet :: Network) {targetTimespan = 100 * 600}
+      refusalOn shortNet (evenlySpaced shortNet 600 146 0x1f7fffff) (t0 + 600 * 147)
+        `shouldBe` Left "The DAA needs a parent at height 147 or above: the parent is at height 146"
+      refusalOn shortNet (evenlySpaced shortNet 600 147 0x1f7fffff) (t0 + 600 * 148) `shouldBe` Right 0x1f7fffff
+    it "allows the minimum difficulty on a test network for any parent, as Bitcoin Cash Node does" $
+      -- the node answers a late block before it looks at the height of the parent
+      let testNet = (daaNet :: Network) {minDiffBlocks = True}
+       in refusalOn testNet (evenlySpaced testNet 600 5 0x1f7fffff) (t0 + 600 * 5 + 1201) `shouldBe` Right 0x207fffff
+    it "gives no answer when the work of the window rounds down to zero" $
+      -- Blocks at the limit have 2 of work each. Block 2055 is dated after
+      -- block 2056, and block 2199 before block 2198, so the suitable blocks
+      -- are 2056 and 2198: 142 blocks, 284 of work. Over the longest time
+      -- that counts, 172800 seconds, 284 * 600 / 172800 rounds down to zero.
+      let time i
+            | i == 2055 = t0 + 2400 * 2056 + 1
+            | i == 2199 = t0 + 2400 * 2198 - 1
+            | otherwise = t0 + 2400 * i
+       in refusalOn daaNet [(time i, 0x207fffff) | i <- [1 .. 2200]] (t0 + 2400 * 2201)
+            `shouldBe` Left "The DAA window holds too little work to give a target"
+    it "refuses the header through connectBlock when a rule gives no answer" $
+      withChain daaNet (connectHeight daaNet myTime (mineOn daaNet daaNet.genesisHeader (t0 + 600) 0x207fffff))
+        `shouldBe` Left "The DAA needs a parent at height 2016 or above: the parent is at height 0"
+    it "gives no target for a window with less than one unit of work for each block time" $ do
+      -- 287 * 600 / 172800 rounds down to zero
+      computeTarget bch (node 0 1000000) (node 287 (1000000 + 172800))
+        `shouldBe` Left "The DAA window holds too little work to give a target"
+      -- 288 * 600 / 172800 = 1, and (2^256 - 1) / 1 = 2^256 - 1
+      computeTarget bch (node 0 1000000) (node 288 (1000000 + 172800))
+        `shouldBe` Right 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+    it "has no suitable block for a block below height 3" $
+      withChain cashNet (storeChain (evenlySpaced cashNet 600 2 0x207fffff) >>= getSuitableBlock . last)
+        `shouldBe` Left "The DAA cannot pick a suitable block at height 2, below height 3"
     it "computes the target from the work and time of a window" $ do
       -- 144 * 2^200 work over 144 * 600 seconds is 2^200 work per 600 seconds:
       -- (2^256 - 2^200) / 2^200 = 2^56 - 1
-      computeTarget bch (node 0 1000000) (node (144 * 2 ^ (200 :: Int)) (1000000 + 86400)) `shouldBe` 72057594037927935
+      computeTarget bch (node 0 1000000) (node (144 * 2 ^ (200 :: Int)) (1000000 + 86400))
+        `shouldBe` Right 72057594037927935
       -- one second is clamped to 43200: 2^201 work per 600 seconds gives 2^55 - 1
-      computeTarget bch (node 0 1000000) (node (144 * 2 ^ (200 :: Int)) 1000001) `shouldBe` 36028797018963967
+      computeTarget bch (node 0 1000000) (node (144 * 2 ^ (200 :: Int)) 1000001) `shouldBe` Right 36028797018963967
       -- a window that ends before it starts is clamped the same way
-      computeTarget bch (node 0 1000000) (node (144 * 2 ^ (200 :: Int)) 999999) `shouldBe` 36028797018963967
+      computeTarget bch (node 0 1000000) (node (144 * 2 ^ (200 :: Int)) 999999) `shouldBe` Right 36028797018963967
       -- a million seconds is clamped to 172800: 2^199 work per 600 seconds gives 2^57 - 1
-      computeTarget bch (node 0 1000000) (node (144 * 2 ^ (200 :: Int)) 2000000) `shouldBe` 144115188075855871
+      computeTarget bch (node 0 1000000) (node (144 * 2 ^ (200 :: Int)) 2000000) `shouldBe` Right 144115188075855871
     it "picks the block with the median timestamp as suitable" $ do
       suitableHeight [600, 1200, 1800] `shouldBe` 2
       suitableHeight [600, 9000, 1200] `shouldBe` 3
@@ -907,10 +962,11 @@ cashDifficultySpec = describe "bitcoin cash difficulty" $ do
       suitableHeight [600, 600, 600] `shouldBe` 2
   where
     requiredOn net specs time = withChain net (storeChain specs >> requiredAfter net time)
+    refusalOn net specs time = withChain net (storeChain specs >> requiredOrRefusal net time)
     node w t = (genesisNode bch :: BlockNode) {work = w, header = (bch.genesisHeader :: BlockHeader) {timestamp = t}}
     suitableHeight offsets = withChain cashNet $ do
       nodes <- storeChain [(cashNet.genesisHeader.timestamp + o, 0x207fffff) | o <- offsets]
-      (.height) <$> getSuitableBlock (last nodes)
+      either error (.height) <$> getSuitableBlock (last nodes)
 
 asertSpec :: Spec
 asertSpec = describe "asert" $ do
@@ -1038,7 +1094,7 @@ asertSpec = describe "asert" $ do
         next = do
           par <- getBestBlockHeader
           let time = par.header.timestamp + 300
-          bits <- nextWorkRequired net par (headerOn par.header time 0)
+          bits <- either error id <$> nextWorkRequired net par (headerOn par.header time 0)
           let h = mineOn net par.header time bits
           _ <- either error id <$> connectBlock net myTime h
           return h
