@@ -609,6 +609,7 @@ sendTxTrickle = do
           return (mempoolInvs ++ queuedInvs)
   where
     announce checkKnown tx = do
+      o <- opts
       s <- getS
       e <- env
       case s.txRelay of
@@ -620,7 +621,7 @@ sendTxTrickle = do
           if rate < r.feeFilterReceived || (checkKnown && Set.member h r.knownTxs)
             then return []
             else case r.bloomFilter of
-              Just bf -> case bloomRelevantUpdate bf tx of
+              Just bf -> case bloomRelevantUpdate o.network bf tx of
                 Nothing -> return []
                 Just bf' -> do
                   modifyTxRelay $ \x -> x {bloomFilter = Just bf', knownTxs = Set.insert h x.knownTxs}

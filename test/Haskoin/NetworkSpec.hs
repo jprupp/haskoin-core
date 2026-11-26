@@ -356,6 +356,7 @@ spec = do
   compactPositionSpec
   witnessFormatSpec
   bloomMatchSpec
+  bloomCashSpec
   boundarySpec
 
 -- VarInt ----------------------------------------------------------------------
@@ -783,6 +784,20 @@ bloomSpec = describe "bloom filters" $ do
       let f = bloomCreate 3 0.01 7 BloomUpdateP2PubKeyOnly
       f.tweak `shouldBe` 7
       f.flags `shouldBe` BloomUpdateP2PubKeyOnly
+    describe "arguments without sense" $ do
+      let shape count rate =
+            let f = bloomCreate count rate 0 BloomUpdateNone
+             in (S.length f.array, f.functions)
+      it "gives the filter of no bytes for a rate of 1 or more" $
+        map (shape 10) [1, 2, 1 / 0] `shouldBe` [(0, 0), (0, 0), (0, 0)]
+      it "gives the filter of no bytes for a count below 0" $ do
+        shape (-5) 0.01 `shouldBe` (0, 0)
+        shape minBound 0.5 `shouldBe` (0, 0)
+      it "gives the filter of no bytes for a count below 0 and a rate above 1" $
+        shape (-1000) 2 `shouldBe` (0, 0)
+      it "keeps the largest filter for a rate of 0 or less, or one that is no number" $
+        -- 36000 * 8 / 10 * 0.6931 = 19962, capped at 50 functions
+        map (shape 10) [0, -1, 0 / 0] `shouldBe` [(36000, 50), (36000, 50), (36000, 50)]
   describe "bloomContains and bloomInsert" $ do
     it "does not match data that was not inserted" $
       bloomContains (bloomCreate 3 0.01 0 BloomUpdateAll) "abc" `shouldBe` False
@@ -854,6 +869,9 @@ bloomSpec = describe "bloom filters" $ do
     it "isBloomFull is true for all-0xff bytes" $ do
       isBloomFull (BloomFilter (S.fromList [0xff, 0xff]) 1 0 BloomUpdateAll) `shouldBe` True
       isBloomFull (BloomFilter (S.fromList [0xff, 0xfe]) 1 0 BloomUpdateAll) `shouldBe` False
+    it "isBloomEmpty and isBloomFull are both true for a filter of no bytes" $ do
+      isBloomEmpty (BloomFilter S.empty 1 0 BloomUpdateAll) `shouldBe` True
+      isBloomFull (BloomFilter S.empty 1 0 BloomUpdateAll) `shouldBe` True
     it "acceptsFilters looks at the NODE_BLOOM bit" $ do
       acceptsFilters 4 `shouldBe` True
       acceptsFilters 5 `shouldBe` True
@@ -868,6 +886,8 @@ bloomSpec = describe "bloom filters" $ do
       scriptPushData (hex "6a" <> hex "0111" <> hex "022233") `shouldBe` [hex "11", hex "2233"]
     it "leaves out empty pushes" $
       scriptPushData (hex "00" <> hex "0111") `shouldBe` [hex "11"]
+    it "leaves out an empty push written with OP_PUSHDATA1" $
+      scriptPushData (hex "4c00" <> hex "0111") `shouldBe` [hex "11"]
     it "keeps the pushes before a truncated one" $
       -- a two-byte push, then OP_PUSHDATA1 with no length byte
       scriptPushData (hex "02aabb" <> hex "4c") `shouldBe` [hex "aabb"]
@@ -876,35 +896,35 @@ bloomSpec = describe "bloom filters" $ do
     it "gives Nothing for a transaction with no matching output" irrelevantOutputNotUpdated
     it "leaves the filter as it is for a matching pay-to-pubkey-hash output under BloomUpdateP2PubKeyOnly" $ do
       let bf = bloomInsert (bloomCreate 10 0.000001 0 BloomUpdateP2PubKeyOnly) p2pkhHash
-      bloomRelevantUpdate bf (txPaying [p2pkhScript]) `shouldBe` Just bf
+      bloomRelevantUpdate btc bf (txPaying [p2pkhScript]) `shouldBe` Just bf
     it "inserts the outpoint of a matching pay-to-pubkey output under BloomUpdateP2PubKeyOnly" $ do
       let k = fromJust $ fromWif btc "5Kg1gnAjaLfKiwhhPpGS3QfRg2m6awQvaj98JCZBZQ5SuS2F15C"
           p = derivePublicKey k
           bf = bloomInsert (bloomCreate 10 0.000001 0 BloomUpdateP2PubKeyOnly) (encodeSerial p)
           tx = txPaying [encodeSerial (PayPK p)]
-      fmap (`bloomContains` outpointBytes tx 0) (bloomRelevantUpdate bf tx) `shouldBe` Just True
+      fmap (`bloomContains` outpointBytes tx 0) (bloomRelevantUpdate btc bf tx) `shouldBe` Just True
     it "leaves the filter as it is under BloomUpdateNone" $ do
       let bf = bloomInsert (bloomCreate 10 0.000001 0 BloomUpdateNone) p2pkhHash
-      bloomRelevantUpdate bf (txPaying [p2pkhScript]) `shouldBe` Just bf
+      bloomRelevantUpdate btc bf (txPaying [p2pkhScript]) `shouldBe` Just bf
     it "scans a non-standard output script without failing" $ do
       let bf = bloomInsert (bloomCreate 10 0.000001 0 BloomUpdateAll) p2pkhHash
-      bloomRelevantUpdate bf (txPaying [hex "51"]) `shouldBe` Nothing
+      bloomRelevantUpdate btc bf (txPaying [hex "51"]) `shouldBe` Nothing
     it "matches a push inside a non-standard output script" $ do
       let bf = bloomInsert (bloomCreate 10 0.000001 0 BloomUpdateAll) p2pkhHash
           -- push the hash, drop it, then OP_TRUE
           tx = txPaying [hex "14" <> p2pkhHash <> hex "7551"]
-      fmap (`bloomContains` outpointBytes tx 0) (bloomRelevantUpdate bf tx) `shouldBe` Just True
+      fmap (`bloomContains` outpointBytes tx 0) (bloomRelevantUpdate btc bf tx) `shouldBe` Just True
     it "still finds the matching output next to a non-standard one" $ do
       let bf = bloomInsert (bloomCreate 10 0.000001 0 BloomUpdateAll) p2pkhHash
           tx = txPaying [hex "51", p2pkhScript]
-      fmap (`bloomContains` outpointBytes tx 1) (bloomRelevantUpdate bf tx) `shouldBe` Just True
+      fmap (`bloomContains` outpointBytes tx 1) (bloomRelevantUpdate btc bf tx) `shouldBe` Just True
     it "matches every output with an empty filter and changes nothing" $ do
       let bf = BloomFilter S.empty 0 0 BloomUpdateAll
-      bloomRelevantUpdate bf (txPaying [hex "51"]) `shouldBe` Just bf
+      bloomRelevantUpdate btc bf (txPaying [hex "51"]) `shouldBe` Just bf
     it "does not insert the outpoint of an output that does not match" $ do
       let bf = bloomInsert (bloomCreate 10 0.000001 0 BloomUpdateAll) p2pkhHash
           tx = txPaying [p2pkhScript, hex "76a914" <> B.replicate 20 0x42 <> hex "88ac"]
-      fmap (`bloomContains` outpointBytes tx 1) (bloomRelevantUpdate bf tx) `shouldBe` Just False
+      fmap (`bloomContains` outpointBytes tx 1) (bloomRelevantUpdate btc bf tx) `shouldBe` Just False
 
 bloomFilter :: Word32 -> Text -> Expectation
 bloomFilter n x = do
@@ -952,13 +972,13 @@ relevantOutputUpdated = do
   where
     bf0 = bloomCreate 10 0.000001 0 BloomUpdateAll
     bf1 = bloomInsert bf0 p2pkhHash
-    bf2 = fromJust $ bloomRelevantUpdate bf1 relevantTx
+    bf2 = fromJust $ bloomRelevantUpdate btc bf1 relevantTx
     -- txid 57dc904f32ad4daab7b321dd469e8791ad09df784cdd273a73985150a4f225e9
     -- in internal byte order
     outpoint = hex "e925f2a4505198733a27dd4c78df09ad91879e46dd21b3b7aa4dad324f90dc57"
 
 irrelevantOutputNotUpdated :: Expectation
-irrelevantOutputNotUpdated = bloomRelevantUpdate bf1 unrelatedTx `shouldBe` Nothing
+irrelevantOutputNotUpdated = bloomRelevantUpdate btc bf1 unrelatedTx `shouldBe` Nothing
   where
     bf0 = bloomCreate 10 0.000001 0 BloomUpdateAll
     bf1 = bloomInsert bf0 p2pkhHash
@@ -1408,7 +1428,7 @@ bloomSpendingTx =
 bloomMatchSpec :: Spec
 bloomMatchSpec = describe "bloom filter matching, the bloom_match case of Bitcoin Core" $ do
   let fresh = bloomCreate 10 0.000001 0 BloomUpdateAll
-      matches element = bloomRelevantUpdate (bloomInsert fresh element) bloomMatchTx /= Nothing
+      matches element = bloomRelevantUpdate btc (bloomInsert fresh element) bloomMatchTx /= Nothing
       -- the outpoint 90c122d7...260b:n that the transaction spends
       spent n = hex "0b26e9b7735eb6aabdf358bab62f9816a21ba9ebdb719d5299e88607d722c190" <> hex n
   it "matches the transaction hash" $
@@ -1431,20 +1451,29 @@ bloomMatchSpec = describe "bloom filter matching, the bloom_match case of Bitcoi
     matches (spent "01000000") `shouldBe` False
   it "matches the transaction that spends a matched output" $
     -- "Simple Bloom filter didn't add output" in Bitcoin Core
-    let updated = bloomRelevantUpdate (bloomInsert fresh (hex "04943fdd508053c75000106d3bc6e2754dbcff19")) bloomMatchTx
-     in fmap (\f -> bloomRelevantUpdate f bloomSpendingTx /= Nothing) updated `shouldBe` Just True
+    let address = bloomInsert fresh (hex "04943fdd508053c75000106d3bc6e2754dbcff19")
+        updated = bloomRelevantUpdate btc address bloomMatchTx
+     in fmap (\f -> bloomRelevantUpdate btc f bloomSpendingTx /= Nothing) updated `shouldBe` Just True
   it "leaves the filter as it is when only the transaction hash matches" $
     let f = bloomInsert fresh (hex "6bff7fcd4f8565ef406dd5d63d4ff94f318fe82027fd4dc451b04474019f74b4")
-     in bloomRelevantUpdate f bloomMatchTx `shouldBe` Just f
+     in bloomRelevantUpdate btc f bloomMatchTx `shouldBe` Just f
   describe "pay-to-pubkey test of BloomUpdateP2PubKeyOnly, as Solver in Bitcoin Core" $ do
     -- Solver checks the size and the first byte of a key, not the curve.
     let hybridKey = hex "06" <> B.replicate 64 0x11
         offCurveKey = hex "02" <> B.replicate 32 0xff
         g = hex "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
-        inserted key script =
+        k2 = hex "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"
+        -- 65 bytes that are no key: the first byte of a key of that size is
+        -- 04, 06 or 07
+        long05 = hex "05" <> B.replicate 64 0x11
+        long02 = hex "02" <> B.replicate 64 0x11
+        -- a number of direct pushes of the key k2
+        pushes n = B.concat (replicate n (hex "21" <> k2))
+        insertedOn net key script =
           let bf = bloomInsert (bloomCreate 10 0.000001 0 BloomUpdateP2PubKeyOnly) key
               tx = txPaying [script]
-           in fmap (`bloomContains` outpointBytes tx 0) (bloomRelevantUpdate bf tx)
+           in fmap (`bloomContains` outpointBytes tx 0) (bloomRelevantUpdate net bf tx)
+        inserted = insertedOn btc
     it "inserts the outpoint of a pay-to-pubkey output with a hybrid key" $
       inserted hybridKey (hex "41" <> hybridKey <> hex "ac") `shouldBe` Just True
     it "inserts the outpoint of a pay-to-pubkey output whose key is not on the curve" $
@@ -1452,13 +1481,57 @@ bloomMatchSpec = describe "bloom filter matching, the bloom_match case of Bitcoi
     it "inserts the outpoint of a bare multisig output with a key that is not on the curve" $
       inserted g (hex "51" <> hex "21" <> g <> hex "21" <> offCurveKey <> hex "52ae") `shouldBe` Just True
     it "inserts the outpoint of a bare 1-of-2 multisig output" $
-      let k2 = hex "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"
-       in inserted g (hex "51" <> hex "21" <> g <> hex "21" <> k2 <> hex "52ae") `shouldBe` Just True
+      inserted g (hex "51" <> hex "21" <> g <> hex "21" <> k2 <> hex "52ae") `shouldBe` Just True
+    it "inserts the outpoint of a bare multisig output of 17 keys, the count written as the push 01 11" $
+      inserted g (hex "51" <> hex "21" <> g <> pushes 16 <> hex "0111ae") `shouldBe` Just True
+    it "inserts the outpoint of a bare multisig output of 20 keys" $
+      inserted g (hex "51" <> hex "21" <> g <> pushes 19 <> hex "0114ae") `shouldBe` Just True
+    it "does not insert the outpoint of a multisig output of 21 keys" $
+      inserted g (hex "51" <> hex "21" <> g <> pushes 20 <> hex "0115ae") `shouldBe` Just False
+    it "inserts the outpoint of a multisig output with a key pushed by OP_PUSHDATA1" $
+      inserted g (hex "51" <> hex "4c21" <> g <> hex "21" <> k2 <> hex "52ae") `shouldBe` Just True
+    it "does not insert the outpoint of a multisig output whose count is not its number of keys" $ do
+      -- one key and the count 2, then two keys and the count 1
+      inserted g (hex "51" <> hex "21" <> g <> hex "52ae") `shouldBe` Just False
+      inserted g (hex "51" <> hex "21" <> g <> hex "21" <> k2 <> hex "51ae") `shouldBe` Just False
+    it "does not insert the outpoint of a multisig output with a number below 17 written as a push" $ do
+      -- the count as 01 02, then the signatures asked for as 01 01
+      inserted g (hex "51" <> hex "21" <> g <> hex "21" <> k2 <> hex "0102ae") `shouldBe` Just False
+      inserted g (hex "0101" <> hex "21" <> g <> hex "21" <> k2 <> hex "52ae") `shouldBe` Just False
+    it "does not insert the outpoint of a multisig output that asks for no signature" $
+      inserted g (hex "00" <> hex "21" <> g <> hex "21" <> k2 <> hex "52ae") `shouldBe` Just False
+    it "does not insert the outpoint of a multisig output that asks for more signatures than it has keys" $
+      inserted g (hex "52" <> hex "21" <> g <> hex "51ae") `shouldBe` Just False
+    it "does not take 65 bytes that start with 05 for a key" $ do
+      inserted long05 (hex "41" <> long05 <> hex "ac") `shouldBe` Just False
+      inserted g (hex "51" <> hex "21" <> g <> hex "41" <> long05 <> hex "52ae") `shouldBe` Just False
+    it "does not take 65 bytes that start with 02 for a key" $ do
+      inserted long02 (hex "41" <> long02 <> hex "ac") `shouldBe` Just False
+      inserted g (hex "51" <> hex "21" <> g <> hex "41" <> long02 <> hex "52ae") `shouldBe` Just False
     it "does not insert the outpoint of a pay-to-pubkey-hash output" $
       inserted p2pkhHash p2pkhScript `shouldBe` Just False
     it "does not insert the outpoint of a script that only starts like pay-to-pubkey" $
       -- a 33-byte push and OP_CHECKSIG followed by OP_NOP
       inserted g (hex "21" <> g <> hex "ac61") `shouldBe` Just False
+    describe "on Bitcoin Cash, as Solver in Bitcoin Cash Node" $ do
+      -- The node inserted the outpoint of the first three shapes and of none
+      -- of the others, on regtest.
+      let insertedCash = insertedOn bch
+      it "inserts the outpoint of a pay-to-pubkey output" $
+        insertedCash g (hex "21" <> g <> hex "ac") `shouldBe` Just True
+      it "inserts the outpoint of a bare 1-of-2 multisig output" $
+        insertedCash g (hex "51" <> hex "21" <> g <> hex "21" <> k2 <> hex "52ae") `shouldBe` Just True
+      it "inserts the outpoint of a bare multisig output of 16 keys" $
+        insertedCash g (hex "51" <> hex "21" <> g <> pushes 15 <> hex "60ae") `shouldBe` Just True
+      it "does not insert the outpoint of a multisig output of 17 keys" $
+        insertedCash g (hex "51" <> hex "21" <> g <> pushes 16 <> hex "0111ae") `shouldBe` Just False
+      it "does not insert the outpoint of a multisig output of 20 keys" $
+        insertedCash g (hex "51" <> hex "21" <> g <> pushes 19 <> hex "0114ae") `shouldBe` Just False
+      it "does not insert the outpoint of a multisig output with a key pushed by OP_PUSHDATA1" $ do
+        insertedCash g (hex "51" <> hex "4c21" <> g <> hex "21" <> k2 <> hex "52ae") `shouldBe` Just False
+        insertedCash g (hex "51" <> hex "21" <> g <> hex "4c21" <> k2 <> hex "52ae") `shouldBe` Just False
+      it "does not insert the outpoint of a pay-to-pubkey-hash output" $
+        insertedCash p2pkhHash p2pkhScript `shouldBe` Just False
   it "reads the flags byte 05 as update-all, since only the two low bits count" $
     (parse (hex "05") :: Either String BloomFlags) `shouldBe` Right BloomUpdateAll
   it "picks the number of hash functions with the integer division of Bitcoin Core" $
@@ -1466,6 +1539,132 @@ bloomMatchSpec = describe "bloom filter matching, the bloom_match case of Bitcoi
     -- 3 bytes. Then 3 * 8 / 5 = 4 in integers, and 4 * ln(2) = 2.77, so 2.
     let f = bloomCreate 5 0.08 0 BloomUpdateNone
      in (S.length f.array, f.functions) `shouldBe` (3, 2)
+
+-- Bloom filter matching on Bitcoin Cash, and of a whole block ---------------------
+
+-- | A block of a regtest chain of Bitcoin Cash Node 29.2.0, in the order of
+-- the block, which is by transaction id. A pays to public key 1 (output 0),
+-- to the hash of that key (output 1) and to a bare 1-of-2 multisig of the
+-- keys 1 and 2 (output 2). B spends output 0, C output 1 and D output 2, and
+-- B and D stand before A. The answers of the node for this block are the
+-- expected values of the tests.
+cashBlock :: [(String, Tx)]
+cashBlock =
+  map
+    (fmap (either error id . parse . hex))
+    [ ( "coinbase",
+      "02000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0b016a0101062f4142\
+      \4c412fffffffff01c824062a010000001976a9149719fdff367ec566529f6d3814fb456a2d823c1e88ac00000000"
+    ),
+      ( "B",
+      "020000000191a68a31a9faa6fdc99809d951948c48637d1b4202a99e98fa19084d4c45ddba000000004241348ba3ffd94a86\
+      \071a000dc57dfa4219614344cbb7e956580fb506d260e555fa74eaf50c1be73693f1153bf6c2a3ec24257298f528546b4883\
+      \d140c857505e6641ffffffff01384a0000000000001976a9149719fdff367ec566529f6d3814fb456a2d823c1e88ac000000\
+      \00"
+    ),
+      ( "D",
+      "020000000191a68a31a9faa6fdc99809d951948c48637d1b4202a99e98fa19084d4c45ddba0200000043514106fee5288b88\
+      \339462082f109a0a130420639571ce490d7981b285fccedea5599979dcb8d627920c361242df7acc0695eac433cff5d54257\
+      \4fd9d58b4e1bba0441ffffffff01384a0000000000001976a9149719fdff367ec566529f6d3814fb456a2d823c1e88ac0000\
+      \0000"
+    ),
+      ( "C",
+      "020000000191a68a31a9faa6fdc99809d951948c48637d1b4202a99e98fa19084d4c45ddba0100000064410c748a44982c13\
+      \360e73ca7a273d4be1cb1c258afa1889fde1998ff0faae230af33feb0f419958a4cf966d95060d5967af1e550472cf2499fc\
+      \2b0dc41e2992ab4121034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aaffffffff01384a00\
+      \00000000001976a9149719fdff367ec566529f6d3814fb456a2d823c1e88ac00000000"
+    ),
+      ( "A",
+      "0200000001020af1380c0d9d46073eb5cc1d63f76bc9bcdd44bf8d15374185d080d6ccab4b00000000644173cabc1809aeb3\
+      \8ff9903abc235a1730e7152728fd2f96de918a32341103301cc4191333f7a5fa30c621dc21b923e5c6efa9f3473c1a7ed2e0\
+      \6f81957631025d4121037fcb1e62ebae9cf963b71ddfe979f44408294b7770713eb9ed9bcdce4801499bffffffff04204e00\
+      \00000000002321034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aaac204e00000000000019\
+      \76a914fc7250a211deddc70ee5a2738de5f07817351cef88ac204e000000000000475121034f355bdcb7cc0af728ef3cceb9\
+      \615d90684bb5b2ca5f859ab0f0b704075871aa2102466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1b\
+      \ae3f2752ae90e0042a010000001976a9149719fdff367ec566529f6d3814fb456a2d823c1e88ac00000000"
+    )
+    ]
+
+bloomCashSpec :: Spec
+bloomCashSpec = describe "bloom filter matching on Bitcoin Cash, and of a whole block" $ do
+  let key1 = hex "034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa"
+      key2 = hex "02466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27"
+      hash1 = hex "fc7250a211deddc70ee5a2738de5f07817351cef"
+      -- the filter that the node was given: 10 elements, tweak 5
+      filterOf flags = bloomInsert (bloomCreate 10 0.000000001 5 flags)
+  describe "bloomRelevantBlock on a block of Bitcoin Cash, as CMerkleBlock in Bitcoin Cash Node" $ do
+    let flagsOf f = fst (bloomRelevantBlock bchRegTest f (map snd cashBlock))
+        matched flags element = [name | ((name, _), True) <- zip cashBlock (flagsOf (filterOf flags element))]
+    it "matches the transactions that stand before the one they spend, when key outputs update the filter" $
+      matched BloomUpdateP2PubKeyOnly key1 `shouldBe` ["B", "D", "C", "A"]
+    it "matches them when every output updates the filter" $
+      matched BloomUpdateAll key1 `shouldBe` ["B", "D", "C", "A"]
+    it "matches only what the filter of the client holds when nothing updates it" $
+      -- C spends the output that pays to the hash of key 1, so it pushes key 1
+      matched BloomUpdateNone key1 `shouldBe` ["C", "A"]
+    it "matches the spender of the multisig output for its second key" $
+      matched BloomUpdateP2PubKeyOnly key2 `shouldBe` ["D", "A"]
+    it "matches the spender of a pay-to-pubkey-hash output when every output updates the filter" $
+      matched BloomUpdateAll hash1 `shouldBe` ["C", "A"]
+    it "does not match that spender when only key outputs update the filter" $
+      matched BloomUpdateP2PubKeyOnly hash1 `shouldBe` ["A"]
+    it "matches the transaction that spends an outpoint of the filter" $
+      matched BloomUpdateNone (hex "020af1380c0d9d46073eb5cc1d63f76bc9bcdd44bf8d15374185d080d6ccab4b00000000")
+        `shouldBe` ["A"]
+    it "gives back the filter with the outpoints of the key outputs that matched" $
+      -- the id of A in internal byte order, then the index of the output
+      let idOfA = hex "91a68a31a9faa6fdc99809d951948c48637d1b4202a99e98fa19084d4c45ddba"
+          after = snd (bloomRelevantBlock bchRegTest (filterOf BloomUpdateP2PubKeyOnly key1) (map snd cashBlock))
+       in map (\n -> bloomContains after (idOfA <> hex n)) ["00000000", "01000000", "02000000"]
+            `shouldBe` [True, False, True]
+    it "does not match one of those spenders when it is tested alone" $
+      -- B, the second transaction of the block
+      bloomRelevantUpdate bchRegTest (filterOf BloomUpdateAll key1) (snd (cashBlock !! 1)) `shouldBe` Nothing
+  describe "bloomRelevantBlock on the two transactions of the bloom_match case" $ do
+    let address = filterOf BloomUpdateAll (hex "04943fdd508053c75000106d3bc6e2754dbcff19")
+    it "matches a transaction of Bitcoin that comes after the one it spends" $
+      fst (bloomRelevantBlock btc address [bloomMatchTx, bloomSpendingTx]) `shouldBe` [True, True]
+    it "tests a transaction of Bitcoin once, in the order of the block, as CMerkleBlock in Bitcoin Core" $
+      -- no block of Bitcoin holds this order: it shows that the inputs of a
+      -- transaction are tested before the later ones update the filter
+      fst (bloomRelevantBlock btc address [bloomSpendingTx, bloomMatchTx]) `shouldBe` [False, True]
+    it "tests the inputs of a transaction of Bitcoin Cash after the whole block updated the filter" $
+      fst (bloomRelevantBlock bch address [bloomSpendingTx, bloomMatchTx]) `shouldBe` [True, True]
+    it "matches every transaction with a filter of no bytes, and leaves it as it is" $
+      let none = BloomFilter S.empty 0 0 BloomUpdateAll
+       in map (\net -> bloomRelevantBlock net none [bloomSpendingTx, bloomMatchTx]) [btc, bch]
+            `shouldBe` [([True, True], none), ([True, True], none)]
+  describe "an output of Bitcoin Cash that carries tokens, as Bitcoin Cash Node reads it" $ do
+    -- The two outputs of a transaction that the node matched on regtest:
+    -- the prefix byte, the category, the flags byte 10 for an amount alone,
+    -- the amount (1000 and 500), then the locking script.
+    let category = hex "7aff1e87eb474ad897975e133d665ed15e2c905827e3ed72d77b15f89b8f7284"
+        hash2 = hex "531260aa2a199e228c537dfa42c82bea2c7c1f4d"
+        key3 = hex "023c72addb4fdf09af94f0c94d7fe92a386a7e70cf8a1d85916386bb2535c7b1b1"
+        tx =
+          txPaying
+            [ hex "ef" <> category <> hex "10fde803" <> hex "76a914" <> hash2 <> hex "88ac",
+              hex "ef" <> category <> hex "10fdf401" <> hex "21" <> key3 <> hex "ac"
+            ]
+        matches flags element = bloomRelevantUpdate bch (filterOf flags element) tx /= Nothing
+    it "matches the hash that the locking script pays" $
+      matches BloomUpdateNone hash2 `shouldBe` True
+    it "matches the key that the locking script pays" $
+      matches BloomUpdateNone key3 `shouldBe` True
+    it "inserts the outpoint of a pay-to-pubkey output" $
+      fmap (`bloomContains` outpointBytes tx 1) (bloomRelevantUpdate bch (filterOf BloomUpdateP2PubKeyOnly key3) tx)
+        `shouldBe` Just True
+    it "does not match the category of the tokens" $
+      matches BloomUpdateNone category `shouldBe` False
+    it "is read as it stands on Bitcoin, which has no tokens" $
+      -- Read as a script, the field pushes 29 bytes of the category with the
+      -- flags byte, then 76a914, then 18 bytes of the hash: never the hash.
+      bloomRelevantUpdate btc (filterOf BloomUpdateNone hash2) tx `shouldBe` Nothing
+    it "reads a field whose token prefix is not well formed as a locking script" $
+      -- the prefix byte, then a push of 20 bytes: too short for a category
+      let pushed = B.replicate 20 0xa1
+          odd = txPaying [hex "ef14" <> pushed]
+       in bloomRelevantUpdate bch (filterOf BloomUpdateNone pushed) odd /= Nothing `shouldBe` True
 
 -- Boundaries --------------------------------------------------------------------------
 
