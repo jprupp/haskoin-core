@@ -180,10 +180,26 @@ isDataCarrier _ = False
 maxMultisigKeys :: Int
 maxMultisigKeys = 20
 
--- | The largest redeem script a pay-to-script-hash output can have, in bytes.
--- The redeem script is one push in the input script, and consensus limits a
--- push to 520 bytes: @MAX_SCRIPT_ELEMENT_SIZE@ of Bitcoin Core. Coins sent to
--- the hash of a larger script can never be spent.
+-- | The largest redeem script that this library takes for a
+-- pay-to-script-hash output, in bytes. The redeem script is one push in the
+-- input script, and on Bitcoin consensus limits a push to 520 bytes:
+-- @MAX_SCRIPT_ELEMENT_SIZE@ of Bitcoin Core. Coins sent there to the hash of
+-- a larger script can never be spent.
+--
+-- The limit is the same on every network, and on Bitcoin Cash it is stricter
+-- than the network. Since the upgrade of May 2025 a push holds up to 10,000
+-- bytes there, and an input script holds no more, so a redeem script of up
+-- to 9,997 bytes can be spent: three bytes go to its push. Bitcoin Cash Node
+-- 29.2.0 relays and mines such a spend, and refuses 9,998 bytes.
+--
+-- Above 520 bytes the library gives no address (@toP2SH@,
+-- @payToScriptAddress@, @inputAddress@, @deriveMSAddr@), signs nothing
+-- (@makeSignature@, @signPsbt@) and @verifyStdInput@ verifies nothing, on
+-- Bitcoin Cash as on Bitcoin. This is a choice of the safe side: one limit
+-- that holds on every chain cannot give an address that is spendable on one
+-- chain only, and a refusal loses no coins. Its cost is on Bitcoin Cash: a
+-- pay-to-script-hash multisig of 16 to 20 keys, or any redeem script above
+-- 520 bytes, cannot be used through these functions.
 maxRedeemScriptSize :: Int
 maxRedeemScriptSize = 520
 
@@ -388,7 +404,9 @@ instance Serialize ScriptOutput where
   get = deserialize
 
 -- | The pay-to-script-hash output of a redeem script. Fails for a script
--- longer than 'maxRedeemScriptSize' bytes, which could never be spent.
+-- longer than 'maxRedeemScriptSize' bytes, which could never be spent on
+-- Bitcoin. The limit is the same on Bitcoin Cash, where the network accepts
+-- more: see 'maxRedeemScriptSize'.
 toP2SH :: Script -> Either String ScriptOutput
 toP2SH = fmap PayScriptHash . p2shScriptHash
 
@@ -400,7 +418,7 @@ toP2WSH = fmap PayWitnessScriptHash . p2wshScriptHash
 
 -- | The hash that a pay-to-script-hash output commits to: HASH160 of the
 -- serialized redeem script. Fails for a script longer than
--- 'maxRedeemScriptSize' bytes.
+-- 'maxRedeemScriptSize' bytes, on every network.
 p2shScriptHash :: Script -> Either String Hash160
 p2shScriptHash script
   | size > maxRedeemScriptSize =

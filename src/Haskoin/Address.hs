@@ -85,7 +85,7 @@ where
 
 import Control.Applicative (Alternative ((<|>)))
 import Control.DeepSeq (NFData)
-import Control.Monad (guard, mfilter, when, (<=<))
+import Control.Monad (guard, mfilter, unless, when, (<=<))
 import Crypto.Secp256k1
 import Data.Aeson (ToJSON (toJSON), withText)
 import Data.Aeson.Encoding (text)
@@ -93,7 +93,7 @@ import Data.Binary (Binary (..))
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as B
 import Data.ByteString.Unsafe qualified as BU
-import Data.Bytes.Get (MonadGet (getByteString, getWord64be, getWord8), isEmpty, runGetS)
+import Data.Bytes.Get (MonadGet (getByteString, getWord64be, getWord8), runGetS)
 import Data.Bytes.Put (MonadPut (putByteString, putWord64be, putWord8), runPutS)
 import Data.Bytes.Serial (Serial (..))
 import Data.Hashable (Hashable)
@@ -563,16 +563,35 @@ addrToText net a
   | isJust net.cashAddrPrefix = addrToCash net a
   | otherwise = addrToBase58 net a <|> addrToBech32 net a
 
--- | Encode a P2PKH or P2SH address in the legacy 'Base58' format of the
--- network. Works on Bitcoin Cash networks too, for software that still needs
--- the legacy format there. Other address kinds have no 'Base58' form.
+-- | Encode an address in the legacy 'Base58' format of the network: a P2PKH
+-- or a P2SH address on every network, and a P2SH32 address on the Bitcoin
+-- Cash networks. Other address kinds have no 'Base58' form.
+--
+-- The format works on the Bitcoin Cash networks for software that still
+-- needs it there. Prefer 'addrToCash' where there is a choice: CashAddr is
+-- the format of the specification.
+--
+-- No specification gives a legacy form to a P2SH32 address. The one written
+-- here is that of Bitcoin Cash Node, which writes it with @-usecashaddr=0@
+-- and reads it: the version byte of a script address, then the 32 bytes of
+-- the hash. The text has 50 or 51 characters, where the other legacy
+-- addresses have at most 35. Software that knows only those refuses it.
+-- Bitcoin has no P2SH32 address, so on a Bitcoin network there is no form
+-- to write.
 addrToBase58 :: Network -> Address -> Maybe Base58
 addrToBase58 net = \case
   PubKeyAddress h -> Just $ base58 net.addrPrefix h
   ScriptAddress h -> Just $ base58 net.scriptPrefix h
+  Script32Address h | hasScript32 net -> Just $ base58 net.scriptPrefix h
   _ -> Nothing
   where
+    base58 :: (Serial h) => Word8 -> h -> Base58
     base58 pfx h = encodeBase58Check . runPutS $ putWord8 pfx >> serialize h
+
+-- | Pay-to-script-hash with a 256-bit hash (P2SH32) exists where the network
+-- has CashAddr: on the Bitcoin Cash networks.
+hasScript32 :: Network -> Bool
+hasScript32 net = isJust net.cashAddrPrefix
 
 -- | Encode a SegWit address in the 'Bech32' or 'Bech32m' format of the
 -- network. Fails on networks without SegWit and for other address kinds.
@@ -596,6 +615,8 @@ addrToCash net = \case
   _ -> Nothing
 
 -- | Parse 'Base58', 'Bech32' or 'CashAddr' address, depending on network.
+-- A Bitcoin Cash network reads CashAddr and the legacy 'Base58' form, that
+-- of a P2SH32 address included ('addrToBase58').
 --
 -- The text must be the address and nothing else. White space around it is
 -- refused, where Bitcoin Core skips it around a 'Base58' address, so trim
@@ -619,31 +640,41 @@ bech32ToAddr net txt = do
   (ver, prog) <- segwitDecode hrp txt
   witnessAddress ver (B.pack prog)
 
+-- | Parse an address in the legacy 'Base58' format of the network: what
+-- 'addrToBase58' writes there. That is a P2PKH or a P2SH address on every
+-- network, and a P2SH32 address on the Bitcoin Cash networks, in the form
+-- that Bitcoin Cash Node reads.
 base58ToAddr :: Network -> Text -> Maybe Address
 base58ToAddr net txt = do
   guard $ T.length txt <= maxBase58AddressLength
-  bs <- decodeBase58Check txt
-  eitherToMaybe $ runGetS (base58get net) bs
+  (version, hash) <- B.uncons =<< decodeBase58Check txt
+  legacyAddress net version hash
 
--- | A 'Base58' address holds 25 bytes: a version byte, a 20-byte hash and a
--- 4-byte checksum. That never takes more than 35 digits, because 58^35 is
--- larger than 256^25. Longer strings are rejected before any decoding, since
--- the time to decode grows with the square of the length.
+-- | The longest 'Base58' address. Longer strings are rejected before any
+-- decoding, since the time to decode grows with the square of the length.
+--
+-- The longest address is a P2SH32 address of Bitcoin Cash. It holds 37
+-- bytes: a version byte, a 32-byte hash and a 4-byte checksum. That never
+-- takes more than 51 digits, because 58^51 is larger than 256^37. The other
+-- addresses hold 25 bytes, which take at most 35 digits.
+--
+-- This is a bound on the work, the same on every network, and not a rule
+-- of what an address is: 'legacyAddress' decides that from the bytes.
 maxBase58AddressLength :: Int
-maxBase58AddressLength = 35
+maxBase58AddressLength = 51
 
-base58get :: (MonadGet m) => Network -> m Address
-base58get net = do
-  pfx <- getWord8
-  addr <- deserialize
-  isEmpty >>= \case
-    True -> f pfx addr
-    False -> fail "Address too long"
-  where
-    f x a
-      | x == net.addrPrefix = return $ PubKeyAddress a
-      | x == net.scriptPrefix = return $ ScriptAddress a
-      | otherwise = fail "Does not recognize address prefix"
+-- | The address of a legacy version byte and the hash that follows it. A key
+-- hash has 20 bytes. A script hash has 20 bytes, or 32 on a network with
+-- P2SH32. Any other length is refused, so no byte is left unread.
+legacyAddress :: Network -> Word8 -> ByteString -> Maybe Address
+legacyAddress net version hash =
+  case B.length hash of
+    20
+      | version == net.addrPrefix -> PubKeyAddress <$> decodeHash hash
+      | version == net.scriptPrefix -> ScriptAddress <$> decodeHash hash
+    32
+      | version == net.scriptPrefix, hasScript32 net -> Script32Address <$> decodeHash hash
+    _ -> Nothing
 
 -- | HASH160 of a public key in its serialized form.
 pubKeyHash :: PublicKey -> Hash160
@@ -664,11 +695,12 @@ pubKeyWitnessAddr pk = do
 
 -- | Obtain a backwards-compatible SegWit P2SH-P2WPKH address from a public key.
 -- Returns 'Nothing' for an uncompressed key, for the same reason as
--- 'pubKeyWitnessAddr'.
-pubKeyCompatWitnessAddr :: PublicKey -> Maybe Address
-pubKeyCompatWitnessAddr pk = do
+-- 'pubKeyWitnessAddr', and on a network without SegWit, for the reason that
+-- 'p2shP2wpkhAddr' gives.
+pubKeyCompatWitnessAddr :: Network -> PublicKey -> Maybe Address
+pubKeyCompatWitnessAddr net pk = do
   guard pk.compress
-  return . p2shP2wpkhAddr $ pubKeyHash pk
+  p2shP2wpkhAddr net (pubKeyHash pk)
 
 -- | Obtain a standard pay-to-public-key-hash (P2PKH) address from a 'Hash160'.
 p2pkhAddr :: Hash160 -> Address
@@ -691,17 +723,34 @@ p2wshAddr = WitnessScriptAddress
 -- 'Hash160' of a compressed public key. It is the pay-to-script-hash address
 -- of the witness program @OP_0@ followed by the push of the 20-byte hash,
 -- which is 22 bytes long.
-p2shP2wpkhAddr :: Hash160 -> Address
-p2shP2wpkhAddr h =
-  p2shAddr . addressHash $ B.pack [0x00, 0x14] <> hashBytes h
+--
+-- Returns 'Nothing' on a network without SegWit, such as Bitcoin Cash. The
+-- address is an ordinary pay-to-script-hash address, so it has a text there
+-- and a payer can send coins to it. But only a witness holds the signature
+-- that protects those coins, and such a network has no witness. On Bitcoin
+-- Cash a block may spend them with the witness program alone as the input
+-- script, without any signature (the SegWit recovery rule of May 2019), so
+-- any miner can take them, and nodes do not relay that spend, so the owner
+-- cannot make it without a miner. This is why the function takes the
+-- network: a wallet must not show such an address there.
+p2shP2wpkhAddr :: Network -> Hash160 -> Maybe Address
+p2shP2wpkhAddr net h = do
+  guard net.segWit
+  return . p2shAddr . addressHash $ B.pack [0x00, 0x14] <> hashBytes h
 
 -- | Compute a standard pay-to-script-hash (P2SH) address for an output script.
 --
 -- Fails when the redeem script is longer than 'maxRedeemScriptSize' (520)
--- bytes. Consensus limits a push to that size, and the redeem script is a
--- push of the spending input, so coins sent to such an address could never be
--- spent. A multisig of compressed keys fits up to 15 keys. Use
+-- bytes. On Bitcoin, consensus limits a push to that size, and the redeem
+-- script is a push of the spending input, so coins sent to such an address
+-- could never be spent. A multisig of compressed keys fits up to 15 keys. Use
 -- 'payToWitnessScriptAddress' or 'payToNestedScriptAddress' for more.
+--
+-- The function takes no network, and the limit is the same on all of them.
+-- On Bitcoin Cash it is stricter than the network, which spends a redeem
+-- script of up to 9,997 bytes since May 2025: the library gives no address
+-- for a multisig of 16 to 20 keys there. 'maxRedeemScriptSize' has the
+-- reason.
 --
 -- Also fails for a value that 'encodeOutput' cannot write, such as a multisig
 -- that requires more signatures than it has keys.
@@ -725,8 +774,15 @@ payToWitnessScriptAddress =
 -- | Compute a backwards-compatible SegWit P2SH-P2WSH address: the
 -- pay-to-script-hash address of the witness program of the script. Fails as
 -- 'payToWitnessScriptAddress' does.
-payToNestedScriptAddress :: ScriptOutput -> Either String Address
-payToNestedScriptAddress out = do
+--
+-- Also fails on a network without SegWit, such as Bitcoin Cash, where any
+-- miner can take coins sent to such an address: see 'p2shP2wpkhAddr'.
+payToNestedScriptAddress :: Network -> ScriptOutput -> Either String Address
+payToNestedScriptAddress net out = do
+  unless net.segWit . Left $
+    "The network "
+      <> net.name
+      <> " has no SegWit, so any miner can take coins sent to a nested SegWit address"
   h <- p2wshScriptHash =<< encodeOutput out
   payToScriptAddress (PayWitnessScriptHash h)
 
@@ -902,9 +958,7 @@ outputAddress net =
   where
     -- SegWit addresses exist where the network has a Bech32 prefix.
     witness a = guard (isJust net.bech32Prefix) >> a
-    -- Pay-to-script-hash with a 256-bit hash exists where the network has
-    -- CashAddr.
-    script32 a = guard (isJust net.cashAddrPrefix) >> a
+    script32 a = guard (hasScript32 net) >> a
 
 -- | Infer the 'Address' that a 'ScriptInput' spends from. It is the address
 -- of the public key or of the redeem script that the input carries.
@@ -912,9 +966,11 @@ outputAddress net =
 -- 'decodeInput' only returns a redeem script in the form 'encodeOutput'
 -- writes, so for a decoded input this is the hash of the redeem script bytes
 -- of the input. There is no address for a redeem script above
--- 'maxRedeemScriptSize' bytes, since no valid input can carry one. The
--- function does not look at the output being spent, so it is a guess that a
--- caller should confirm against that output when it has it.
+-- 'maxRedeemScriptSize' bytes. On Bitcoin no valid input can carry one. On
+-- Bitcoin Cash a valid input can, since May 2025, and this function still
+-- gives no address for it: the library keeps one limit on every network.
+-- The function does not look at the output being spent, so it is a guess
+-- that a caller should confirm against that output when it has it.
 inputAddress :: ScriptInput -> Maybe Address
 inputAddress =
   \case

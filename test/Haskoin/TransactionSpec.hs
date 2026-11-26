@@ -1603,6 +1603,16 @@ signerSpec =
       signTx btc tx [SigInput (PayScriptHash h) 100000 op sigHashAll (Just rdm)] [k1.key]
         `shouldBe` Left "The redeem script is 547 bytes long, and a pay-to-script-hash redeem script can have at most 520"
 
+    it "refuses a redeem script over 520 bytes on Bitcoin Cash too, where nodes accept more" $ do
+      -- Bitcoin Cash Node spends a redeem script of up to 9997 bytes since
+      -- May 2025. The library keeps the limit of Bitcoin on every network.
+      let rdm = PayMulSig [snd (fixedKey n) | n <- [1 .. 16]] 1
+          h = addressHash (runPutS (serialize (either error id (encodeOutput rdm))))
+      signTx bch tx [SigInput (PayScriptHash h) 100000 op sigHashAll (Just rdm)] [k1.key]
+        `shouldBe` Left
+          "The redeem script is 547 bytes long, \
+          \and a pay-to-script-hash redeem script can have at most 520"
+
     it "refuses a pay-to-witness-script-hash coin whose witness script is over 10000 bytes" $ do
       let rdm = DataCarrier [B.replicate 10000 0]
           -- OP_RETURN, OP_PUSHDATA2 with its two length bytes, 10000 bytes: 10004
