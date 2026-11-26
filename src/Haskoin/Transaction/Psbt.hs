@@ -1912,8 +1912,9 @@ xPrvSigner xprv originM =
 --   witness script, and a coin, redeem script or witness script that is no
 --   standard template;
 -- * a P2SH coin whose redeem script has more than 'maxRedeemScriptSize'
---   bytes, which no transaction can spend. Bitcoin Core adds a signature
---   to it, which serves nothing;
+--   bytes, which no transaction can spend on Bitcoin. Bitcoin Core adds a
+--   signature to it, which serves nothing. The limit is the same on
+--   Bitcoin Cash, where it is stricter than the network;
 -- * a legacy coin known from its witness output only: "If a witness UTXO
 --   is provided, no non-witness signature may be created";
 -- * a SegWit version 0 coin known from its witness output only, when the
@@ -2412,9 +2413,10 @@ data Spend = Spend
 -- * a coin without the script it commits to, or with one that does not
 --   parse;
 -- * a redeem script of more than 'maxRedeemScriptSize' bytes, or a
---   witness script of more than 'maxWitnessScriptSize': no transaction
---   can spend the coin. Bitcoin Core adds a signature to such a coin, and
---   makes no final script of it;
+--   witness script of more than 'maxWitnessScriptSize': on Bitcoin no
+--   transaction can spend the coin. Bitcoin Core adds a signature to such
+--   a coin, and makes no final script of it. The limit of a redeem script
+--   is the same on Bitcoin Cash, where it is stricter than the network;
 -- * a script that names the keys and is no standard template;
 -- * a script hash or a witness program where none may be: a P2SH script as
 --   redeem script, or a P2SH script or a witness program as witness

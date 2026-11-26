@@ -7,6 +7,81 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+This version breaks backwards compatibility in one place: the six functions
+that give a nested SegWit address take the network. See "Changed" below.
+
+### Changed
+
+- **The nested SegWit address functions take the network, and give no address
+  on a network without SegWit.** A nested SegWit address (P2SH-P2WPKH or
+  P2SH-P2WSH) is an ordinary pay-to-script-hash address. The functions that
+  make one took no network, so the address had a valid text on Bitcoin Cash
+  too, and a wallet could show it to a payer there. Bitcoin Cash has no
+  witness, and only a witness holds the signature that protects such coins.
+  Since May 2019 a block of Bitcoin Cash may spend them with the witness
+  program alone as the input script, without any signature, and nodes do not
+  relay that spend. So any miner can take the coins, and the owner cannot
+  spend them without a miner. Bitcoin Cash Node 29.2.0 on regtest refused
+  such a spend in its mempool and accepted the block that held it. The
+  functions now take the network as their first argument and refuse where
+  `segWit` is false. On a network with SegWit they give the addresses they
+  gave before.
+
+  The types now:
+
+  ```haskell
+  p2shP2wpkhAddr :: Network -> Hash160 -> Maybe Address
+  pubKeyCompatWitnessAddr :: Network -> PublicKey -> Maybe Address
+  payToNestedScriptAddress :: Network -> ScriptOutput -> Either String Address
+  xPubCompatWitnessAddr :: Network -> XPubKey -> Maybe Address
+  deriveCompatWitnessAddr :: Network -> XPubKey -> KeyIndex -> Maybe (Address, PubKey)
+  deriveCompatWitnessAddrs ::
+    Network -> XPubKey -> KeyIndex -> Maybe [(Address, PubKey, KeyIndex)]
+  ```
+
+  Before, none took the network. `p2shP2wpkhAddr` and `xPubCompatWitnessAddr`
+  returned an `Address`, `deriveCompatWitnessAddr` a pair and
+  `deriveCompatWitnessAddrs` a list, without `Maybe`.
+  `pubKeyCompatWitnessAddr` and `payToNestedScriptAddress` keep their result
+  types.
+
+  To migrate, pass the network, and handle `Nothing` or `Left` as "this
+  network has no such address". `deriveCompatWitnessAddrs` gives `Nothing`
+  and not an empty list there, so that a caller cannot take it for a wallet
+  without addresses. The native SegWit functions (`pubKeyWitnessAddr`,
+  `xPubWitnessAddr`, `payToWitnessScriptAddress` and the others) keep their
+  types: their address has no text on a network without SegWit, so it cannot
+  be shown to a payer there.
+
+### Fixed
+
+- **The legacy Base58 form of a P2SH32 address of Bitcoin Cash is read and
+  written.** Bitcoin Cash Node writes the address of a pay-to-script-hash
+  output with a 256-bit hash in the legacy format when it runs with
+  `-usecashaddr=0`, and reads it: the version byte of a script address, then
+  the 32 bytes of the hash, 50 or 51 characters. `textToAddr`, `base58ToAddr`
+  and the JSON parser of `Address` refused that text, and `addrToBase58` gave
+  `Nothing` for a `Script32Address`, so a program that shows legacy addresses
+  had no text for such an output. They now read and write it on the networks
+  with CashAddr, and give the texts of the node. Nothing changes on the
+  Bitcoin networks, which have no such address. A Base58 address may now
+  have up to 51 characters before it is refused without decoding, where the
+  bound was 35.
+- **The documentation no longer says that a pay-to-script-hash redeem script
+  above 520 bytes can never be spent on any network.** That is true on
+  Bitcoin. On Bitcoin Cash a push holds up to 10,000 bytes since the upgrade
+  of May 2025, and Bitcoin Cash Node 29.2.0 relays and mines the spend of a
+  redeem script of up to 9,997 bytes. The library keeps the limit of 520
+  bytes on every network (`maxRedeemScriptSize`): it gives no address for a
+  longer redeem script, does not sign its coins and does not verify a spend
+  of them, so a pay-to-script-hash multisig of 16 to 20 keys cannot be used
+  through it on Bitcoin Cash. No code changed. The Haddocks of
+  `maxRedeemScriptSize`, `toP2SH`, `payToScriptAddress`, `inputAddress`,
+  `deriveMSAddr`, `makeSignature`, `signPsbt` and `verifyStdInput`, and the
+  README, now say that the limit is stricter than that network, and why it
+  stays: one limit for every chain cannot give an address that only one
+  chain can spend, and a refusal loses no coins.
+
 ## [3.0.0] - 2026-11-25
 
 This release breaks backwards compatibility in three places:

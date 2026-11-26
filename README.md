@@ -398,6 +398,12 @@ Pick the address function that matches the wallet standard:
 | BIP-84   | P2WPKH              | `m/84'/0'/0'` | `deriveWitnessAddr`       | `deriveWitnessAddrs`       |
 | BIP-86   | Taproot             | `m/86'/0'/0'` | See [Taproot](#taproot)   |                            |
 
+The two functions of BIP-49 take the network first, and return `Nothing` on a
+network without SegWit: `deriveCompatWitnessAddr btc account 0`. A nested
+SegWit address is an ordinary P2SH address, so it has a text on Bitcoin Cash
+too, and there any miner can take the coins sent to it. See
+[Bitcoin Cash](#bitcoin-cash).
+
 `xPrvExport` and `xPubExport` write the standard `xprv` and `xpub` forms.
 `xPrvImport` and `xPubImport` read them back. The `ypub` and `zpub` prefixes are
 not supported.
@@ -499,12 +505,15 @@ Which opcodes a chain enables, and from which block, is a matter for a script
 interpreter, which this library does not have.
 
 `payToWitnessScriptAddress` and `payToNestedScriptAddress` give the P2WSH and
-P2SH-P2WSH addresses of a script.
+P2SH-P2WSH addresses of a script. `payToNestedScriptAddress` takes the network
+first, and fails on a network without SegWit.
 
 The three functions return `Either`. A P2SH redeem script holds at most 520
-bytes, which is a multisig of 15 compressed keys. Coins sent to a longer script
-could never be spent, so `payToScriptAddress` refuses it. A P2WSH script holds up
-to 10,000 bytes, so a multisig of 16 to 20 keys needs P2WSH.
+bytes, which is a multisig of 15 compressed keys. On Bitcoin, coins sent to a
+longer script could never be spent, so `payToScriptAddress` refuses it. A P2WSH
+script holds up to 10,000 bytes, so a multisig of 16 to 20 keys needs P2WSH.
+The limit of 520 bytes is the same on Bitcoin Cash, where it is stricter than
+the network: see [Bitcoin Cash](#bitcoin-cash).
 
 ### Building and signing a transaction
 
@@ -868,7 +877,34 @@ print ((== Just address) (textToAddr bch "1mW6fDEMjKrDHvLvoEsaeLxSCzZBf3Bfg"))
 -- SegWit addresses do not exist on Bitcoin Cash.
 print (addrToText bch (xPubWitnessAddr (deriveXPubKey key)))
 -- => Nothing
+
+-- Nor do the nested ones, which the library refuses to make there.
+print (xPubCompatWitnessAddr bch (deriveXPubKey key))
+-- => Nothing
 ```
+
+A nested SegWit address (P2SH-P2WPKH or P2SH-P2WSH) is an ordinary P2SH
+address, so it has a valid text on Bitcoin Cash, and a payer can send coins to
+it. Bitcoin Cash has no witness. A block there may spend such coins with the
+witness program alone, without a signature, and nodes do not relay that spend:
+any miner can take the coins, and the owner cannot spend them without a miner.
+This is why `pubKeyCompatWitnessAddr`, `p2shP2wpkhAddr`,
+`payToNestedScriptAddress`, `xPubCompatWitnessAddr`, `deriveCompatWitnessAddr`
+and `deriveCompatWitnessAddrs` take the network, and give no address where it
+has no SegWit.
+
+`addrToBase58` writes the legacy form of a P2SH32 address too, and `textToAddr`
+reads it, as Bitcoin Cash Node does: the version byte of a script address and
+the 32 bytes of the hash, 50 or 51 characters. Software that knows only the
+legacy addresses of 20 bytes refuses that text. Prefer CashAddr.
+
+A P2SH redeem script holds at most 520 bytes in this library, on every network.
+Bitcoin Cash spends a redeem script of up to 9,997 bytes since May 2025, so the
+library is stricter than the network there: `payToScriptAddress`, `toP2SH` and
+`deriveMSAddr` give no address for a longer script, such as a multisig of 16 to
+20 keys, `signTx` and `signPsbt` do not sign its coins, and `verifyStdTx` does
+not verify a spend of them. The refusal loses no coins: it is the safe side of
+one limit for every chain.
 
 `signTx` sets the fork id flag of the signature hash when the network needs it.
 Pass `sigHashAll` as usual.

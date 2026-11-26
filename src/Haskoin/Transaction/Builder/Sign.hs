@@ -554,7 +554,10 @@ existingSigs net so (script, stack) = insSigs <> witSigs
 -- * A pay-to-script-hash coin without its redeem script, with a redeem
 --   script over 'maxRedeemScriptSize' bytes, or with one that does not
 --   hash to the coin. The same for a pay-to-witness-script-hash coin and
---   its witness script, with 'maxWitnessScriptSize'.
+--   its witness script, with 'maxWitnessScriptSize'. The limit of a redeem
+--   script is the one place where the signer is stricter than a node: a
+--   node of Bitcoin Cash accepts a longer one since May 2025, and the
+--   library keeps one limit on every network ('maxRedeemScriptSize').
 -- * A SegWit coin on a network without SegWit.
 -- * On a network with a fork id, a signature that comes out 64 bytes long
 --   ('isCashSchnorrLength'). Bitcoin Cash reads that length as a Schnorr

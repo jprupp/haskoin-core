@@ -526,10 +526,12 @@ xPubWitnessAddr xkey = p2wpkhAddr (xPubKeyHash xkey)
 
 -- | Compute a backwards-compatible SegWit P2SH-P2WPKH address for an extended
 -- public key. Extended public keys are always compressed, so the address
--- always exists.
-xPubCompatWitnessAddr :: XPubKey -> Address
-xPubCompatWitnessAddr xkey =
-  p2shP2wpkhAddr (xPubKeyHash xkey)
+-- exists on every network with SegWit. 'Nothing' on a network without
+-- SegWit, such as Bitcoin Cash, where any miner can take coins sent to such
+-- an address: see 'p2shP2wpkhAddr'.
+xPubCompatWitnessAddr :: Network -> XPubKey -> Maybe Address
+xPubCompatWitnessAddr net xkey =
+  p2shP2wpkhAddr net (xPubKeyHash xkey)
 
 -- | HASH160 of the compressed public key of an extended public key.
 xPubKeyHash :: XPubKey -> Hash160
@@ -614,10 +616,12 @@ deriveWitnessAddr k i =
     key = pubSubKey k i
 
 -- | Derive a backwards-compatible SegWit P2SH-P2WPKH address from an extended
--- public key and an index.
-deriveCompatWitnessAddr :: XPubKey -> KeyIndex -> (Address, PubKey)
-deriveCompatWitnessAddr k i =
-  (xPubCompatWitnessAddr key, key.key)
+-- public key and an index. 'Nothing' on a network without SegWit, as
+-- 'xPubCompatWitnessAddr'.
+deriveCompatWitnessAddr :: Network -> XPubKey -> KeyIndex -> Maybe (Address, PubKey)
+deriveCompatWitnessAddr net k i = do
+  addr <- xPubCompatWitnessAddr net key
+  return (addr, key.key)
   where
     key = pubSubKey k i
 
@@ -639,13 +643,22 @@ deriveWitnessAddrs k =
     f i = let (a, key) = deriveWitnessAddr k i in (a, key, i)
 
 -- | Cyclic list of all backwards-compatible SegWit P2SH-P2WPKH addresses
--- derived from a public key starting from an offset index.
+-- derived from a public key starting from an offset index. 'Nothing' on a
+-- network without SegWit, as 'xPubCompatWitnessAddr': there is no list
+-- there, not an empty one, so that a caller cannot take it for a wallet
+-- without addresses.
 deriveCompatWitnessAddrs ::
-  XPubKey -> KeyIndex -> [(Address, PubKey, KeyIndex)]
-deriveCompatWitnessAddrs k =
-  map f . cycleIndex
-  where
-    f i = let (a, key) = deriveCompatWitnessAddr k i in (a, key, i)
+  Network -> XPubKey -> KeyIndex -> Maybe [(Address, PubKey, KeyIndex)]
+deriveCompatWitnessAddrs net k start = do
+  -- Whether an address exists depends on the network, not on the key. One
+  -- check on the parent key therefore covers the whole list, which stays
+  -- lazy and endless.
+  _ <- xPubCompatWitnessAddr net k
+  return
+    [ (a, key, i)
+    | i <- cycleIndex start,
+      Just (a, key) <- [deriveCompatWitnessAddr net k i]
+    ]
 
 -- | Derive a pay-to-script-hash multisig address from a list of public keys,
 -- the number of required signatures /m/ and a derivation index. The
@@ -655,9 +668,12 @@ deriveCompatWitnessAddrs k =
 -- Fails when /m/ is not between 1 and the number of keys, and when there are
 -- more than 15 keys. The redeem script of 16 compressed keys is 547 bytes
 -- (3 + 16 × 34), and a pay-to-script-hash redeem script can have at most 520
--- ('maxRedeemScriptSize'), so coins sent to such an address could never be
--- spent. For 16 to 20 keys, build a pay-to-witness-script-hash address from
--- the redeem script with 'payToWitnessScriptAddress'.
+-- ('maxRedeemScriptSize'), so on Bitcoin coins sent to such an address could
+-- never be spent. For 16 to 20 keys, build a pay-to-witness-script-hash
+-- address from the redeem script with 'payToWitnessScriptAddress'. Bitcoin
+-- Cash has no such address, and spends a longer redeem script since May
+-- 2025, but the limit is the same there: this function gives no address for
+-- 16 to 20 keys on any network.
 deriveMSAddr ::
   [XPubKey] -> Int -> KeyIndex -> Either String (Address, RedeemScript)
 deriveMSAddr keys m i = do

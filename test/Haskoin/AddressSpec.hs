@@ -211,10 +211,19 @@ spec = do
       addrToBase58 bch p2pkh `shouldBe` Just "1BpEi6DfDAUFd7GtittLSdBeYJvcoaVggu"
       addrToBase58 bch p2sh `shouldBe` Just "3CWFddi6m4ndiGyKqzYvsFYagqDLPVMTzC"
       addrToBase58 bchTest3 p2sh `shouldBe` Just "2N44ThNe8NXHyv4bsX8AoVCXquBRW94Ls7W"
+    it "addrToBase58 gives the legacy form of a P2SH32 address on the Bitcoin Cash networks" $ do
+      -- What Bitcoin Cash Node 29.2.0 writes with -usecashaddr=0 for the
+      -- script OP_HASH256, the push of hash32, OP_EQUAL
+      addrToBase58 bch p2sh32 `shouldBe` Just "AuTpKqgd4jFk1bvGSPahaJT9xdug41sAds2jJeBxWdfoeGMM7a"
+      forM_ [bchTest3, bchTest4, bchRegTest] $ \net ->
+        addrToBase58 net p2sh32 `shouldBe` Just "7aBeWcZnPKuWVhbdR9wRsppN4kG4qYy7TiPbKv2Qpfuk4TJzq1h"
+    it "addrToBase58 has no form for a P2SH32 address on a Bitcoin network" $
+      forM_ [btc, btcTest, btcTest4, btcRegTest] $ \net ->
+        addrToBase58 net p2sh32 `shouldBe` Nothing
     it "addrToBase58 has no form for other kinds" $ do
       addrToBase58 btc p2wpkh `shouldBe` Nothing
-      addrToBase58 bch p2sh32 `shouldBe` Nothing
       addrToBase58 bch tokenP2pkh `shouldBe` Nothing
+      addrToBase58 bch tokenP2sh32 `shouldBe` Nothing
     it "addrToBech32 encodes SegWit kinds on SegWit networks only" $ do
       addrToBech32 btc p2wpkh `shouldBe` Just "bc1qw6syq5aa5z5ghkj3w7ux59wrk204txrn9k4rmm"
       addrToBech32 btc p2pkh `shouldBe` Nothing
@@ -236,6 +245,27 @@ spec = do
         `shouldBe` Just (WitnessPubKeyAddress "751e76e8199196d454941c45d1b3a323f1433bd6")
     it "accepts a legacy Base58 address on a Bitcoin Cash network" $
       textToAddr bch "1BpEi6DfDAUFd7GtittLSdBeYJvcoaVggu" `shouldBe` Just p2pkh
+    it "reads the legacy Base58 form of a P2SH32 address on the Bitcoin Cash networks" $ do
+      -- The texts that Bitcoin Cash Node 29.2.0 writes and reads back
+      textToAddr bch "AuTpKqgd4jFk1bvGSPahaJT9xdug41sAds2jJeBxWdfoeGMM7a" `shouldBe` Just p2sh32
+      forM_ [bchTest3, bchTest4, bchRegTest] $ \net ->
+        textToAddr net "7aBeWcZnPKuWVhbdR9wRsppN4kG4qYy7TiPbKv2Qpfuk4TJzq1h" `shouldBe` Just p2sh32
+    it "rejects the legacy form of a P2SH32 address of another Bitcoin Cash network" $ do
+      textToAddr bchTest3 "AuTpKqgd4jFk1bvGSPahaJT9xdug41sAds2jJeBxWdfoeGMM7a" `shouldBe` Nothing
+      textToAddr bch "7aBeWcZnPKuWVhbdR9wRsppN4kG4qYy7TiPbKv2Qpfuk4TJzq1h" `shouldBe` Nothing
+    it "rejects the legacy form of a P2SH32 address on a Bitcoin network" $ do
+      -- Bitcoin has no such address, and Bitcoin Core refuses the text
+      textToAddr btc "AuTpKqgd4jFk1bvGSPahaJT9xdug41sAds2jJeBxWdfoeGMM7a" `shouldBe` Nothing
+      forM_ [btcTest, btcTest4, btcRegTest] $ \net ->
+        textToAddr net "7aBeWcZnPKuWVhbdR9wRsppN4kG4qYy7TiPbKv2Qpfuk4TJzq1h" `shouldBe` Nothing
+    it "rejects a 32-byte hash under the version byte of a key hash" $
+      -- version byte 0 and hash32: a key hash has 20 bytes only
+      textToAddr bch "1BjwAbXMwM84uhPjYHavyJaaPZKRXoVESWVWZChzEbjLc2A4oD" `shouldBe` Nothing
+    it "rejects a legacy script hash that is neither 20 nor 32 bytes long" $ do
+      -- version byte 5 and the first 31 bytes of hash32
+      textToAddr bch "3F9o4pHEA14LiNWHe23CTaQbeyr6DvDGn4BMuwC6KwyoH22Y1" `shouldBe` Nothing
+      -- version byte 5, hash32 and one byte more
+      textToAddr bch "kiZMt9stBTW4qf8794fk5z2SYZuVNJpRXhpdis9N1nrGwrx1XM1" `shouldBe` Nothing
     it "rejects a CashAddr with a mixed case prefix" $
       textToAddr bch "BitcoinCash:qpm2qsznhks23z7629mms6s4cwef74vcwvy22gdx6a" `shouldBe` Nothing
     it "rejects a CashAddr with mixed case data" $
@@ -291,6 +321,9 @@ spec = do
     it "rejects a long string of Base58 characters without decoding it" $
       timeout 2000000 (evaluate (textToAddr btc (T.replicate 500000 "z")))
         `shouldReturn` Just Nothing
+    it "rejects a long string of Base58 characters without decoding it on Bitcoin Cash" $
+      timeout 2000000 (evaluate (textToAddr bch (T.replicate 500000 "z")))
+        `shouldReturn` Just Nothing
   describe "Addresses from public keys" $ do
     it "pubKeyAddr hashes a compressed key" $
       addrToText btc (pubKeyAddr compressedKey)
@@ -304,10 +337,14 @@ spec = do
     it "pubKeyWitnessAddr refuses an uncompressed key" $
       pubKeyWitnessAddr uncompressedKey `shouldBe` Nothing
     it "pubKeyCompatWitnessAddr gives the P2SH-P2WPKH address of a compressed key" $
-      (addrToText btc =<< pubKeyCompatWitnessAddr compressedKey)
+      (addrToText btc =<< pubKeyCompatWitnessAddr btc compressedKey)
         `shouldBe` Just "3JvL6Ymt8MVWiCNHC7oWU6nLeHNJKLZGLN"
     it "pubKeyCompatWitnessAddr refuses an uncompressed key" $
-      pubKeyCompatWitnessAddr uncompressedKey `shouldBe` Nothing
+      pubKeyCompatWitnessAddr btc uncompressedKey `shouldBe` Nothing
+    it "pubKeyCompatWitnessAddr gives no address on a network without SegWit" $
+      -- Bitcoin Cash has no witness: any miner can take coins sent there
+      forM_ [bch, bchTest3, bchTest4, bchRegTest] $ \net ->
+        pubKeyCompatWitnessAddr net compressedKey `shouldBe` Nothing
     it "p2pkhAddr, p2shAddr, p2wpkhAddr and p2wshAddr wrap a hash" $ do
       addrToText btc (p2pkhAddr hash20) `shouldBe` Just "1BpEi6DfDAUFd7GtittLSdBeYJvcoaVggu"
       addrToText btc (p2shAddr hash20) `shouldBe` Just "3CWFddi6m4ndiGyKqzYvsFYagqDLPVMTzC"
@@ -321,13 +358,21 @@ spec = do
       (addrToText btc <$> payToWitnessScriptAddress multisig)
         `shouldBe` Right (Just "bc1qd6e6c86xp56gw8pty8suuqhscpttea2c5m2fggzjkxzk5nl9faks5pehxu")
     it "payToNestedScriptAddress wraps the P2WSH script in P2SH" $
-      (addrToText btc <$> payToNestedScriptAddress multisig)
+      (addrToText btc <$> payToNestedScriptAddress btc multisig)
         `shouldBe` Right (Just "3JSuZ22mPR2aD5bf77KsGi36V5ar3p87LX")
+    it "payToNestedScriptAddress gives no address on a network without SegWit" $ do
+      payToNestedScriptAddress bch multisig
+        `shouldBe` Left "The network bch has no SegWit, so any miner can take coins sent to a nested SegWit address"
+      forM_ [bchTest3, bchTest4, bchRegTest] $ \net ->
+        payToNestedScriptAddress net multisig `shouldSatisfy` isLeft
     it "p2shP2wpkhAddr is the P2SH address of the witness program of a key hash" $
       -- The P2SH-P2WPKH example of BIP 143: redeem script 0014 79091972…,
       -- script hash 4733f37cf4db86fbc2efed2500b4f4e49f312023.
-      addrToText btc (p2shP2wpkhAddr "79091972186c449eb1ded22b78e40d009bdf0089")
+      (addrToText btc =<< p2shP2wpkhAddr btc "79091972186c449eb1ded22b78e40d009bdf0089")
         `shouldBe` Just "38BW8nqpHSWpkf5sXrQd2xYwvnPJwP59ic"
+    it "p2shP2wpkhAddr gives no address on a network without SegWit" $
+      forM_ [bch, bchTest3, bchTest4, bchRegTest] $ \net ->
+        p2shP2wpkhAddr net "79091972186c449eb1ded22b78e40d009bdf0089" `shouldBe` Nothing
   describe "Script size limits of script hash addresses" $ do
     -- The expected addresses were computed with Python (hashlib, embit,
     -- base58) from the script bytes, not with this library.
@@ -336,7 +381,9 @@ spec = do
       (addrToText btc <$> payToScriptAddress (multisigOf 15))
         `shouldBe` Right (Just "32vPTRtH3XPKgBxBtEoiQdGzVEZydYKduQ")
     it "has no P2SH address for a 1-of-16 multisig of compressed keys" $
-      -- 3 + 16 × 34 = 547 bytes: no input can push that redeem script
+      -- 3 + 16 × 34 = 547 bytes: on Bitcoin no input can push that redeem
+      -- script. Bitcoin Cash takes it since May 2025, and the limit stays
+      -- the same on every network.
       payToScriptAddress (multisigOf 16)
         `shouldBe` Left "The redeem script is 547 bytes long, and a pay-to-script-hash redeem script can have at most 520"
     it "has no P2SH address for a 1-of-20 multisig of compressed keys" $
@@ -353,18 +400,18 @@ spec = do
     it "gives the P2WSH and the P2SH-P2WSH address of a 1-of-20 multisig" $ do
       (addrToText btc <$> payToWitnessScriptAddress (multisigOf 20))
         `shouldBe` Right (Just "bc1q5yfkferfc5w4t3chd0ghw6ume447rey75v8df4z6sjrhnegv50ysg5v7a5")
-      (addrToText btc <$> payToNestedScriptAddress (multisigOf 20))
+      (addrToText btc <$> payToNestedScriptAddress btc (multisigOf 20))
         `shouldBe` Right (Just "3KHeFzKKQySyJSVTdqkkxxaMGRUCNdPfay")
     it "gives the P2WSH and the P2SH-P2WSH address of a witness script of exactly 10,000 bytes" $ do
       -- OP_RETURN, the three bytes of OP_PUSHDATA2 and its length, 9996 bytes
       (addrToText btc <$> payToWitnessScriptAddress (DataCarrier [B.replicate 9996 0xab]))
         `shouldBe` Right (Just "bc1q5w9futq5wnymeh5wfrak2388u0cmup9nhkwxsq56rraaxvfy22pqrzp44n")
-      (addrToText btc <$> payToNestedScriptAddress (DataCarrier [B.replicate 9996 0xab]))
+      (addrToText btc <$> payToNestedScriptAddress btc (DataCarrier [B.replicate 9996 0xab]))
         `shouldBe` Right (Just "34v1ZTik6F9PmGBTcXnmbHF1NfTjufPgvv")
     it "has no P2WSH and no P2SH-P2WSH address for a witness script of 10,001 bytes" $ do
       payToWitnessScriptAddress (DataCarrier [B.replicate 9997 0xab])
         `shouldBe` Left "The witness script is 10001 bytes long, and a pay-to-witness-script-hash witness script can have at most 10000"
-      payToNestedScriptAddress (DataCarrier [B.replicate 9997 0xab])
+      payToNestedScriptAddress btc (DataCarrier [B.replicate 9997 0xab])
         `shouldBe` Left "The witness script is 10001 bytes long, and a pay-to-witness-script-hash witness script can have at most 10000"
     it "gives an error value, not an exception, for a multisig that no script can express" $ do
       payToScriptAddress (PayMulSig [compressedKey, secondKey] 3)
@@ -373,7 +420,7 @@ spec = do
         `shouldBe` Left "encodeOutput: multisig must require at least one signature"
       payToWitnessScriptAddress (PayMulSig [] 1)
         `shouldBe` Left "encodeOutput: multisig requires more signatures than it has keys"
-      payToNestedScriptAddress (PayMulSig (replicate 21 compressedKey) 1)
+      payToNestedScriptAddress btc (PayMulSig (replicate 21 compressedKey) 1)
         `shouldBe` Left "encodeOutput: multisig has more than 20 keys"
   describe "addressToOutput, addressToScript and addressToScriptBS" $ do
     it "builds the locking script of every address kind" $
@@ -922,7 +969,7 @@ testCompatWitnessVector (net, seckey, addr) = do
   let seckeyM = fromWif net seckey
   assertBool "decode seckey" (isJust seckeyM)
   let pubkey = derivePublicKey (fromJust seckeyM)
-  let addrM = addrToText btcTest =<< pubKeyCompatWitnessAddr pubkey
+  let addrM = addrToText net =<< pubKeyCompatWitnessAddr net pubkey
   assertBool "address can be encoded" (isJust addrM)
   assertEqual "witness address matches" addr (fromJust addrM)
 

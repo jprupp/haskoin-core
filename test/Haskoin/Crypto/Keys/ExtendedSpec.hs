@@ -299,7 +299,11 @@ spec = do
     it "pay to witness public key hash" $
       addrToText btc (xPubWitnessAddr xpub1) `shouldBe` Just "bc1qx3ppj0smkuy3d6g525sh9n2w9k7fm7q3x30rtg"
     it "pay to script hash wrapping a witness public key hash" $
-      addrToText btc (xPubCompatWitnessAddr xpub1) `shouldBe` Just "3PpgpssV7mcAGpZRWiCWhodUTnjpoSZg7a"
+      (addrToText btc =<< xPubCompatWitnessAddr btc xpub1) `shouldBe` Just "3PpgpssV7mcAGpZRWiCWhodUTnjpoSZg7a"
+    it "no pay to script hash wrapping a witness public key hash on a network without SegWit" $
+      -- Bitcoin Cash has no witness: any miner can take coins sent there
+      forM_ [bch, bchTest3, bchTest4, bchRegTest] $ \net ->
+        xPubCompatWitnessAddr net xpub1 `shouldBe` Nothing
   describe "Address derivation helpers" $ do
     -- BIP32 vector 2: child 0 of the master key has public key 02fc9e5a…12ea
     it "deriveAddr gives the address and the public key of the child" $ do
@@ -311,8 +315,15 @@ spec = do
       addrToText btc (fst (deriveWitnessAddr xpub2 0))
         `shouldBe` Just "bc1qtfsllr4h4t9rqyxmjl4a5asjzcgt0qykp3q3we"
     it "deriveCompatWitnessAddr gives the wrapped witness address of the child" $
-      addrToText btc (fst (deriveCompatWitnessAddr xpub2 0))
+      (addrToText btc . fst =<< deriveCompatWitnessAddr btc xpub2 0)
         `shouldBe` Just "39cFMGtVaEw6AfksMcaLpu8frZxmqngh8c"
+    it "deriveCompatWitnessAddr gives the public key of the child with the address" $
+      -- BIP32 vector 2: the public key of child 0 of the master key
+      (encodeHex . exportPubKey True . snd <$> deriveCompatWitnessAddr btc xpub2 0)
+        `shouldBe` Just "02fc9e5af0ac8d9b3cecfe2a888e2117ba3d089d8585886c9c826b6b22a98d12ea"
+    it "deriveCompatWitnessAddr gives no address on a network without SegWit" $
+      forM_ [bch, bchTest3, bchTest4, bchRegTest] $ \net ->
+        (fst <$> deriveCompatWitnessAddr net xpub2 0) `shouldBe` Nothing
     it "deriveAddrs lists children from the start index and wraps around" $ do
       map lst3 (take 3 (deriveAddrs xpub2 0x7ffffffe))
         `shouldBe` [0x7ffffffe, 0x7fffffff, 0]
@@ -322,8 +333,16 @@ spec = do
       map addressAndIndex (take 1 (deriveWitnessAddrs xpub2 5))
         `shouldBe` [(Just "bc1q8fjs9hakl9489q0fem0gya4m8yqr4gl32dhjr9", 5)]
     it "deriveCompatWitnessAddrs lists wrapped witness addresses with their index" $
-      map addressAndIndex (take 1 (deriveCompatWitnessAddrs xpub2 5))
-        `shouldBe` [(Just "3FzrsDTC8KiEsBeBTrhDnJoJYvkDpWaWR6", 5)]
+      (map addressAndIndex . take 1 <$> deriveCompatWitnessAddrs btc xpub2 5)
+        `shouldBe` Just [(Just "3FzrsDTC8KiEsBeBTrhDnJoJYvkDpWaWR6", 5)]
+    it "deriveCompatWitnessAddrs lists children from the start index and wraps around" $
+      (map lst3 . take 3 <$> deriveCompatWitnessAddrs btc xpub2 0x7ffffffe)
+        `shouldBe` Just [0x7ffffffe, 0x7fffffff, 0]
+    it "deriveCompatWitnessAddrs gives no list on a network without SegWit" $
+      -- Only whether there is a list is compared: the list has no end, and
+      -- a failure must not print it
+      forM_ [bch, bchTest3, bchTest4, bchRegTest] $ \net ->
+        isNothing (deriveCompatWitnessAddrs net xpub2 5) `shouldBe` True
     it "prvSubKeys, pubSubKeys and hardSubKeys list children with their index" $ do
       let m = makeXPrvKey (fromJust (decodeHex m1))
       map snd (take 3 (prvSubKeys m 0x7ffffffe)) `shouldBe` [0x7ffffffe, 0x7fffffff, 0]

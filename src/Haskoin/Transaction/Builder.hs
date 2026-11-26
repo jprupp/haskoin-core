@@ -885,7 +885,9 @@ sharedHashes tx = eitherToMaybe . taprootTxHashes tx
 --   script with the same keys pushed another way is another script:
 --   'decodeWitnessInput' refuses it.
 -- * A redeem script is at most 'maxRedeemScriptSize' bytes, and a witness
---   script at most 'maxWitnessScriptSize'.
+--   script at most 'maxWitnessScriptSize'. On Bitcoin Cash a block can
+--   contain a longer redeem script since May 2025, and the answer is
+--   'False' for it all the same: 'maxRedeemScriptSize' has the reason.
 -- * A multisig of Taproot has at most 999 keys, the limit of @multi_a@ in
 --   BIP 387. The stack holds at most 1000 items after each opcode (BIP
 --   342). The witness puts an item there for each key, and the script
