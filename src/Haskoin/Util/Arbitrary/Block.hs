@@ -120,8 +120,9 @@ arbitraryBlockNode =
         <*> arbitrarySizedNatural
         <*> arbitraryBlockHash
 
--- | Arbitrary 'HeaderMemory'
+-- | Arbitrary t'HeaderMemory', for the tests of its text form: random bytes
+-- under random block hashes, and not the nodes of a chain.
 arbitraryHeaderMemory :: Gen HeaderMemory
 arbitraryHeaderMemory = do
-  ls <- listOf $ (,) <$> arbitrary <*> arbitraryBSS
+  ls <- listOf $ (,) <$> arbitraryBlockHash <*> arbitraryBSS
   HeaderMemory (HashMap.fromList ls) <$> arbitraryBlockNode

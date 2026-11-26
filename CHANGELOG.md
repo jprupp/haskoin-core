@@ -7,9 +7,10 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
-This version breaks backwards compatibility in two places: the six functions
-that give a nested SegWit address take the network, and six functions of the
-difficulty rules return `Either`. See "Changed" below.
+This version breaks backwards compatibility in three places: the six
+functions that give a nested SegWit address take the network, six functions
+of the difficulty rules return `Either`, and the map of the memory header
+store is keyed by the whole block hash. See "Changed" below.
 
 ### Changed
 
@@ -90,6 +91,40 @@ difficulty rules return `Either`. See "Changed" below.
   had. `connectBlock`, `connectBlocks`, `nextPowWorkRequired` and
   `nextAsertWorkRequired` keep their types. The new `daaFirstParent` gives
   the lowest height of a parent for which the DAA has an answer.
+- **The memory header store keeps every header: its map is keyed by the
+  whole block hash.** `HeaderMemory`, the store behind the `BlockHeaders`
+  instance of `StateT HeaderMemory`, kept its nodes in a map keyed by eight
+  bytes of the block hash. A header whose hash had the same eight bytes as a
+  stored one took its place in the map. The first header was then gone:
+  `getBlockHeader` gave `Nothing` for it, and `connectBlock` or `getAncestor`
+  threw an exception for a block above it (`BUG: All non-genesis blocks
+  should have a parent`, `Could not get previous walk skip`). The eight
+  bytes are at the end of the hash that proof of work leaves free, so a peer
+  can make such a pair where proof of work is cheap, as on a test network:
+  about 2^32 headers to try, each with its proof of work. On regtest, eight
+  threads of one computer found the pair of the tests in two minutes, among
+  4.7 billion headers.
+
+  The map is now keyed by the whole hash, as the block index of Bitcoin
+  Core:
+
+  ```haskell
+  type BlockMap = HashMap BlockHash ShortByteString
+  ```
+
+  Before, the key was `ShortBlockHash`, a `Word64`. `ShortBlockHash` and
+  `shortBlockHash` are removed: nothing else used them, and an index of
+  blocks keyed by them has the same fault. A program that uses the store
+  through `initialChain` and the `BlockHeaders` functions needs no change.
+  One that reads the field `blocks` or `genesisMap` finds a node under its
+  `BlockHash`. The text that `show` gives for a `HeaderMemory` has the new
+  keys, so `read` does not take a text of an earlier version.
+
+  The cost is memory: a header takes 48 bytes more, 276 bytes in place of
+  228 on a chain of 200,000 regtest headers, and 292 with the chain work of
+  a main network. The time does not grow: on the release build, 400,000
+  lookups took 0.71 s where they took 0.76 s, and adding 400,000 headers
+  1.8 s where it took 2.0 s.
 
 ### Fixed
 

@@ -39,9 +39,7 @@ module Haskoin.Block.Headers
 
     -- ** Header Memory Store
     HeaderMemory (..),
-    ShortBlockHash,
     BlockMap,
-    shortBlockHash,
     initialChain,
     genesisMap,
 
@@ -115,14 +113,15 @@ import Haskoin.Network.Data
 import Haskoin.Util
 import Numeric (showHex)
 
--- | Short version of the block hash. Uses the good end of the hash (the part
--- that doesn't have a long string of zeroes).
-type ShortBlockHash = Word64
-
--- | Memory-based map to a serialized 'BlockNode' data structure.
+-- | Memory-based map from the hash of a block to its serialized t'BlockNode'.
 -- 'ShortByteString' is used to avoid memory fragmentation and make the data
 -- structure compact.
-type BlockMap = HashMap ShortBlockHash ShortByteString
+--
+-- The key is the whole hash, as in the block index of Bitcoin Core. A shorter
+-- key saves about 50 bytes for each header, but two blocks can then share a
+-- key, and the map keeps one of them only. A peer can make such a pair where
+-- proof of work is cheap, as on a test network.
+type BlockMap = HashMap BlockHash ShortByteString
 
 -- | Represents accumulated work in the block chain so far.
 type BlockWork = Integer
@@ -183,7 +182,12 @@ instance Eq BlockNode where
 instance Ord BlockNode where
   compare = comparing (\bn -> (bn.height, bn.header))
 
--- | Memory-based header tree.
+-- | Memory-based header tree: every header that was added, and the best
+-- block. It is the store of the 'BlockHeaders' instance of 'StateT', for
+-- tests and for programs that keep no database. Start from 'initialChain'
+-- and add headers with 'connectBlocks'. A store made by hand must hold the
+-- genesis block and the parent of every other block it holds, or the
+-- functions that walk down a chain throw.
 data HeaderMemory = HeaderMemory
   { blocks :: !BlockMap,
     best :: !BlockNode
@@ -225,36 +229,29 @@ initialChain net =
 -- | Initialize map for memory-based chain.
 genesisMap :: Network -> BlockMap
 genesisMap net =
-  HashMap.singleton
-    (shortBlockHash (headerHash net.genesisHeader))
-    (toShort (runPutS (serialize (genesisNode net))))
+  addBlockToMap (genesisNode net) HashMap.empty
 
 -- | Add block header to memory block map.
 addBlockHeaderMemory :: BlockNode -> HeaderMemory -> HeaderMemory
 addBlockHeaderMemory bn s = s {blocks = addBlockToMap bn s.blocks}
 
--- | Get block header from memory block map. The map is keyed by eight bytes
--- of the hash, so the node found there is returned only when its header has
--- the hash that was asked for.
+-- | Get block header from memory block map. 'addBlockToMap' puts each node
+-- under the hash of its header, but the constructor of t'HeaderMemory' is
+-- public, so a map made by hand can hold a node under another key. The node
+-- found is returned only when its header has the hash that was asked for.
 getBlockHeaderMemory :: BlockHash -> HeaderMemory -> Maybe BlockNode
 getBlockHeaderMemory bh s = do
-  bs <- shortBlockHash bh `HashMap.lookup` s.blocks
+  bs <- bh `HashMap.lookup` s.blocks
   node <- eitherToMaybe . runGetS deserialize $ fromShort bs
   guard (headerHash node.header == bh)
   return node
 
--- | Calculate short block hash taking eight non-zero bytes from the 16-byte
--- hash. This function will take the bytes that are not on the zero-side of the
--- hash, making colissions between short block hashes difficult.
-shortBlockHash :: BlockHash -> ShortBlockHash
-shortBlockHash =
-  either error id . runGetS deserialize . B.take 8 . runPutS . serialize
-
--- | Add a block to memory-based block map.
+-- | Add a block to memory-based block map, under the hash of its header. A
+-- node that is added again replaces the one that was there.
 addBlockToMap :: BlockNode -> BlockMap -> BlockMap
 addBlockToMap node =
   HashMap.insert
-    (shortBlockHash $ headerHash $ node.header)
+    (headerHash node.header)
     (toShort $ runPutS $ serialize node)
 
 -- | Get the ancestor of the provided 'BlockNode' at the specified

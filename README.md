@@ -1008,8 +1008,11 @@ print (computeSubsidy btc 840000)
 
 `connectBlocks` validates headers and adds them to a chain. This covers proof of
 work, difficulty, timestamps, versions and checkpoints. It runs in any monad with
-a `BlockHeaders` instance. `StateT HeaderMemory` is the in-memory one. Write your
-own instance to keep headers in a database.
+a `BlockHeaders` instance. `StateT HeaderMemory` is the in-memory one: it keeps
+every header under its block hash, in about 300 bytes each on a main network.
+Write your own instance to keep headers in a database, and key it by the whole
+hash too. A key made of a part of the hash lets a peer replace a stored header
+with another one, where proof of work is cheap.
 
 Give `connectBlocks` all the headers of a `headers` message at once rather than
 one by one with `connectBlock`. On Bitcoin Cash the difficulty depends on an

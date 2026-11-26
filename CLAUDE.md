@@ -219,8 +219,8 @@ Read a file before any work on what its line names.
 
 - A type and a constructor of the same name: write `t'Name'` in Haddock, or
   the check of `haskell-dev docs` counts it as ambiguous.
-- The check of `haskell-dev docs` reports 145 problems, all older than the
-  script: 94 ambiguous names, 27 names out of scope, 19 slashes and 5
+- The check of `haskell-dev docs` reports 144 problems, all older than the
+  script: 93 ambiguous names, 27 names out of scope, 19 slashes and 5
   links. Keep the lines after `Documentation check` in a file before the
   change, and `diff` after it without the line numbers, which an edit
   moves. The count is the same on each run.
