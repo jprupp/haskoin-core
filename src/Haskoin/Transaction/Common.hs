@@ -55,7 +55,7 @@ import Data.ByteString.Lazy qualified as BL
 import Data.Bytes.Get
 import Data.Bytes.Put
 import Data.Bytes.Serial
-import Data.Hashable (Hashable)
+import Data.Hashable (Hashable (..))
 import Data.Maybe (fromMaybe)
 import Data.Serialize (Serialize (..))
 import Data.String (IsString, fromString)
@@ -146,6 +146,25 @@ type WitnessStack = [WitnessStackItem]
 type WitnessStackItem = ByteString
 
 -- | Data type representing a transaction.
+--
+-- __Equality.__ The witness is a list beside the inputs, so one transaction
+-- can be written in several ways: with no list or with a list of empty
+-- stacks, with or without the empty stacks of its last inputs, with or
+-- without stacks beyond its inputs. All of them are written as the same
+-- bytes and have the same ids, and 'Eq', 'Ord' and 'Hashable' take them for
+-- one transaction: two values are equal when they have the same version,
+-- inputs, outputs and lock time, and the same witness stack for each input.
+-- @CTransaction::Equals@ of Bitcoin Core compares the same fields, and
+-- there each input holds its own stack. So a transaction is equal to itself
+-- after it is written and read, and a 'Data.Set.Set' or a
+-- 'Data.HashMap.Strict.HashMap' counts it once. 'Show' and the field
+-- 'witness' still give the list as it was built.
+--
+-- The derived instances compared the lists, so that a transaction with a
+-- list of empty stacks was not the one it was read back as. To compare the
+-- bytes instead would cost a serialization for each comparison. To allow
+-- one list only, the constructor would have to be hidden, and every
+-- program that builds or updates a transaction would break.
 data Tx = Tx
   { -- | transaction data format version
     version :: !Word32,
@@ -157,11 +176,36 @@ data Tx = Tx
     -- when no input has a witness. A transaction whose stacks are all empty
     -- has no witness: it is serialized without the witness marker, as
     -- Bitcoin Core serializes it, and reads back with an empty list here.
+    -- An input that the list leaves out has an empty stack, and a stack
+    -- beyond the inputs is not part of the transaction.
     witness :: !WitnessData,
     -- | earliest mining height or time
     locktime :: !Word32
   }
-  deriving (Show, Read, Eq, Ord, Generic, Hashable, NFData)
+  deriving (Show, Read, Generic, NFData)
+
+instance Eq Tx where
+  a == b = txContent a == txContent b
+
+-- | The order of the fields: version, inputs, outputs, witness, lock time.
+instance Ord Tx where
+  compare a b = compare (txContent a) (txContent b)
+
+instance Hashable Tx where
+  hashWithSalt salt = hashWithSalt salt . txContent
+
+-- | What makes a transaction, whatever the way its witness list is
+-- written: the fields in their order, with the witness of 'witnessStacks'
+txContent :: Tx -> (Word32, [TxIn], [TxOut], WitnessData, Word32)
+txContent tx = (tx.version, tx.inputs, tx.outputs, witnessStacks tx, tx.locktime)
+
+-- | The witness as it is written: one stack for each input, or no stack
+-- when no input has a witness. Every way to write the witness list of one
+-- transaction gives the same stacks.
+witnessStacks :: Tx -> WitnessData
+witnessStacks tx
+  | hasWitness tx = take (length tx.inputs) (tx.witness ++ repeat [])
+  | otherwise = []
 
 -- | Compute transaction hash: the transaction id, which leaves the witness
 -- out.
@@ -349,23 +393,26 @@ instance FromJSON Tx where
     where
       f = maybe mzero return . decodeHex
 
+-- | The witness is written as the bytes have it: one stack per input, or
+-- none when no input has a witness. So 'FromJSON' reads back what this
+-- writes, for any witness list.
 instance ToJSON Tx where
-  toJSON (Tx v i o w l) =
+  toJSON tx =
     object
-      [ "version" .= v,
-        "inputs" .= i,
-        "outputs" .= o,
-        "witnessdata" .= fmap (fmap encodeHex) w,
-        "locktime" .= l
+      [ "version" .= tx.version,
+        "inputs" .= tx.inputs,
+        "outputs" .= tx.outputs,
+        "witnessdata" .= fmap (fmap encodeHex) (witnessStacks tx),
+        "locktime" .= tx.locktime
       ]
-  toEncoding (Tx v i o w l) =
+  toEncoding tx =
     pairs $
       mconcat
-        [ "version" `E.pair` E.word32 v,
-          "inputs" `E.pair` E.list toEncoding i,
-          "outputs" `E.pair` E.list toEncoding o,
-          "witnessdata" `E.pair` E.list (E.list f) w,
-          "locktime" `E.pair` E.word32 l
+        [ "version" `E.pair` E.word32 tx.version,
+          "inputs" `E.pair` E.list toEncoding tx.inputs,
+          "outputs" `E.pair` E.list toEncoding tx.outputs,
+          "witnessdata" `E.pair` E.list (E.list f) (witnessStacks tx),
+          "locktime" `E.pair` E.word32 tx.locktime
         ]
     where
       f = hexEncoding . BL.fromStrict

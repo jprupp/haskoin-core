@@ -14,7 +14,7 @@ module Haskoin.Util.Arbitrary.Transaction where
 import Control.Monad
 import Data.ByteString qualified as BS
 import Data.Either (fromRight)
-import Data.List (findIndex, nub, nubBy, permutations)
+import Data.List (dropWhileEnd, findIndex, nub, nubBy, permutations)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, isNothing)
 import Data.Word (Word32, Word64)
@@ -127,7 +127,9 @@ arbitraryLegacyTx net = arbitraryWLTx net False
 arbitraryWitnessTx :: Network -> Gen Tx
 arbitraryWitnessTx net = arbitraryWLTx net True
 
--- | Arbitrary witness or legacy transaction.
+-- | Arbitrary witness or legacy transaction. One time in ten its witness
+-- list is written another way, see 'arbitraryWitnessSpelling': a property
+-- that holds for a transaction must hold for every list that stands for it.
 arbitraryWLTx :: Network -> Bool -> Gen Tx
 arbitraryWLTx net wit = do
   ni <- choose (1, 5)
@@ -137,9 +139,29 @@ arbitraryWLTx net wit = do
   let uniqueInps = nubBy (\a b -> a.outpoint == b.outpoint) inps
   w <-
     if wit
-      then (:) <$> listOf1 arbitraryBS <*> vectorOf (length uniqueInps - 1) (listOf arbitraryBS)
+      then (:) <$> listOf1 arbitraryBS <*> vectorOf (length uniqueInps - 1) laterStack
       else return []
-  Tx <$> arbitrary <*> pure uniqueInps <*> pure outs <*> pure w <*> arbitrary
+  tx <- Tx <$> arbitrary <*> pure uniqueInps <*> pure outs <*> pure w <*> arbitrary
+  frequency [(9, return tx), (1, arbitraryWitnessSpelling tx)]
+  where
+    -- An input after the first has no witness one time in four
+    laterStack = frequency [(1, return []), (3, listOf arbitraryBS)]
+
+-- | The transaction with its witness list written another way. With a
+-- witness: stacks added beyond the inputs, or the empty stacks at the end
+-- left out. Without one: a list of empty stacks, of any length. The result
+-- is the same transaction: it is written as the same bytes, and it is equal
+-- to the one given.
+arbitraryWitnessSpelling :: Tx -> Gen Tx
+arbitraryWitnessSpelling tx
+  | hasWitness tx = oneof [beyond, return (spelled (dropWhileEnd null stacks))]
+  | otherwise = spelled . (`replicate` []) <$> choose (1, count + 2)
+  where
+    count = length tx.inputs
+    -- One stack for each input
+    stacks = take count (tx.witness <> repeat [])
+    beyond = spelled . (stacks <>) <$> listOf1 (listOf arbitraryBS)
+    spelled w = Tx tx.version tx.inputs tx.outputs w tx.locktime
 
 -- | Arbitrary transaction containing only inputs of type 'SpendPKHash',
 -- 'SpendScriptHash' (multisig) and outputs of type 'PayPKHash' and 'PaySH'.

@@ -78,16 +78,19 @@ arbitraryHeaders =
 
 -- | Arbitrary 'MerkleBlock' that holds a valid proof: a partial Merkle tree
 -- over one to thirty distinct transaction hashes, with any subset of them
--- matching, under a header that has the Merkle root of those hashes. The
--- flags are padded with zero bits to whole bytes, as they are on the wire.
+-- matching, under a header that has the Merkle root of those hashes. Half
+-- of the time the flags are as 'buildPartialMerkle' gives them, one for
+-- each node of the proof. The other half they are padded with zero bits to
+-- whole bytes, as a read gives them.
 arbitraryMerkleBlock :: Gen MerkleBlock
 arbitraryMerkleBlock = do
   bh <- arbitraryBlockHeader
   n <- choose (1, 30)
   hashes <- (TxHash <$> arbitraryHash256) `vectorOfDistinct` n
   matches <- vectorOf n arbitrary
+  padded <- arbitrary
   let (flags, partial) = buildPartialMerkle (zip hashes matches)
-      padding = (8 - length flags `mod` 8) `mod` 8
+      padding = if padded then (8 - length flags `mod` 8) `mod` 8 else 0
       root = either (const bh.merkle) id (buildMerkleRoot hashes)
   return $
     MerkleBlock

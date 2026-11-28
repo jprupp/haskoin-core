@@ -200,6 +200,9 @@ Read a file before any work on what its line names.
   `src/Haskoin/Util/Arbitrary/` holds the generators, and its `Util.hs` holds
   `testIdentity`, `testSerial` and `testJson`. A change there is a change of
   the public API. The helpers of one spec are at the top of its file.
+- `==` and `shouldBe` on a `Tx` or a `MerkleBlock` do not see how the witness
+  list or the flags are written (`txContent`, `merkleBlockContent`). A test
+  of that form compares the field `witness` or `flags`.
 - A new refusal of `signTx` or `signInput`: the generators of
   `Util/Arbitrary/Transaction.hs` and `Spelling.hs` sign with them, and the
   property tests then fail with an `ErrorCall`. Make the generators avoid it.
