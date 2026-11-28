@@ -252,7 +252,7 @@ getPayload net cmd len =
     MCReject -> MReject <$> deserialize
     MCSendHeaders -> return MSendHeaders
     MCFeeFilter -> MFeeFilter <$> deserialize
-    MCSendCmpct -> MSendCompact <$> deserialize
+    MCSendCmpct -> MSendCompact <$> getSendCompact net
     MCCmpctBlock -> MCompactBlock <$> getCompactBlock net
     MCGetBlockTxn -> MGetBlockTxn <$> getGetBlockTxn net
     MCBlockTxn -> MBlockTxn <$> getBlockTxn net

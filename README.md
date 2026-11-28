@@ -61,6 +61,12 @@ storage.
   or in a multisig, and the spend of a coin that holds tokens.
   Nothing here signs them, and `verifyStdTx` does not read them. The tokens
   of an output and its address are read: see [Bitcoin Cash](#bitcoin-cash).
+- **The adaptive block size limit of Bitcoin Cash.** Bitcoin Cash Node raises
+  its block size limit when blocks fill up, and takes a block message of twice
+  that limit. The library has fixed numbers for a block of 32 MB:
+  `maxBlockSize`, and `maxMessageSize` of 64,000,000 bytes. No block is near
+  them today. When the limit of the chain rises, set larger numbers in your
+  copy of the network: see [Peer-to-peer messages](#peer-to-peer-messages).
 - **BIP-324 encrypted transport.**
 - **BIP-39 word lists other than English.**
 
@@ -1089,6 +1095,38 @@ print (runGetS (getMessage btc) bytes)
 the `maxPayloadSize` of its command. Read the 24-byte `MessageHeader` first to
 learn how many more bytes to take from the socket, and refuse a length above
 `maxPayloadSize net command` before you read them.
+
+Where the two reference nodes read a message in different ways, `getMessage`
+reads it as the node of the network does:
+
+- A `sendcmpct` whose first byte is neither 0 nor 1 fails on Bitcoin. BIP 152
+  allows only those two values, and Bitcoin Core disconnects the peer that
+  sends another one. On Bitcoin Cash any byte but 0 means "announce", as in
+  Bitcoin Cash Node.
+- A position in a compact block message has 16 bits on Bitcoin and 32 bits on
+  Bitcoin Cash.
+- A message that carries a block may have 4,000,000 bytes on Bitcoin and
+  64,000,000 on Bitcoin Cash. The second number is fixed in the library, and
+  the node works it out from a block size limit that can grow. To read larger
+  blocks, pass your own copy of the network:
+
+  ```haskell
+  let larger = bch {maxMessageSize = 128000000, maxBlockSize = 64000000}
+  ```
+
+A `reject` is read whatever its code. `RejectCode` holds the byte, and the
+eight codes that BIP 61 names are patterns, such as `RejectDust`. A match on
+them needs a last case for the other bytes:
+
+```haskell
+let why code = case code of
+      RejectDust -> "an output is too small"
+      RejectInsufficientFee -> "the fee is too low"
+      _ -> "refused: " <> show code
+
+print (map why [RejectDust, RejectCode 0x44])
+-- => ["an output is too small","refused: RejectCode 68"]
+```
 
 `Message` has a constructor for each message type. `bloomCreate`, `bloomInsert`
 and `bloomContains` build BIP-37 filters for `filterload`.

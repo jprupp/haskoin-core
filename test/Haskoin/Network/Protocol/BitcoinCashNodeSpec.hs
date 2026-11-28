@@ -576,6 +576,11 @@ blockSpec = describe "blocks" $ do
     rejects RejectInvalid es `shouldBe` True
     scores es `shouldBe` [100]
     discourages es `shouldBe` True
+  it "sends the reject of a block with a code that BIP 61 does not name" $ do
+    let blk = Block child []
+        f e = e {checkBlock = const (BlockRejected 0x44 0 "other")}
+        (_, es) = feedWith f 2 (Receive (MBlock blk)) (inboundReady bch [])
+    rejects (RejectCode 0x44) es `shouldBe` True
   it "does not punish a noban peer for an invalid block" $ do
     let blk = Block child []
         f e = e {checkBlock = const (BlockRejected 0x10 100 "bad-txnmrklroot")}
@@ -689,6 +694,12 @@ relaySpec = describe "relay" $ do
         (_, es) = feedWith f 2 (Receive (MTx someTx)) (inboundReady bch [])
     rejects RejectInvalid es `shouldBe` True
     scores es `shouldBe` [100]
+  it "sends the reject of a transaction with a code that BIP 61 does not name" $ do
+    -- the node sends any code from 1 to 0xff (net_processing.cpp, "Never
+    -- send AcceptToMemoryPool's internal codes over P2P")
+    let f e = e {checkTx = const (TxRejected 0x44 0 "other")}
+        (_, es) = feedWith f 2 (Receive (MTx someTx)) (inboundReady bch [])
+    rejects (RejectCode 0x44) es `shouldBe` True
   it "rejects a transaction refused by policy without a score" $ do
     let f e = e {checkTx = const (TxPolicyReject "dust")}
         (_, es) = feedWith f 2 (Receive (MTx someTx)) (inboundReady bch [])

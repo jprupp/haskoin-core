@@ -7,6 +7,7 @@
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE NoFieldSelectors #-}
 
 -- |
@@ -44,7 +45,17 @@ module Haskoin.Network.Common
     Ping (..),
     Pong (..),
     Reject (..),
-    RejectCode (..),
+    RejectCode
+      ( ..,
+        RejectMalformed,
+        RejectInvalid,
+        RejectObsolete,
+        RejectDuplicate,
+        RejectNonStandard,
+        RejectDust,
+        RejectInsufficientFee,
+        RejectCheckpoint
+      ),
     SendTxRcncl (..),
     VarInt (..),
     VarString (..),
@@ -657,7 +668,16 @@ instance Serialize Pong where
   get = deserialize
   put = serialize
 
--- | The 'Reject' message is sent when messages are rejected by a peer.
+-- | The 'Reject' message is sent when messages are rejected by a peer. It
+-- only informs: the reference nodes act on none of its fields. Bitcoin Core
+-- stopped sending it in version 0.20 and ignores it. Bitcoin Cash Node sends
+-- it and logs the ones it receives.
+--
+-- The reader takes any code, and takes the bytes after the reason as a hash
+-- only when there are 32 of them or more, so a @reject@ with other extra
+-- data is read as one without a hash. BIP 61 lets a message append extra
+-- data, and the nodes that sent it only ever appended the hash of a block or
+-- of a transaction.
 data Reject = Reject
   { -- | type of message rejected
     message :: !MessageCommand,
@@ -670,45 +690,94 @@ data Reject = Reject
   }
   deriving (Eq, Show, Read, Generic, NFData)
 
--- | Rejection code associated to the 'Reject' message.
-data RejectCode
-  = RejectMalformed
-  | RejectInvalid
-  | RejectObsolete
-  | RejectDuplicate
-  | RejectNonStandard
-  | RejectDust
-  | RejectInsufficientFee
-  | RejectCheckpoint
-  deriving (Eq, Show, Read, Generic, NFData)
+-- | The code of a 'Reject' message: one byte that says why a message was
+-- refused. BIP 61 defines it as a @uint8_t@ in three ranges: 0x01 to 0x0f for
+-- the syntax of the protocol, 0x10 to 0x1f for its meaning, and 0x40 to 0x4f
+-- for the policy of the node. It names eight values, which are the patterns
+-- below.
+--
+-- The type holds any byte, so a code without a name is read, and written
+-- back as it came. Bitcoin Cash Node reads any byte too, and a @reject@ costs
+-- its sender nothing there. A closed list of the eight names made the reader
+-- fail for the other bytes: a program that drops a peer whose message does
+-- not parse then lost the peer, and the reason of the reject with it.
+--
+-- One byte has one value: @RejectCode 0x41@ is 'RejectDust'. A ninth
+-- constructor for the other bytes would give two values to a named byte.
+--
+-- A match on the names needs a last case for the other bytes, since the
+-- compiler does not take the eight names for a complete list.
+newtype RejectCode = RejectCode {get :: Word8}
+  deriving (Eq, Generic)
+  deriving newtype (NFData)
+
+-- | 0x01: the message could not be decoded.
+pattern RejectMalformed :: RejectCode
+pattern RejectMalformed = RejectCode 0x01
+
+-- | 0x10: the transaction or the block is invalid.
+pattern RejectInvalid :: RejectCode
+pattern RejectInvalid = RejectCode 0x10
+
+-- | 0x11: the version of the client or of the block is no longer supported.
+pattern RejectObsolete :: RejectCode
+pattern RejectObsolete = RejectCode 0x11
+
+-- | 0x12: a second @version@ message, or an input that is already spent.
+pattern RejectDuplicate :: RejectCode
+pattern RejectDuplicate = RejectCode 0x12
+
+-- | 0x40: the transaction is not standard.
+pattern RejectNonStandard :: RejectCode
+pattern RejectNonStandard = RejectCode 0x40
+
+-- | 0x41: an output amount is below the dust threshold.
+pattern RejectDust :: RejectCode
+pattern RejectDust = RejectCode 0x41
+
+-- | 0x42: the fee of the transaction is too low to relay or to mine it.
+pattern RejectInsufficientFee :: RejectCode
+pattern RejectInsufficientFee = RejectCode 0x42
+
+-- | 0x43: the block does not agree with a checkpoint.
+pattern RejectCheckpoint :: RejectCode
+pattern RejectCheckpoint = RejectCode 0x43
+
+-- | The eight names of BIP 61, as 'Show' writes them.
+rejectCodeNames :: [(RejectCode, String)]
+rejectCodeNames =
+  [ (RejectMalformed, "RejectMalformed"),
+    (RejectInvalid, "RejectInvalid"),
+    (RejectObsolete, "RejectObsolete"),
+    (RejectDuplicate, "RejectDuplicate"),
+    (RejectNonStandard, "RejectNonStandard"),
+    (RejectDust, "RejectDust"),
+    (RejectInsufficientFee, "RejectInsufficientFee"),
+    (RejectCheckpoint, "RejectCheckpoint")
+  ]
+
+-- | A named code is shown as its name, and another code as its byte:
+-- @RejectDust@, @RejectCode 68@.
+instance Show RejectCode where
+  showsPrec d code =
+    case lookup code rejectCodeNames of
+      Just name -> showString name
+      Nothing -> showParen (d > 10) $ showString "RejectCode " . showsPrec 11 code.get
+
+-- | Reads both forms that 'Show' writes. A named code may come as its byte.
+instance Read RejectCode where
+  readPrec = R.parens (named R.+++ byByte)
+    where
+      named = do
+        R.Ident name <- R.lexP
+        maybe R.pfail return (lookup name [(n, c) | (c, n) <- rejectCodeNames])
+      byByte = R.prec 10 $ do
+        R.Ident "RejectCode" <- R.lexP
+        RejectCode <$> R.step R.readPrec
 
 instance Serial RejectCode where
-  deserialize =
-    getWord8 >>= \code -> case code of
-      0x01 -> return RejectMalformed
-      0x10 -> return RejectInvalid
-      0x11 -> return RejectObsolete
-      0x12 -> return RejectDuplicate
-      0x40 -> return RejectNonStandard
-      0x41 -> return RejectDust
-      0x42 -> return RejectInsufficientFee
-      0x43 -> return RejectCheckpoint
-      _ ->
-        fail $
-          unwords
-            [ "Reject get: Invalid code",
-              show code
-            ]
-
-  serialize code = putWord8 $ case code of
-    RejectMalformed -> 0x01
-    RejectInvalid -> 0x10
-    RejectObsolete -> 0x11
-    RejectDuplicate -> 0x12
-    RejectNonStandard -> 0x40
-    RejectDust -> 0x41
-    RejectInsufficientFee -> 0x42
-    RejectCheckpoint -> 0x43
+  deserialize = RejectCode <$> getWord8
+  serialize code = putWord8 code.get
 
 instance Binary RejectCode where
   put = serialize
@@ -732,10 +801,10 @@ instance Serial Reject where
         <*> maybeHash
     where
       maybeHash =
-        isEmpty >>= \done ->
-          if done
-            then return Nothing
-            else Just <$> deserialize
+        remaining >>= \left ->
+          if left >= 32
+            then Just <$> deserialize
+            else return Nothing
   serialize (Reject cmd code reason extra) = do
     serialize $ VarString $ commandToString cmd
     serialize code

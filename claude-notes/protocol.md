@@ -30,5 +30,5 @@ Cash Node), their specs, the report in `doc/protocol/` and
   prints: to check a README example, put it in a temporary spec with
   `shouldBe`, then delete the spec and run `stack build --dry-run`.
 - The library's parser refuses some payloads that a node handles itself (a
-  `sendcmpct` announce byte above 1, a short `version`): the specs send them
-  as `MOther` or `BadFrame (BadPayload ...)`.
+  `sendcmpct` announce byte above 1 on Bitcoin, a short `version`): the specs
+  send them as `MOther` or `BadFrame (BadPayload ...)`.

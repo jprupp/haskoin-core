@@ -375,8 +375,10 @@ The library does not know `feature`: it arrives as `MOther "feature"`.
   from a syncing peer, or from one more peer per new block. Upstream: [np 4381],
   [np 4424]; Haskell: `blockInvs`.
 
-`SendCompact` reads the announce byte as a flag, so the rule on announce values
-above 1 is checked only for a raw `MOther "sendcmpct"`.
+`getMessage` refuses a `sendcmpct` with an announce byte above 1 on a Bitcoin
+network, so a caller that parses bytes has a `BadPayload` for it, which the machine
+drops. The rule on announce values above 1 is checked only for a raw
+`MOther "sendcmpct"`.
 
 ### `getheaders`
 

@@ -232,6 +232,8 @@ Read a file before any work on what its line names.
 - A probe with `stack exec -- runghc` or `ghc` uses the library as last
   built. After a build of changed source, such as a reverted fix to see a
   test fail, build the real source again before the probe.
+- "Could not load module Haskoin ... unusable due to missing dependencies",
+  in a probe with `stack exec`: run `haskell-dev build` first, then the probe.
 - "haskell-dev: not in a git repository", in a copy of the tree made with
   `git archive`: run `git init` in the copy. No commit is needed.
 - A run under a memory limit: a clean `haskell-dev build` needs 1.2 GB for
