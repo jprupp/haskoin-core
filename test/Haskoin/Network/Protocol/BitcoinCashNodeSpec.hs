@@ -408,18 +408,18 @@ framingSpec = describe "framing" $ do
     disconnects es `shouldBe` True
     discourages es `shouldBe` False
   it "answers a payload that does not parse with a malformed reject" $ do
-    let (_, es) = feed 2 (BadFrame (BadPayload "inv")) (inboundReady bch [])
+    let (_, es) = feed 2 (BadFrame (BadPayload "inv" "")) (inboundReady bch [])
     rejects RejectMalformed es `shouldBe` True
     scores es `shouldBe` []
   it "scores a bad payload before version as a missing version" $ do
-    let (_, es) = feed 1 (BadFrame (BadPayload "inv")) (open bch id Inbound [])
+    let (_, es) = feed 1 (BadFrame (BadPayload "inv" "")) (open bch id Inbound [])
     scores es `shouldBe` [10]
   it "rejects a version that does not parse" $ do
-    let (_, es) = feed 1 (BadFrame (BadPayload "version")) (open bch id Inbound [])
+    let (_, es) = feed 1 (BadFrame (BadPayload "version" "")) (open bch id Inbound [])
     rejects RejectMalformed es `shouldBe` True
   it "ends the ping on a short pong" $ do
     let (p, _) = feed 2 Tick (inboundReady bch [])
-        (p', _) = feed 3 (BadFrame (BadPayload "pong")) p
+        (p', _) = feed 3 (BadFrame (BadPayload "pong" "")) p
     BCHN.pingOutstanding p'.st `shouldSatisfy` isNothing
 
 permissionSpec :: Spec

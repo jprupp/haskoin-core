@@ -51,6 +51,9 @@
 --   which inbound peer to evict. Where one of them changes what a peer sees,
 --   it comes in as a 'Notification'.
 -- * Bytes. A machine sees whole messages, and framing errors as 'FrameError'.
+--   A payload that the parser of the library refuses comes as 'BadPayload',
+--   with its bytes: a node reads some of those payloads, and a machine can
+--   then answer from the bytes as its node does.
 module Haskoin.Network.Protocol
   ( -- * Machines
     Machine (..),

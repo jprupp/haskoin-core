@@ -122,7 +122,7 @@ badFrame err = do
             netCpp 773 "Header error: Size too large"
     BadChecksum _ -> ignore $ netCpp 836 "Header error: Wrong checksum"
     BadCommand _ -> ignore $ netCpp 840 "Header error: Invalid message type"
-    BadPayload _ -> ignore $ netProcessing 5493 "Exception caught"
+    BadPayload _ _ -> ignore $ netProcessing 5493 "Exception caught"
 
 -- | @PushNodeVersion@: the node's @version@. A private broadcast connection
 -- sends an anonymous one: no services, time 0, height 0, the user agent

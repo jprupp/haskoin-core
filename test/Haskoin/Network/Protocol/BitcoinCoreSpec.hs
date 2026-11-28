@@ -11,6 +11,8 @@
 module Haskoin.Network.Protocol.BitcoinCoreSpec (spec) where
 
 import Data.ByteString qualified as B
+import Data.Bytes.Get (runGetS)
+import Data.Bytes.Put (runPutS)
 import Data.Int (Int32)
 import Data.List (foldl')
 import Data.Maybe (isJust, isNothing)
@@ -154,6 +156,10 @@ btcO = defaultOptions btc
 
 btcE :: Env
 btcE = mkEnv btc
+
+-- | The payload of a @sendcmpct@ with the announce byte 2 and the version 2.
+announceTwo :: B.ByteString
+announceTwo = B.pack [2, 2, 0, 0, 0, 0, 0, 0, 0]
 
 hugeInv :: Message
 hugeInv = MInv (Inv (replicate 50001 (InvVector InvBlock (hashN 1))))
@@ -365,11 +371,31 @@ misbehaviourSpec = describe "misbehaviour" $ do
         hdr = (btc.genesisHeader, VarInt 0)
         (_, es) = step btcO btcE s (Receive (MHeaders (Headers (replicate 2001 hdr))))
     Discourage `elem` actions es `shouldBe` True
-  it "discourages an announce byte above 1 in sendcmpct, even before verack" $ do
+  -- The parser refuses a sendcmpct with an announce byte above 1 on Bitcoin,
+  -- so the machine has it as a payload that did not parse, with its bytes.
+  -- Bitcoin Core: "invalid sendcmpct announce field" (net_processing.cpp).
+  it "discourages an announce byte above 1 in a sendcmpct that did not parse, even before verack" $ do
     let (s1, _) = step btcO btcE (start btcO (setup Inbound [])) (Receive (MVersion peerVer))
-        payload = B.concat [B.singleton 2, B.replicate 8 0]
-        (_, es) = step btcO btcE s1 (Receive (MOther "sendcmpct" payload))
+        (_, es) = step btcO btcE s1 (BadFrame (BadPayload "sendcmpct" announceTwo))
     actions es `shouldBe` [Ignore, Discourage, Disconnect Misbehaviour]
+  it "gives the answer of the node for the bytes of a sendcmpct with the announce byte 2" $ do
+    -- the frame as a peer sends it, read as a caller reads it
+    let (s1, _) = step btcO btcE (start btcO (setup Inbound [])) (Receive (MVersion peerVer))
+        bytes = runPutS (putMessage btc (MOther "sendcmpct" announceTwo))
+        input = either (const (BadFrame (BadPayload "sendcmpct" announceTwo))) Receive (runGetS (getMessage btc) bytes)
+    input `shouldBe` BadFrame (BadPayload "sendcmpct" announceTwo)
+    actions (snd (step btcO btcE s1 input)) `shouldBe` [Ignore, Discourage, Disconnect Misbehaviour]
+  it "drops a sendcmpct with an announce byte above 1 before version, as any message" $ do
+    let (_, es) = step btcO btcE (start btcO (setup Inbound [])) (BadFrame (BadPayload "sendcmpct" announceTwo))
+    actions es `shouldBe` [Ignore]
+    -- "non-version message before version handshake"
+    lines' es `shouldBe` [4076]
+  it "drops a sendcmpct that is cut short, whatever its announce byte" $ do
+    let (s1, _) = step btcO btcE (start btcO (setup Inbound [])) (Receive (MVersion peerVer))
+        (_, es) = step btcO btcE s1 (BadFrame (BadPayload "sendcmpct" (B.pack [2, 2, 0, 0])))
+    actions es `shouldBe` [Ignore]
+    -- "Exception caught"
+    lines' es `shouldBe` [5493]
 
 permissionSpec :: Spec
 permissionSpec = describe "permissions and blocks-only" $ do
@@ -441,7 +467,7 @@ messageSpec = describe "messages" $ do
     lines' (snd (step btcO btcE s (BadFrame (BadChecksum "ping")))) `shouldBe` [836]
     actions (snd (step btcO btcE s (BadFrame (WrongMagic 1)))) `shouldBe` [Disconnect ProtocolViolation]
     actions (snd (step btcO btcE s (BadFrame (Oversized "block" 5000000)))) `shouldBe` [Disconnect ProtocolViolation]
-    lines' (snd (step btcO btcE s (BadFrame (BadPayload "inv")))) `shouldBe` [5493]
+    lines' (snd (step btcO btcE s (BadFrame (BadPayload "inv" "")))) `shouldBe` [5493]
   it "ignores unknown and retired messages" $ do
     lines' (snd (step btcO btcE s (Receive (MOther "dsproof-beta" "x")))) `shouldBe` [5360]
     let rej = MReject (Reject MCTx RejectInvalid (VarString "") Nothing)
@@ -452,6 +478,13 @@ messageSpec = describe "messages" $ do
     compactBlocksOf (fst (step btcO btcE s (Receive (MSendCompact (SendCompact True 2)))))
       `shouldBe` (True, True, False)
     lines' (snd (step btcO btcE s (Receive (MSendCompact (SendCompact True 1))))) `shouldBe` [4178]
+  it "takes a sendcmpct that did not parse and has a valid announce byte as the message" $
+    -- announce 1, version 2
+    compactBlocksOf (fst (step btcO btcE s (BadFrame (BadPayload "sendcmpct" (B.pack [1, 2, 0, 0, 0, 0, 0, 0, 0])))))
+      `shouldBe` (True, True, False)
+  it "takes a sendcmpct under an unknown command name for an unknown message" $
+    -- the bytes of a refused sendcmpct come as a BadPayload, and only so
+    lines' (snd (step btcO btcE s (Receive (MOther "sendcmpct" announceTwo)))) `shouldBe` [5360]
   it "closes on a getheaders locator over 101 entries" $ do
     let gh = GetHeaders 70016 (replicate 102 (hashN 1)) zero
     lines' (snd (step btcO btcE s (Receive (MGetHeaders gh)))) `shouldBe` [4636]

@@ -227,7 +227,7 @@ input i = do
           received
           dispatch m
           void sendRejectsAndCheckIfShouldDiscourage
-        BadFrame (BadPayload cmd) -> do
+        BadFrame (BadPayload cmd _) -> do
           received
           badPayload cmd
           void sendRejectsAndCheckIfShouldDiscourage
