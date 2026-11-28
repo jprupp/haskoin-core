@@ -882,15 +882,13 @@ versionOf globals = case plainField versionType globals of
 
 -- | The unsigned transaction of the global map of version 0, which must be
 -- there, in the serialization without witness, with no input script. It
--- is read with 'parseLegacyTx', as Bitcoin Core reads it without allowing
+-- is read with 'decodeLegacyTx', as Bitcoin Core reads it without allowing
 -- a witness, so that a transaction with no inputs, which the spec allows,
 -- is not taken for the extended format of BIP 144.
 unsignedTxOf :: PsbtMap -> Either String Tx
 unsignedTxOf globals = do
   bytes <- maybe (Left "The global map has no unsigned transaction") Right (Map.lookup unsignedTxKey globals)
-  tx <- case S.runGetState parseLegacyTx bytes 0 of
-    Right (parsed, rest) | B.null rest -> Right parsed
-    _ -> Left "The unsigned transaction does not decode"
+  tx <- first (const "The unsigned transaction does not decode") (decodeLegacyTx bytes)
   unless (null tx.witness && S.encode tx == bytes) $
     Left "The unsigned transaction is not in the serialization without witness"
   unless (all (B.null . (.script)) tx.inputs) $

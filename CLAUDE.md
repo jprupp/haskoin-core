@@ -203,6 +203,9 @@ Read a file before any work on what its line names.
 - `==` and `shouldBe` on a `Tx` or a `MerkleBlock` do not see how the witness
   list or the flags are written (`txContent`, `merkleBlockContent`). A test
   of that form compares the field `witness` or `flags`.
+- A function that calls `decodeDirect` (or `wholeTx`) without its bytes
+  argument, and is not `INLINE`, is nine times slower on the release build,
+  as `decodeTx` was. Write `f bytes = ... bytes`.
 - A new refusal of `signTx` or `signInput`: the generators of
   `Util/Arbitrary/Transaction.hs` and `Spelling.hs` sign with them, and the
   property tests then fail with an `ErrorCall`. Make the generators avoid it.

@@ -27,6 +27,21 @@ is keyed by the whole block hash, `bloomRelevantUpdate` takes the network,
   Bitcoin, on Bitcoin Cash, without a network, and for a prefilled
   transaction.
 
+- **`decodeLegacyTx` reads a transaction in the old format, from bytes that
+  hold it and nothing else.** It is in `Haskoin.Transaction.Common`, beside
+  `decodeTx`. It reads a transaction with no inputs, which `decodeTx` does
+  not: `decodeTx` follows the reader that Bitcoin Core has for a peer, a
+  block and its mempool, and takes a zero after the version for the marker
+  of BIP 144. The library writes such a transaction
+  (`buildAddrTx net [] outputs`), and a program may hand one to a funder, as
+  with `fundrawtransaction` of Bitcoin Core. `decodeLegacyTx` does not read
+  a transaction with a witness. The PSBT decoder had the same reader by
+  hand for its unsigned transaction, and now calls this function.
+  `decodeTx` does not try both formats, as the decoding tools of Bitcoin
+  Core do: some bytes are a whole transaction in both.
+- **`arbitraryNoInputTx` makes a transaction with no inputs,** in
+  `Haskoin.Util.Arbitrary.Transaction`. No other generator makes one, since
+  `deserialize` does not read it back.
 - **`arbitraryWitnessSpelling` writes the witness list of a transaction
   another way.** It is in `Haskoin.Util.Arbitrary.Transaction`: stacks
   beyond the inputs, the empty stacks at the end left out, or a list of
@@ -257,6 +272,21 @@ is keyed by the whole block hash, `bloomRelevantUpdate` takes the network,
   does. The order of two transactions that were written from different
   bytes does not change. The hash of a transaction is another number than
   before. `Show` and the field `witness` give the list as it was built.
+- **`decodeTx` says which format it read when bytes with a zero after the
+  version are not a transaction.** A transaction with no inputs and one
+  output gave `Left "too few bytes"`, which does not say what happened. The
+  error now starts with "Read in the extended format of BIP 144, since the
+  byte after the version is zero (decodeLegacyTx reads a transaction with no
+  inputs): ". The Haddock of `decodeTx` and the README say which
+  transaction it does not read back, and which function reads it. The error
+  for bytes after a transaction, and for bytes without that zero, does not
+  change.
+- **`decodeTx` is ten times faster.** It was written without its argument,
+  and GHC does not compile a reader for the buffer of `Haskoin.Util.Direct`
+  in a function of that form: the same function written both ways differs
+  by nine times. On the release build, 40 transactions of 2000 inputs and
+  2000 outputs with a witness took 0.071 s, and now take 0.007 s. The
+  answers do not change.
 - **The JSON form of a transaction writes one witness stack per input, or
   none.** It wrote the list as it was built. A list with a stack beyond the
   inputs, or without the empty stack of a last input, gave JSON that

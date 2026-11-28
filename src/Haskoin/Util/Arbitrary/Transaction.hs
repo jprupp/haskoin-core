@@ -163,6 +163,16 @@ arbitraryWitnessSpelling tx
     beyond = spelled . (stacks <>) <$> listOf1 (listOf arbitraryBS)
     spelled w = Tx tx.version tx.inputs tx.outputs w tx.locktime
 
+-- | Arbitrary transaction with no inputs, and up to five outputs: what a
+-- program hands to a funder. No other generator makes one, since
+-- 'decodeTx' and the binary instances of 'Tx' do not read it back, by the
+-- rule of BIP 144: 'decodeLegacyTx' and 'parseLegacyTx' do.
+arbitraryNoInputTx :: Network -> Gen Tx
+arbitraryNoInputTx net = do
+  no <- choose (0, 5)
+  outs <- vectorOf no (arbitraryTxOut net)
+  Tx <$> arbitrary <*> pure [] <*> pure outs <*> pure [] <*> arbitrary
+
 -- | Arbitrary transaction containing only inputs of type 'SpendPKHash',
 -- 'SpendScriptHash' (multisig) and outputs of type 'PayPKHash' and 'PaySH'.
 -- Only compressed public keys are used.
