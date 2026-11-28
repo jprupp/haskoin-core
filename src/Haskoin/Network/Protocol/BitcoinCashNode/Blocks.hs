@@ -645,8 +645,7 @@ processNewBlock b punish force = do
         o <- options
         let msg = rejectMessage MCBlock code r (Just h.get)
         when o.enableBip61 $
-          forM_ msg $
-            \m -> modify' (\s -> s {blockRejects = s.blockRejects <> [m]})
+          modify' (\s -> s {blockRejects = s.blockRejects <> [msg]})
         when (dos > 0 && punish) $ misbehaving dos (netProcessing 1114 r)
 
 -- | @MaybeSetPeerAsAnnouncingHeaderAndIDs@ (@src\/net_processing.cpp:560-610@)

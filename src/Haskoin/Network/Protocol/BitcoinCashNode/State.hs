@@ -562,27 +562,18 @@ pushAddress a = do
         modifyRelay (\r -> r {addrToSend = queue'})
       else modifyRelay (\r -> r {addrToSend = queue <> [a]})
 
--- | A @reject@ message, if the code is one that the library can send. The
--- reason is cut to 111 bytes (@MAX_REJECT_MESSAGE_LENGTH@).
-rejectMessage :: MessageCommand -> Word8 -> Text -> Maybe Hash256 -> Maybe Message
-rejectMessage cmd code reason h = do
-  c <- case code of
-    0x01 -> Just RejectMalformed
-    0x10 -> Just RejectInvalid
-    0x11 -> Just RejectObsolete
-    0x12 -> Just RejectDuplicate
-    0x40 -> Just RejectNonStandard
-    0x41 -> Just RejectDust
-    0x42 -> Just RejectInsufficientFee
-    0x43 -> Just RejectCheckpoint
-    _ -> Nothing
-  let r = BS.take maxRejectMessageLength (TE.encodeUtf8 reason)
-  return (MReject (Reject cmd c (VarString r) h))
+-- | A @reject@ message. The reason is cut to 111 bytes
+-- (@MAX_REJECT_MESSAGE_LENGTH@).
+rejectMessage :: MessageCommand -> Word8 -> Text -> Maybe Hash256 -> Message
+rejectMessage cmd code reason h =
+  MReject (Reject cmd (RejectCode code) (VarString r) h)
+  where
+    r = BS.take maxRejectMessageLength (TE.encodeUtf8 reason)
 
--- | Send a @reject@ if @-enablebip61@ is on (the default) and the code is
--- one between 1 and 0xff that the library knows.
+-- | Send a @reject@ if @-enablebip61@ is on (the default). The callers
+-- leave out the code 0, which upstream does not send.
 sendReject :: MessageCommand -> Word8 -> Text -> Maybe Hash256 -> Cite -> M ()
 sendReject cmd code reason h c = do
   o <- options
   when o.enableBip61 $
-    mapM_ (`send` c) (rejectMessage cmd code reason h)
+    send (rejectMessage cmd code reason h) c

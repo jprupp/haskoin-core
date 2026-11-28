@@ -354,6 +354,7 @@ spec = do
   sizeLimitSpec
   itemLimitSpec
   compactPositionSpec
+  sendCompactSpec
   witnessFormatSpec
   bloomMatchSpec
   bloomCashSpec
@@ -668,8 +669,40 @@ rejectSpec = describe "reject" $ do
   it "reads every code" $
     forM_ [RejectMalformed, RejectInvalid, RejectObsolete, RejectDuplicate, RejectNonStandard, RejectDust, RejectInsufficientFee, RejectCheckpoint] $ \c ->
       parse (runPutS (serialize c)) `shouldBe` Right c
-  it "refuses an unknown code" $
-    (parse (hex "02") :: Either String RejectCode) `failsWith` "Invalid code"
+  -- BIP 61 gives the code as a uint8_t and names eight values. Bitcoin Cash
+  -- Node reads any byte (net_processing.cpp, ProcessMessage, "uint8_t ccode").
+  it "reads a code that BIP 61 does not name" $
+    parse (hex "44") `shouldBe` Right (RejectCode 0x44)
+  it "writes a code that has no name as its byte" $
+    hexOf (RejectCode 0x44) `shouldBe` "44"
+  it "gives one value for one byte, so the code of the byte 0x41 is RejectDust" $
+    map RejectCode [0x01, 0x10, 0x11, 0x12, 0x40, 0x41, 0x42, 0x43]
+      `shouldBe` [ RejectMalformed,
+                   RejectInvalid,
+                   RejectObsolete,
+                   RejectDuplicate,
+                   RejectNonStandard,
+                   RejectDust,
+                   RejectInsufficientFee,
+                   RejectCheckpoint
+                 ]
+  it "matches a code against its name" $
+    [n :: Int | c <- map RejectCode [0x40, 0x41, 0x44], n <- case c of RejectDust -> [1]; _ -> [0]]
+      `shouldBe` [0, 1, 0]
+  it "shows a named code by its name and another code by its byte" $ do
+    show RejectDust `shouldBe` "RejectDust"
+    -- 0x44 = 68
+    show (RejectCode 0x44) `shouldBe` "RejectCode 68"
+    show (Just (RejectCode 0x44)) `shouldBe` "Just (RejectCode 68)"
+  it "reads a shown code back, by its name or by its byte" $ do
+    read "RejectDust" `shouldBe` RejectCode 0x41
+    read "RejectCode 68" `shouldBe` RejectCode 0x44
+    read "RejectCode 65" `shouldBe` RejectDust
+    read "Just (RejectCode 68)" `shouldBe` Just (RejectCode 0x44)
+  it "reads a reject message with a code that has no name" $
+    -- command "tx", code 0x44, reason "r"
+    runGetS (getMessage bch) (frame bch "reject" (hex ("027478" <> "44" <> "0172")))
+      `shouldBe` Right (MReject (Reject MCTx (RejectCode 0x44) (VarString "r") Nothing))
   it "builds a reject without a hash" $
     (reject MCTx RejectDust "dust").extra `shouldBe` Nothing
   it "writes the command, code and reason, and no hash when there is none" $
@@ -682,8 +715,11 @@ rejectSpec = describe "reject" $ do
   it "reads a reject with a hash" $
     parse (hex ("05626c6f636b" <> "43" <> "00" <> h1Hex))
       `shouldBe` Right (Reject MCBlock RejectCheckpoint (VarString "") (Just h1))
-  it "refuses extra data that is not a hash" $
-    (parse (hex ("027478" <> "10" <> "00" <> "0102030405")) :: Either String Reject) `failsWith` "too few bytes"
+  -- Bitcoin Cash Node reads a hash after the reason of a reject of a block or
+  -- of a transaction, and a reject that it cannot read costs the peer nothing.
+  it "reads a reject with 31 bytes after its reason as a reject without a hash" $
+    parse (hex ("027478" <> "10" <> "00" <> T.replicate 31 "11"))
+      `shouldBe` Right (reject MCTx RejectInvalid "")
 
 -- Message framing -------------------------------------------------------------
 
@@ -1212,6 +1248,12 @@ sizeLimitSpec = describe "message size per command" $ do
   it "refuses a block of 64000001 bytes on bitcoin cash" $
     forM_ ["block", "cmpctblock", "blocktxn"] $ \cmd ->
       runGetS (getMessage bch) (headerOnly bch cmd 64000001) `failsWith` "larger than the limit"
+  it "accepts the length of a block of 64000001 bytes when the caller raises maxMessageSize" $
+    -- Bitcoin Cash Node allows twice a block size limit that grows with the
+    -- blocks. The library has a fixed number, which is a field to set.
+    let raised = bch {maxMessageSize = 128000000}
+     in forM_ ["block", "cmpctblock", "blocktxn"] $ \cmd ->
+          runGetS (getMessage raised) (headerOnly bch cmd 64000001) `failsWith` "too few bytes"
   it "accepts the length of any message of 4000000 bytes on bitcoin" $
     forM_ ["inv", "block", "tx", "foo"] $ \cmd ->
       runGetS (getMessage btc) (headerOnly btc cmd 4000000) `failsWith` "too few bytes"
@@ -1308,6 +1350,10 @@ compactPositionSpec = describe "compact block positions" $ do
           <> B.concat (replicate n (hex "010000000000"))
           <> prefilled
       counts = fmap (\m -> case m of MCompactBlock c -> (length c.shortIds, map (.index) c.prefilled); _ -> (0, []))
+      -- the distance 2^64 - 1 as a number of nine bytes
+      wrappingDistance = "ffffffffffffffffff"
+      -- two positions: 5, then that distance
+      wrapping = "02" <> "05" <> wrappingDistance
   it "reads the position 65535 in a getblocktxn on bitcoin" $
     indexes (runGetS (getMessage btc) (requestFrame "01fdffff")) `shouldBe` Right [65535]
   it "refuses the position 65536 in a getblocktxn on bitcoin" $
@@ -1315,6 +1361,21 @@ compactPositionSpec = describe "compact block positions" $ do
   it "refuses a getblocktxn position reached by adding distances beyond 65535 on bitcoin" $
     -- 65535, then a distance of 0, which is position 65536
     indexes (runGetS (getMessage btc) (requestFrame "02fdffff00")) `failsWith` "16 bits"
+  -- Bitcoin Core, blockencodings.h, DifferenceFormatter: "differential value
+  -- overflow". The position 5, then the distance 2^64 - 1: the next position
+  -- is 5 + 1 + 2^64 - 1, which is 5 again in 64 bits.
+  it "refuses a getblocktxn distance that makes the position wrap around 64 bits on bitcoin" $
+    indexes (runGetS (getMessage btc) (requestFrame wrapping))
+      `failsWith` "Block position does not fit 16 bits: 18446744073709551615"
+  it "refuses a getblocktxn distance that makes the position wrap around 64 bits on bitcoin cash" $
+    indexes (runGetS (getMessage bch) (frame bch "getblocktxn" (hex (bh1Hex <> wrapping))))
+      `failsWith` "Block position does not fit 32 bits: 18446744073709551615"
+  it "refuses a distance that makes the position wrap around 64 bits in the form without a network" $
+    (parse (hex (bh1Hex <> wrapping)) :: Either String GetBlockTxn)
+      `failsWith` "Block position does not fit 32 bits: 18446744073709551615"
+  it "refuses a prefilled distance that makes the position wrap around 64 bits on bitcoin cash" $
+    counts (runGetS (getMessage bch) (frame bch "cmpctblock" (compact 0 (hex "0205" <> tx <> hex wrappingDistance))))
+      `failsWith` "Block position does not fit 32 bits: 18446744073709551615"
   it "reads the position 65536 in a getblocktxn on bitcoin cash" $
     indexes (runGetS (getMessage bch) (frame bch "getblocktxn" (hex (bh1Hex <> "01fe00000100"))))
       `shouldBe` Right [65536]
@@ -1341,8 +1402,35 @@ compactPositionSpec = describe "compact block positions" $ do
   it "refuses a getblocktxn count above the list limit" $
     -- 0x02000001 positions announced
     (parse (hex (bh1Hex <> "fe01000002")) :: Either String GetBlockTxn) `failsWith` "List count too large"
-  it "reads any non-zero announce byte of sendcmpct as true" $
+  it "reads any non-zero announce byte of sendcmpct as true in the form without a network" $
     parse (hex ("02" <> "0100000000000000")) `shouldBe` Right (SendCompact True 1)
+
+-- The announce byte of sendcmpct per network ----------------------------------------
+
+sendCompactSpec :: Spec
+sendCompactSpec = describe "sendcmpct announce byte" $ do
+  -- BIP 152: "The first integer SHALL be interpreted as a boolean (and MUST
+  -- have a value of either 1 or 0)". Bitcoin Core (net_processing.cpp) calls
+  -- another value misbehaviour: "invalid sendcmpct announce field". Bitcoin
+  -- Cash Node reads the byte into a bool, so any byte but 0 is true.
+  let sendCompact net byte = runGetS (getMessage net) (frame net "sendcmpct" (hex (byte <> "0200000000000000")))
+  it "reads the announce bytes 0 and 1 on bitcoin" $ do
+    sendCompact btc "00" `shouldBe` Right (MSendCompact (SendCompact False 2))
+    sendCompact btc "01" `shouldBe` Right (MSendCompact (SendCompact True 2))
+  it "refuses the announce byte 2 on bitcoin" $
+    sendCompact btc "02" `failsWith` "sendcmpct: the announce byte must be 0 or 1, and it is 2"
+  it "refuses the announce byte 255 on bitcoin" $
+    sendCompact btc "ff" `failsWith` "sendcmpct: the announce byte must be 0 or 1, and it is 255"
+  it "reads the announce byte 2 as true on bitcoin cash" $
+    sendCompact bch "02" `shouldBe` Right (MSendCompact (SendCompact True 2))
+  it "refuses the announce byte 2 on the networks of bitcoin and reads it on those of bitcoin cash" $
+    [ either (const False) (const True) (sendCompact net "02")
+    | net <- [btc, btcTest, btcTest4, btcRegTest, bch, bchTest3, bchTest4, bchRegTest]
+    ]
+      `shouldBe` [False, False, False, False, True, True, True, True]
+  it "refuses a sendcmpct that is cut short for its length, whatever its announce byte" $
+    -- Bitcoin Core reads both fields before it looks at the first
+    runGetS (getMessage btc) (frame btc "sendcmpct" (hex "0202000000")) `failsWith` "too few bytes"
 
 -- SegWit format on networks without SegWit -------------------------------------------
 

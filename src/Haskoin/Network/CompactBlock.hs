@@ -22,6 +22,7 @@ module Haskoin.Network.CompactBlock
     GetBlockTxn (..),
     BlockTxn (..),
     maxShortId,
+    getSendCompact,
     getCompactBlock,
     getGetBlockTxn,
     getBlockTxn,
@@ -35,6 +36,7 @@ import Data.Bits (shiftL, shiftR, (.|.))
 import Data.Bytes.Get
 import Data.Bytes.Put
 import Data.Bytes.Serial
+import Data.Maybe (isNothing)
 import Data.Serialize (Serialize (..))
 import Data.Word (Word32, Word64)
 import GHC.Generics (Generic)
@@ -46,6 +48,11 @@ import Haskoin.Transaction.Common (Tx)
 -- | The @sendcmpct@ message. It tells the peer whether to announce new blocks
 -- as compact blocks, and which version of the protocol to use. Version 1
 -- identifies transactions by their txid and version 2 by their wtxid.
+--
+-- On the wire the announce flag is one byte. This instance has no network,
+-- and reads any byte but 0 as 'True', the wider reading of the two nodes.
+-- Read a message of a network with 'getSendCompact', as
+-- 'Haskoin.Network.Message.getMessage' does.
 data SendCompact = SendCompact
   { -- | announce blocks with @cmpctblock@ instead of @inv@ or @headers@
     announce :: !Bool,
@@ -67,6 +74,23 @@ instance Binary SendCompact where
 instance Serialize SendCompact where
   put = serialize
   get = deserialize
+
+-- | Read a @sendcmpct@ message of a network. On a network without a fork id
+-- an announce byte other than 0 and 1 fails the parse. BIP 152 says that the
+-- byte "MUST have a value of either 1 or 0", and Bitcoin Core discourages
+-- and disconnects the peer that sends another value ("invalid sendcmpct
+-- announce field"). On a Bitcoin Cash network any byte but 0 is 'True':
+-- Bitcoin Cash Node reads the byte into a @bool@ and keeps the peer.
+--
+-- Both fields are read before the byte is judged, as in Bitcoin Core, so a
+-- message that is cut short fails for its length.
+getSendCompact :: (MonadGet m) => Network -> m SendCompact
+getSendCompact net = do
+  byte <- getWord8
+  v <- getWord64le
+  when (byte > 1 && isNothing net.sigHashForkId) $
+    fail ("sendcmpct: the announce byte must be 0 or 1, and it is " ++ show byte)
+  return (SendCompact (byte /= 0) v)
 
 -- | Largest short transaction identifier. Short identifiers are six bytes.
 maxShortId :: Word64

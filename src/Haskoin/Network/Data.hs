@@ -49,6 +49,15 @@ data Network = Network
     -- (@MAX_PROTOCOL_MESSAGE_LENGTH@). Bitcoin Cash Node refuses those three
     -- messages over twice the block size. Use
     -- 'Haskoin.Network.Message.maxPayloadSize' for the limit of one command.
+    --
+    -- On Bitcoin Cash this is a fixed number, twice a block size of 32 MB,
+    -- where the node works the limit out from a block size limit that
+    -- grows when blocks fill up (the adaptive limit, active since 2024). The
+    -- library does not follow that growth: it would need the sizes of the
+    -- blocks of the chain, which a reader of messages does not have. No block
+    -- is near the limit today. When the limit of the chain rises, a caller
+    -- sets a larger number in its copy of the network, and 'maxBlockSize'
+    -- with it.
     maxMessageSize :: !Word32,
     -- | largest P2P message that carries no block content, in bytes. This is
     -- @MAX_PROTOCOL_MESSAGE_LENGTH@ of the reference node: 4,000,000 on

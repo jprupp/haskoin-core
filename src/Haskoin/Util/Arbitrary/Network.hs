@@ -152,19 +152,21 @@ arbitraryReject =
     <*> arbitraryVarString
     <*> arbitraryMaybe arbitraryHash256
 
--- | Arbitrary 'RejectCode', any of the eight.
+-- | Arbitrary t'RejectCode': one of the eight that BIP 61 names, or any byte.
 arbitraryRejectCode :: Gen RejectCode
-arbitraryRejectCode =
-  elements
-    [ RejectMalformed,
-      RejectInvalid,
-      RejectObsolete,
-      RejectDuplicate,
-      RejectNonStandard,
-      RejectDust,
-      RejectInsufficientFee,
-      RejectCheckpoint
-    ]
+arbitraryRejectCode = oneof [named, RejectCode <$> arbitrary]
+  where
+    named =
+      elements
+        [ RejectMalformed,
+          RejectInvalid,
+          RejectObsolete,
+          RejectDuplicate,
+          RejectNonStandard,
+          RejectDust,
+          RejectInsufficientFee,
+          RejectCheckpoint
+        ]
 
 -- | Arbitrary non-empty 'GetData'.
 arbitraryGetData :: Gen GetData

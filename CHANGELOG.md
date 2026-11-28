@@ -7,11 +7,24 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
-This version breaks backwards compatibility in four places: the six
+This version breaks backwards compatibility in five places: the six
 functions that give a nested SegWit address take the network, six functions
 of the difficulty rules return `Either`, the map of the memory header store
-is keyed by the whole block hash, and `bloomRelevantUpdate` takes the
-network. See "Changed" below.
+is keyed by the whole block hash, `bloomRelevantUpdate` takes the network,
+and `RejectCode` is a byte with names. See "Changed" below.
+
+### Added
+
+- **`getSendCompact` reads a `sendcmpct` message as the node of a network
+  does.** It is in `Haskoin.Network.CompactBlock`, beside `getCompactBlock`
+  and `getGetBlockTxn`, and `getMessage` uses it. See "Fixed" below.
+- **Tests of a compact block position that wraps around 64 bits.** The
+  reader of `getblocktxn` and `cmpctblock` refuses a distance so large that
+  the next position comes back to a small number, as Bitcoin Core does
+  ("differential value overflow"). No test had such a distance, so the check
+  could be taken out with every test passing. Four tests now have one: on
+  Bitcoin, on Bitcoin Cash, without a network, and for a prefilled
+  transaction.
 
 ### Changed
 
@@ -165,8 +178,64 @@ network. See "Changed" below.
   Core. On a network with a fork id it makes the two passes of Bitcoin Cash
   Node. Its time grows with the size of the block.
 
+- **`RejectCode` holds any byte, and the eight codes of BIP 61 are
+  patterns.** The type was a closed list of eight constructors, so
+  `getMessage` failed for a `reject` with any other code: 248 of the 256
+  bytes. BIP 61 defines the code as a byte in three ranges, and Bitcoin Cash
+  Node reads any byte and never punishes the sender of a `reject`. A program
+  that drops a peer whose message does not parse, as haskoin-node does, lost
+  the peer, and with it the reason why its transaction was refused. No
+  reference node sends such a code today.
+
+  The type now:
+
+  ```haskell
+  newtype RejectCode = RejectCode {get :: Word8}
+
+  pattern RejectMalformed :: RejectCode -- 0x01
+  pattern RejectInvalid :: RejectCode -- 0x10
+  pattern RejectObsolete :: RejectCode -- 0x11
+  pattern RejectDuplicate :: RejectCode -- 0x12
+  pattern RejectNonStandard :: RejectCode -- 0x40
+  pattern RejectDust :: RejectCode -- 0x41
+  pattern RejectInsufficientFee :: RejectCode -- 0x42
+  pattern RejectCheckpoint :: RejectCode -- 0x43
+  ```
+
+  One byte has one value: `RejectCode 0x41` is `RejectDust`. The eight names
+  build and match as before, they are shown as before, and they come with
+  `RejectCode (..)` in an import. To migrate, give a match on the names a
+  last case for the other bytes: the compiler no longer knows the list as
+  complete, so it does not warn when a case is missing. Another code is
+  shown as `RejectCode 68`, and `Read` takes both forms.
+
 ### Fixed
 
+- **`getMessage` refuses a `sendcmpct` with an announce byte above 1 on
+  Bitcoin.** It read any byte but 0 as "announce". BIP 152 says that the
+  byte "MUST have a value of either 1 or 0", and Bitcoin Core 32.1
+  discourages and disconnects the peer that sends another value ("invalid
+  sendcmpct announce field"). With the Bitcoin Core machine of
+  `Haskoin.Network.Protocol`, such a message was recorded as a request for
+  compact blocks in high-bandwidth mode. The parse now fails on a network
+  without a fork id: "sendcmpct: the announce byte must be 0 or 1, and it is
+  2". Nothing changes on Bitcoin Cash, where Bitcoin Cash Node reads the
+  byte into a `bool`, nor in the `Serial` instance of `SendCompact`, which
+  has no network.
+- **A `reject` with extra data that is not a hash is read.** The reader took
+  any bytes after the reason for a hash, and failed with "too few bytes"
+  when there were 1 to 31 of them. They are now a hash only when there are
+  32 or more, and such a message is read as a `reject` without a hash.
+- **The Bitcoin Cash Node machine sends a `reject` with any code from 1 to
+  0xff,** as the node does. For a verdict `TxRejected` or `BlockRejected`
+  whose code was not one of the eight names, it sent nothing.
+- **The documentation says that the message limit of Bitcoin Cash is a fixed
+  number.** A block message may have 64,000,000 bytes, twice a block size of
+  32 MB. Bitcoin Cash Node works its limit out from a block size limit that
+  grows when blocks fill up, and took a block message of 71,694,066 bytes on
+  regtest. The README and the Haddock of `maxMessageSize` now say so, and
+  how to raise the number: a caller passes its own copy of the network. A
+  test states that this works.
 - **The Bitcoin Cash Node machine serves the filtered block of the node.**
   For a `getdata` of a filtered block, `Haskoin.Network.Protocol.BitcoinCashNode`
   marked the transactions with one pass of `bloomRelevantUpdate`, so its
