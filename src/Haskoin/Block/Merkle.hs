@@ -70,6 +70,15 @@ type PartialMerkleTree = [Hash256]
 
 -- | Filtered block: a block with a partial Merkle tree that only includes the
 -- transactions that pass a bloom filter that was negotiated.
+--
+-- __Equality.__ The flags are written as whole bytes, so a proof that
+-- 'buildPartialMerkle' made with five flags is read back with eight. 'Eq'
+-- and 'Hashable' compare the flags as the bytes that are written
+-- ('encodeMerkleFlags'): a merkle block is equal to itself after it is
+-- written and read, and two that are written as other bytes are not equal.
+-- To drop the zero bits at the end before the comparison would not do: it
+-- makes equal two proofs with another number of flag bytes, and
+-- 'extractMatches' refuses one of the two.
 data MerkleBlock = MerkleBlock
   { -- | block header
     header :: !BlockHeader,
@@ -80,7 +89,18 @@ data MerkleBlock = MerkleBlock
     -- | bits to rebuild partial merkle tree
     flags :: !FlagBits
   }
-  deriving (Eq, Show, Read, Generic, Hashable, NFData)
+  deriving (Show, Read, Generic, NFData)
+
+instance Eq MerkleBlock where
+  a == b = merkleBlockContent a == merkleBlockContent b
+
+instance Hashable MerkleBlock where
+  hashWithSalt salt = hashWithSalt salt . merkleBlockContent
+
+-- | What a merkle block is written from: its fields, with the flags as
+-- their bytes
+merkleBlockContent :: MerkleBlock -> (BlockHeader, Word32, PartialMerkleTree, [Word8])
+merkleBlockContent mb = (mb.header, mb.txn, mb.hashes, encodeMerkleFlags mb.flags)
 
 -- | The parse fails for a merkle block that no verifier accepts because of
 -- its size alone: more hashes than transactions, or more flag bytes than

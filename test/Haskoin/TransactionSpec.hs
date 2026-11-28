@@ -12,7 +12,7 @@ module Haskoin.TransactionSpec (spec) where
 
 import Control.Exception (evaluate)
 import Control.Monad (forM_, guard, unless)
-import Data.Aeson (decode, eitherDecode, withObject, (.:))
+import Data.Aeson (decode, eitherDecode, encode, toJSON, withObject, (.:))
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as B
 import Data.Bytes.Get
@@ -20,6 +20,7 @@ import Data.Bytes.Put
 import Data.Bytes.Serial
 import Data.Default (def)
 import Data.Either
+import Data.Hashable (hash)
 import Data.List (find, inits, isInfixOf, isPrefixOf)
 import Data.Map.Strict qualified as Map
 import Data.Maybe
@@ -112,12 +113,18 @@ spec = do
       forAll arbitraryNetwork $ \net ->
         forAll (arbitrarySigningData net) $ \(tx, sigis, prv) ->
           nosigTxHash (either error id (signTx net tx sigis (map (.key) prv))) === nosigTxHash tx
+    prop "a transaction is equal to itself with its witness list written another way, and has the same bytes" $
+      forAll (arbitraryTx =<< arbitraryNetwork) $ \tx ->
+        forAll (arbitraryWitnessSpelling tx) $ \other ->
+          (other == tx, compare other tx, compare tx other, hash other == hash tx, runPutS (serialize other))
+            === (True, EQ, EQ, True, runPutS (serialize tx))
   describe "Transaction vectors" $ do
     it "compute txid from tx" $ mapM_ testTxidVector txidVectors
     it "build pkhash transaction (generated from bitcoind)" $
       mapM_ testPKHashVector pkHashVectors
   idsSpec
   bytesSpec
+  equalitySpec
   sizeSpec
   coinSelectionSpec
   buildSpec
@@ -598,6 +605,21 @@ bytesSpec =
       (decode (json "[[\"6162\"],[\"6364\"]]") :: Maybe Tx) `shouldBe` Nothing
       (decode "{\"version\":1,\"inputs\":[],\"outputs\":[],\"witnessdata\":[[\"6162\"]],\"locktime\":0}" :: Maybe Tx) `shouldBe` Nothing
 
+    -- A stack beyond the inputs is not written, an input that the list
+    -- leaves out gets its empty stack, and a list of empty stacks is no
+    -- witness. The form made as a value and the form written directly agree.
+    it "the JSON form of a transaction writes one witness stack per input, or none" $ do
+      let one = Tx 1 [TxIn (coinAt 0) "" 0xffffffff] [TxOut 1 "\x51"]
+          two = Tx 1 [TxIn (coinAt 0) "" 0xffffffff, TxIn (coinAt 1) "" 0xffffffff] [TxOut 1 "\x51"]
+          written tx = (.witness) <$> (decode (encode tx) :: Maybe Tx)
+          asValue tx = (.witness) <$> (decode (encode (toJSON tx)) :: Maybe Tx)
+      written (one [["ab"], ["cd"]] 0) `shouldBe` Just [["ab"]]
+      asValue (one [["ab"], ["cd"]] 0) `shouldBe` Just [["ab"]]
+      written (two [["ab"]] 0) `shouldBe` Just [["ab"], []]
+      asValue (two [["ab"]] 0) `shouldBe` Just [["ab"], []]
+      written (one [[]] 0) `shouldBe` Just []
+      asValue (one [[]] 0) `shouldBe` Just []
+
     -- 253 is the first count that takes three bytes: fd, then 253 as two
     -- bytes. Each input without a script is 41 bytes, and the output of an
     -- empty script 9: 4 + 3 + 253 × 41 + 1 + 9 + 4 = 10394 bytes.
@@ -622,6 +644,78 @@ bytesSpec =
       (eitherDecode "{\"value\":5000000000,\"outputscript\":\"51\"}" :: Either String TxOut) `shouldBe` Right (TxOut 5000000000 "\x51")
 
 {- Sizes and fees -}
+
+{- Equality -}
+
+-- | Two values of 'Tx' are one transaction when they differ only in how
+-- the witness list is written. The transactions here have one or two
+-- inputs without input script and one output of 1 satoshi to OP_1.
+equalitySpec :: Spec
+equalitySpec =
+  describe "Transaction equality" $ do
+    let one = Tx 1 [TxIn (coinAt 0) "" 0xffffffff] [TxOut 1 "\x51"]
+        two = Tx 1 [TxIn (coinAt 0) "" 0xffffffff, TxIn (coinAt 1) "" 0xffffffff] [TxOut 1 "\x51"]
+
+    it "a transaction without witness is equal to itself with a list of empty stacks" $ do
+      one [[]] 0 `shouldBe` one [] 0
+      two [[], []] 0 `shouldBe` two [] 0
+      two [[]] 0 `shouldBe` two [] 0
+
+    it "a stack beyond the inputs does not make another transaction" $
+      one [["ab"], ["cd"]] 0 `shouldBe` one [["ab"]] 0
+
+    it "an empty stack that the witness list leaves out does not make another transaction" $
+      two [["ab"]] 0 `shouldBe` two [["ab"], []] 0
+
+    it "transactions whose inputs do not have the same witness are not equal" $ do
+      one [["ab"]] 0 `shouldNotBe` one [["cd"]] 0
+      one [["ab"]] 0 `shouldNotBe` one [] 0
+      one [["ab"]] 0 `shouldNotBe` one [["ab", ""]] 0
+      two [["ab"], []] 0 `shouldNotBe` two [[], ["ab"]] 0
+      two [["ab"]] 0 `shouldNotBe` two [["ab"], ["cd"]] 0
+
+    it "transactions that differ in the version, an input, an output or the lock time are not equal" $ do
+      one [] 0 `shouldNotBe` Tx 2 [TxIn (coinAt 0) "" 0xffffffff] [TxOut 1 "\x51"] [] 0
+      one [] 0 `shouldNotBe` Tx 1 [TxIn (coinAt 0) "" 0xfffffffe] [TxOut 1 "\x51"] [] 0
+      one [] 0 `shouldNotBe` Tx 1 [TxIn (coinAt 0) "" 0xffffffff] [TxOut 2 "\x51"] [] 0
+      one [] 0 `shouldNotBe` one [] 1
+      one [] 0 `shouldNotBe` two [] 0
+
+    -- The order is stated with compare in both directions
+    it "the order takes two ways to write one witness as the same transaction" $ do
+      compare (one [[]] 0) (one [] 0) `shouldBe` EQ
+      compare (one [] 0) (one [[]] 0) `shouldBe` EQ
+      compare (one [["ab"], ["cd"]] 0) (one [["ab"]] 0) `shouldBe` EQ
+      compare (one [["ab"]] 0) (one [["ab"], ["cd"]] 0) `shouldBe` EQ
+      compare (two [["ab"]] 0) (two [["ab"], []] 0) `shouldBe` EQ
+      compare (two [["ab"], []] 0) (two [["ab"]] 0) `shouldBe` EQ
+
+    it "the order is by version, inputs, outputs, witness, then lock time" $ do
+      -- no witness sorts before a witness, whatever the lock time
+      compare (one [[]] 9) (one [["ab"]] 0) `shouldBe` LT
+      compare (one [["ab"]] 0) (one [[]] 9) `shouldBe` GT
+      -- the witness "ab" sorts before "cd", whatever the lock time
+      compare (one [["ab"], ["zz"]] 9) (one [["cd"]] 0) `shouldBe` LT
+      compare (one [["cd"]] 0) (one [["ab"], ["zz"]] 9) `shouldBe` GT
+      -- the lock time decides between equal witnesses
+      compare (two [["ab"]] 0) (two [["ab"], []] 1) `shouldBe` LT
+      compare (two [["ab"], []] 1) (two [["ab"]] 0) `shouldBe` GT
+      -- one input sorts before the same input and one more
+      compare (one [["ab"]] 0) (two [] 0) `shouldBe` LT
+      compare (two [] 0) (one [["ab"]] 0) `shouldBe` GT
+      -- the version decides first
+      compare (one [["ab"]] 9) (Tx 2 [] [] [] 0) `shouldBe` LT
+      compare (Tx 2 [] [] [] 0) (one [["ab"]] 9) `shouldBe` GT
+
+    it "a set holds one transaction for the ways to write its witness" $ do
+      Set.size (Set.fromList [one [] 0, one [[]] 0, one [[], []] 0]) `shouldBe` 1
+      Set.size (Set.fromList [two [["ab"]] 0, two [["ab"], []] 0, two [["ab"], [], ["cd"]] 0]) `shouldBe` 1
+      Set.size (Set.fromList [one [] 0, one [["ab"]] 0]) `shouldBe` 2
+
+    it "the ways to write one witness have one hash" $ do
+      hash (one [[]] 0) `shouldBe` hash (one [] 0)
+      hash (one [["ab"], ["cd"]] 0) `shouldBe` hash (one [["ab"]] 0)
+      hash (two [["ab"]] 0) `shouldBe` hash (two [["ab"], []] 0)
 
 sizeSpec :: Spec
 sizeSpec =
@@ -984,6 +1078,21 @@ mergeSpec =
       b <- either fail return (signTx btc withSegwit [msSigi] [k2.key])
       merged <- either fail return (mergeTxs btc [a, b] [(so, 100000, coinAt 0)])
       merged.witness `shouldBe` withSegwit.witness
+      verifyStdTx btc merged coins `shouldBe` True
+
+    -- A copy that has an empty stack for each input and a copy that has no
+    -- witness list are the same unsigned transaction
+    it "merges two copies that write the same empty witness in two ways" $ do
+      let (k1, p1) = fixedKey 1
+          (k2, p2) = fixedKey 2
+          ms = PayMulSig [p1, p2] 2
+          tx = buildTx [coinAt 0, coinAt 1] [(PayPKHash (keyHash p1), 150000)]
+          sigis = [SigInput ms 100000 (coinAt i) sigHashAll Nothing | i <- [0, 1]]
+          coins = [(ms, 100000, coinAt 0), (ms, 100000, coinAt 1)]
+      a <- either fail return (signTx btc tx sigis [k1.key])
+      b <- either fail return (signTx btc tx sigis [k2.key])
+      a.witness `shouldBe` []
+      merged <- either fail return (mergeTxs btc [a, withWitness b [[], []]] coins)
       verifyStdTx btc merged coins `shouldBe` True
 
     it "mergeTxInput refuses an index that a transaction does not have" $ do

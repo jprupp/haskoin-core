@@ -27,6 +27,12 @@ is keyed by the whole block hash, `bloomRelevantUpdate` takes the network,
   Bitcoin, on Bitcoin Cash, without a network, and for a prefilled
   transaction.
 
+- **`arbitraryWitnessSpelling` writes the witness list of a transaction
+  another way.** It is in `Haskoin.Util.Arbitrary.Transaction`: stacks
+  beyond the inputs, the empty stacks at the end left out, or a list of
+  empty stacks for a transaction without witness. The result is equal to
+  the transaction given. See "Fixed" below.
+
 ### Changed
 
 - **The nested SegWit address functions take the network, and give no address
@@ -236,6 +242,43 @@ is keyed by the whole block hash, `bloomRelevantUpdate` takes the network,
 
 ### Fixed
 
+- **A transaction is equal to itself however its witness list is written.**
+  The witness of a `Tx` is a list beside the inputs, so one transaction has
+  several lists: none or a list of empty stacks, with or without the empty
+  stacks of its last inputs, with or without stacks beyond its inputs. They
+  are written as the same bytes and have the same txid and witness txid.
+  The derived `Eq`, `Ord` and `Hashable` compared the lists, so `==` said
+  `False` for two of them, and their hashes differed. A transaction with a
+  list of empty stacks was not equal to itself after a write and a read, a
+  `Set` or a `HashMap` counted it twice, and `mergeTxs` refused two copies
+  of one transaction with "Transactions do not match". The three instances
+  now compare the version, the inputs, the outputs, the lock time and the
+  witness stack of each input, as `CTransaction::Equals` of Bitcoin Core
+  does. The order of two transactions that were written from different
+  bytes does not change. The hash of a transaction is another number than
+  before. `Show` and the field `witness` give the list as it was built.
+- **The JSON form of a transaction writes one witness stack per input, or
+  none.** It wrote the list as it was built. A list with a stack beyond the
+  inputs, or without the empty stack of a last input, gave JSON that
+  `FromJSON` refuses ("The witness data must have one stack per input, or
+  none"). The JSON of a transaction that was read from bytes does not
+  change.
+- **A merkle block is equal to itself after it is written and read.** The
+  flags of a `MerkleBlock` are written as whole bytes, so a proof that
+  `buildPartialMerkle` made with five flags came back with eight, and `==`
+  said `False`. `Eq` and `Hashable` now compare the flags as the bytes that
+  are written. Two merkle blocks that are written as other bytes are still
+  not equal.
+- **The generators draw the values that hid these faults.**
+  `arbitraryTx`, `arbitraryLegacyTx` and `arbitraryWitnessTx` write the
+  witness list another way one time in ten (`arbitraryWitnessSpelling`),
+  and an input after the first has no witness one time in four.
+  `arbitraryMerkleBlock` leaves its flags as `buildPartialMerkle` gives
+  them half of the time, and pads them to whole bytes the other half. The
+  identity tests passed before only because no generator made such a value.
+  A test of another package that reads the field `witness` of a generated
+  transaction, or the field `flags` of a generated merkle block, now sees
+  these lists.
 - **`getMessage` refuses a `sendcmpct` with an announce byte above 1 on
   Bitcoin.** It read any byte but 0 as "announce". BIP 152 says that the
   byte "MUST have a value of either 1 or 0", and Bitcoin Core 32.1

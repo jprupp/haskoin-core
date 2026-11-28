@@ -288,6 +288,16 @@ instance Serialize Record where
 Mark the `serialize` and `deserialize` of such a type `INLINEABLE`, so that GHC
 can compile them for the monads of that module.
 
+**Equal after a write and a read.** A value that is written and read is equal
+to itself. Two types hold more than their bytes say, and their `==` and `hash`
+look at what is written. A `Tx` keeps its witness in a list beside its inputs:
+no list and a list of empty stacks are the same transaction, and so are a list
+with and without the empty stacks of the last inputs, or with stacks beyond the
+inputs. A `MerkleBlock` keeps its flags one by one, and they are written as
+whole bytes: a proof built with five flags is read with eight. `show` and the
+fields still give what the value was built with, so compare the values, not
+their fields.
+
 ### Hash byte order
 
 `TxHash` and `BlockHash` show as hexadecimal in reversed byte order. This is the

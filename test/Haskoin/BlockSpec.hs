@@ -1328,6 +1328,30 @@ merkleSpec = describe "merkle trees" $ do
         `shouldBe` Left "merkleBlockTxs: Merkle root incorrect"
     it "rejects a changed transaction count" $
       testMerkleRoot btc (merkleBlock :: MerkleBlock) {txn = 2} `shouldBe` False
+  describe "merkle block equality" $ do
+    -- The proof of the second of three transactions: three hashes and five
+    -- flag bits, which take one byte. The header is not the one of the
+    -- proof, which equality does not look at.
+    let hashes = snd (buildPartialMerkle (zip [txA, txB, txC] [False, True, False]))
+        proof = MerkleBlock btc.genesisHeader 3 hashes
+        five = [True, True, False, True, False]
+    it "a merkle block is equal to itself after it is written and read" $
+      runGetS deserialize (runPutS (serialize (proof five))) `shouldBe` Right (proof five)
+    it "flags padded with zero bits to whole bytes are the same flags" $ do
+      proof (five ++ [False, False, False]) `shouldBe` proof five
+      proof (five ++ [False]) `shouldBe` proof five
+    it "merkle blocks with the same flag bytes have one hash" $
+      hash (proof (five ++ [False, False, False])) `shouldBe` hash (proof five)
+    it "flags that take another number of bytes are not the same flags" $ do
+      -- nine bits take two bytes
+      proof (five ++ [False, False, False, False]) `shouldNotBe` proof five
+      proof [] `shouldNotBe` proof [False]
+    it "merkle blocks that differ in a flag, a hash, the count or the header are not equal" $ do
+      proof [True, True, False, True, True] `shouldNotBe` proof five
+      proof (five ++ [False, False, True]) `shouldNotBe` proof five
+      MerkleBlock btc.genesisHeader 3 (reverse hashes) five `shouldNotBe` proof five
+      MerkleBlock btc.genesisHeader 4 hashes five `shouldNotBe` proof five
+      MerkleBlock btcTest.genesisHeader 3 hashes five `shouldNotBe` proof five
   describe "malformed partial trees" $ do
     it "rejects a block without transactions" $
       extractMatches btc [True] [txA.get] 0 `shouldBe` Left "extractMatches: number of transactions can not be 0"
