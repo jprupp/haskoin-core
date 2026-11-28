@@ -1478,6 +1478,48 @@ witnessFormatSpec = describe "transaction format per network" $ do
       (\m -> case m of MCompactBlock c -> map (\x -> length x.tx.inputs) c.prefilled; _ -> [])
       (runGetS (getMessage bch) (frame bch "cmpctblock" compact))
       `shouldBe` Right [0]
+  -- The same transaction in the old format: without the marker, the flag
+  -- and the witness stack
+  let oldTx =
+        hex $
+          "01000000"
+            <> "01"
+            <> h1Hex
+            <> "00000000"
+            <> "00"
+            <> "ffffffff"
+            <> "01"
+            <> "e803000000000000"
+            <> "0151"
+            <> "00000000"
+      -- The payload as a network writes it, when it was read on Bitcoin
+      written net cmd payload =
+        runPutS . putMessage net <$> runGetS (getMessage btc) (frame btc cmd payload)
+  it "writes the witness of a tx message on bitcoin" $
+    written btc "tx" witnessTx `shouldBe` Right (frame btc "tx" witnessTx)
+  it "writes a tx message in the old format on bitcoin cash" $
+    -- Bitcoin Cash Node has no witness format: it would read the marker as
+    -- an input count of zero, and so another transaction
+    written bch "tx" witnessTx `shouldBe` Right (frame bch "tx" oldTx)
+  -- Each of the three messages below has two transactions: the first
+  -- without witness, and the second the one given
+  it "writes the transactions of a block message in the old format on bitcoin cash" $ do
+    let block tx = hex genesisHeaderHex <> hex "02" <> oldTx <> tx
+    written bch "block" (block witnessTx) `shouldBe` Right (frame bch "block" (block oldTx))
+    written btc "block" (block witnessTx) `shouldBe` Right (frame btc "block" (block witnessTx))
+  it "writes the transactions of a blocktxn message in the old format on bitcoin cash" $ do
+    let blockTxn tx = hex bh1Hex <> hex "02" <> oldTx <> tx
+    written bch "blocktxn" (blockTxn witnessTx) `shouldBe` Right (frame bch "blocktxn" (blockTxn oldTx))
+    written btc "blocktxn" (blockTxn witnessTx) `shouldBe` Right (frame btc "blocktxn" (blockTxn witnessTx))
+  it "writes the prefilled transactions of a cmpctblock message in the old format on bitcoin cash" $ do
+    -- header, nonce, no short id, two prefilled transactions at the
+    -- positions 0 and 1: each has a distance of 0 before it
+    let compact tx = hex (genesisHeaderHex <> "0000000000000000" <> "00" <> "02" <> "00") <> oldTx <> hex "00" <> tx
+    written bch "cmpctblock" (compact witnessTx) `shouldBe` Right (frame bch "cmpctblock" (compact oldTx))
+    written btc "cmpctblock" (compact witnessTx) `shouldBe` Right (frame btc "cmpctblock" (compact witnessTx))
+  prop "a tx message of a network without SegWit is read back as the transaction without its witness" $
+    forAll (arbitraryWitnessTx bch) $ \tx ->
+      runGetS (getMessage bch) (runPutS (putMessage bch (MTx tx))) === Right (MTx (tx :: Tx) {witness = []})
   it "reads an empty witness item as an empty byte string" $
     -- one input with a witness stack of three empty items
     let tx3 =
