@@ -261,6 +261,13 @@ and `decodeTx` does the same for a transaction. `runGetS deserialize` reads a
 value from the start of the bytes and ignores the rest. `encodeSerial x` gives
 the bytes of `runPutS (serialize x)`.
 
+`decodeTx` reads a transaction as Bitcoin Core reads one from a peer: a zero
+after the version is the marker of BIP 144, and not an input count. So it does
+not read back a transaction with no inputs that has outputs, which a program
+may write to hand it to a funder. `decodeLegacyTx` reads the old format only,
+and such a transaction with it. On a network without SegWit, `getNetworkTx`
+reads a transaction of a peer in the old format, as Bitcoin Cash Node does.
+
 **Which one is fast.** All of these give the same bytes, but not at the same
 price. `encodeSerial` and `decodeSerial` are the cheapest: they write into one
 buffer of the exact length and read the bytes where they are. `decode` of

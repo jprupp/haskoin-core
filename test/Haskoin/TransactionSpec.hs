@@ -118,6 +118,12 @@ spec = do
         forAll (arbitraryWitnessSpelling tx) $ \other ->
           (other == tx, compare other tx, compare tx other, hash other == hash tx, runPutS (serialize other))
             === (True, EQ, EQ, True, runPutS (serialize tx))
+    prop "decodeLegacyTx reads back a transaction with no inputs" $
+      forAll (arbitraryNoInputTx =<< arbitraryNetwork) $ \tx ->
+        decodeLegacyTx (runPutS (serialize tx)) === Right tx
+    prop "getNetworkTx reads back a transaction with no inputs on a network without SegWit" $
+      forAll (arbitraryNoInputTx bch) $ \tx ->
+        runGetS (getNetworkTx bch) (runPutS (serialize tx)) === Right tx
   describe "Transaction vectors" $ do
     it "compute txid from tx" $ mapM_ testTxidVector txidVectors
     it "build pkhash transaction (generated from bitcoind)" $
@@ -439,6 +445,13 @@ bip143SignedTx :: Text
 bip143SignedTx =
   "01000000000102fff7f7881a8099afa6940d42d1e7f6362bec38171ea3edf433541db4e4ad969f00000000494830450221008b9d1dc26ba6a9cb62127b02742fa9d754cd3bebf337f7a55d114c8e5cdd30be022040529b194ba3f9281a99f2b1c0a19c0489bc22ede944ccf4ecbab4cc618ef3ed01eeffffffef51e1b804cc89d182d279655c3aa89e815b1b309fe287d9b2b55d57b90ec68a0100000000ffffffff02202cb206000000001976a9148280b37df378db99f66f85c95a783a76ac7a6d5988ac9093510d000000001976a9143bde42dbee7e4dbe6a21b2d50ce2f0167faa815988ac000247304402203609e17b84f6a7d30c80bfa610b5b4542f32a8a0d5447a12fb1366d7f01cc44a0220573a954c4518331561406f90300e8f3358f51928d43c212a8caed02de67eebee0121025476c2e83188368da1ff3e292e7acafcdb3566bb0ad253f62fc70f07aeee635711000000"
 
+-- A transaction without witness: one input without input script, and one
+-- output of 0.9 coin to a public key hash. 85 bytes.
+oneInputTx :: Text
+oneInputTx =
+  "0100000001db494559df26b5cf3b121f05af26e0568708f5bd9ccceb41656f1654a1eb29eb0e00000000ffffffff\
+  \01804a5d05000000001976a91424aa604689cc582292b97668bedd91dd5bf9374c88ac00000000"
+
 hexBytes :: Text -> ByteString
 hexBytes = fromJust . decodeHex
 
@@ -549,8 +562,55 @@ bytesSpec =
     it "read an empty input list with a zero flags byte as a transaction with no inputs and no outputs, as Bitcoin Core does" $
       parseTx ("01000000" <> "00" <> "00" <> "00000000") `shouldBe` Right (Tx 1 [] [] [] 0)
 
+    -- Version 2, an input count of zero, one output of 1000 satoshi to a
+    -- witness program of twenty bytes 0x5c, lock time 0. The reader of
+    -- Bitcoin Core for a transaction from a peer takes the input count for
+    -- the marker of BIP 144 and the output count for its flags, and so does
+    -- decodeTx: it then looks for 0xe8 inputs.
+    it "decodeTx does not read a transaction with no inputs and one output, and names the function that does" $ do
+      let noInput = Tx 2 [] [TxOut 1000 (hexBytes "00145c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c")] [] 0
+          bytes = hexBytes "020000000001e8030000000000001600145c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c00000000"
+      runPutS (serialize noInput) `shouldBe` bytes
+      decodeTx bytes
+        `shouldSatisfy` either
+          ( isPrefixOf
+              "Read in the extended format of BIP 144, since the byte after the version is zero \
+              \(decodeLegacyTx reads a transaction with no inputs): too few bytes"
+          )
+          (const False)
+
+    it "decodeTx does not name decodeLegacyTx when the input count is not zero, or for bytes after a transaction" $ do
+      let unnamed = either (not . isInfixOf "decodeLegacyTx") (const False)
+      decodeTx (hexBytes (oneInputTx <> "00")) `shouldSatisfy` unnamed
+      decodeTx (B.take 60 (hexBytes oneInputTx)) `shouldSatisfy` unnamed
+      decodeTx (hexBytes bip143SignedTx <> "\x00") `shouldSatisfy` unnamed
+
+    it "decodeTx says that it read the extended format when a transaction with the marker is cut short" $
+      decodeTx (B.take 200 (hexBytes bip143SignedTx))
+        `shouldSatisfy` either (isPrefixOf "Read in the extended format of BIP 144") (const False)
+
+    it "decodeLegacyTx reads a transaction with no inputs" $ do
+      let noInput outputs = Tx 2 [] outputs [] 0
+          out = TxOut 1000 (hexBytes "00145c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c")
+          outHex = "e8030000000000001600145c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c"
+          bytes outputs = hexBytes ("02000000" <> "00" <> outputs <> "00000000")
+      decodeLegacyTx (bytes ("01" <> outHex)) `shouldBe` Right (noInput [out])
+      decodeLegacyTx (bytes ("02" <> outHex <> outHex)) `shouldBe` Right (noInput [out, out])
+      decodeLegacyTx (bytes "00") `shouldBe` Right (noInput [])
+
+    it "decodeLegacyTx reads a transaction with inputs in the old format, and refuses bytes after it" $ do
+      decodeLegacyTx (hexBytes oneInputTx) `shouldBe` decodeTx (hexBytes oneInputTx)
+      fmap (length . (.inputs)) (decodeLegacyTx (hexBytes oneInputTx)) `shouldBe` Right 1
+      decodeLegacyTx (hexBytes (oneInputTx <> "00"))
+        `shouldSatisfy` either ("Trailing bytes after transaction" `isInfixOf`) (const False)
+
+    -- In the old format the marker of BIP 144 is an input count of zero and
+    -- its flags an output count of one, and the rest does not fit
+    it "decodeLegacyTx does not read the extended format" $
+      decodeLegacyTx (hexBytes bip143SignedTx) `shouldSatisfy` isLeft
+
     it "decodeTx reads a transaction on its own, and refuses bytes after it" $ do
-      let legacy = "0100000001db494559df26b5cf3b121f05af26e0568708f5bd9ccceb41656f1654a1eb29eb0e00000000ffffffff01804a5d05000000001976a91424aa604689cc582292b97668bedd91dd5bf9374c88ac00000000"
+      let legacy = oneInputTx
       fmap txHash (decodeTx (hexBytes legacy)) `shouldBe` fmap txHash (parseTx legacy)
       fmap (length . (.inputs)) (decodeTx (hexBytes legacy)) `shouldBe` Right 1
       decodeTx (hexBytes (legacy <> "00")) `shouldSatisfy` either ("Trailing bytes after transaction" `isInfixOf`) (const False)
@@ -558,12 +618,13 @@ bytesSpec =
       fmap txWeight (decodeTx (hexBytes bip143SignedTx)) `shouldBe` Right 1042
 
     it "refuse a literal with bytes after the transaction" $ do
-      let legacy = "0100000001db494559df26b5cf3b121f05af26e0568708f5bd9ccceb41656f1654a1eb29eb0e00000000ffffffff01804a5d05000000001976a91424aa604689cc582292b97668bedd91dd5bf9374c88ac00000000"
-      length (fromString legacy :: Tx).inputs `shouldBe` 1
-      evaluate (fromString (legacy <> "00") :: Tx) `shouldThrow` errorCall "Could not read transaction from hex string"
+      let legacy = oneInputTx
+      length (fromString (cs legacy) :: Tx).inputs `shouldBe` 1
+      evaluate (fromString (cs (legacy <> "00")) :: Tx)
+        `shouldThrow` errorCall "Could not read transaction from hex string"
 
     it "write a transaction whose witness stacks are all empty without the marker, and read it back without witness" $ do
-      let legacy = "0100000001db494559df26b5cf3b121f05af26e0568708f5bd9ccceb41656f1654a1eb29eb0e00000000ffffffff01804a5d05000000001976a91424aa604689cc582292b97668bedd91dd5bf9374c88ac00000000"
+      let legacy = oneInputTx
       tx <- either fail return (parseTx legacy)
       hasWitness tx `shouldBe` False
       hasWitness tx {witness = [[]]} `shouldBe` False
@@ -573,7 +634,7 @@ bytesSpec =
       txWitnessHash tx {witness = [[]]} `shouldBe` txHash tx
 
     it "write one witness stack per input" $ do
-      let legacy = "0100000001db494559df26b5cf3b121f05af26e0568708f5bd9ccceb41656f1654a1eb29eb0e00000000ffffffff01804a5d05000000001976a91424aa604689cc582292b97668bedd91dd5bf9374c88ac00000000"
+      let legacy = oneInputTx
       tx <- either fail return (parseTx legacy)
       -- A second stack has no input to go with, so its bytes are not written
       fmap (.witness) (decodeTx (runPutS (serialize tx {witness = [["ab"], ["cd"]]}))) `shouldBe` Right [["ab"]]
@@ -581,7 +642,7 @@ bytesSpec =
     -- Only an input has a witness. A stack beyond the inputs is not part of
     -- the transaction, so it must not turn the witness format on.
     it "a witness item in a stack beyond the inputs is not a witness" $ do
-      let legacy = "0100000001db494559df26b5cf3b121f05af26e0568708f5bd9ccceb41656f1654a1eb29eb0e00000000ffffffff01804a5d05000000001976a91424aa604689cc582292b97668bedd91dd5bf9374c88ac00000000"
+      let legacy = oneInputTx
       tx <- either fail return (parseTx legacy)
       let beyond = withWitness tx [[], ["ab"]]
       hasWitness beyond `shouldBe` False

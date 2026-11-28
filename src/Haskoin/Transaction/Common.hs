@@ -6,6 +6,7 @@
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE NoFieldSelectors #-}
 
@@ -37,6 +38,7 @@ module Haskoin.Transaction.Common
     nosigTxHash,
     hasWitness,
     decodeTx,
+    decodeLegacyTx,
     parseLegacyTx,
     nullOutPoint,
   )
@@ -47,6 +49,7 @@ import Control.DeepSeq
 import Control.Monad (forM_, guard, liftM2, mzero, replicateM, unless, when, (<=<))
 import Data.Aeson as A
 import Data.Aeson.Encoding qualified as E
+import Data.Bifunctor (first)
 import Data.Binary (Binary (..))
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as B
@@ -55,6 +58,7 @@ import Data.ByteString.Lazy qualified as BL
 import Data.Bytes.Get
 import Data.Bytes.Put
 import Data.Bytes.Serial
+import Data.Either (isLeft)
 import Data.Hashable (Hashable (..))
 import Data.Maybe (fromMaybe)
 import Data.Serialize (Serialize (..))
@@ -248,12 +252,63 @@ hasWitness tx = any (not . null) (take (length tx.inputs) tx.witness)
 -- transaction from the front of a longer input, as a block needs it to,
 -- and so it does not notice bytes that follow. Use this function for a
 -- transaction that arrives on its own.
+--
+-- __A transaction with no inputs.__ The bytes are read as Bitcoin Core
+-- reads a transaction from a peer, a block or its mempool: a zero after
+-- the version is the marker of BIP 144, and not an input count. So this
+-- function and 'deserialize' do not read back a transaction with no inputs
+-- that has outputs, which 'serialize' writes: with one output the answer
+-- is 'Left', or in rare cases another transaction, and with more a 'Left'.
+-- Such a transaction is not valid, but a program may hand one to a funder,
+-- as with @fundrawtransaction@ of Bitcoin Core. Read it with
+-- 'decodeLegacyTx'. This function does not try both formats, as the
+-- decoding tools of Bitcoin Core do: some bytes are a whole transaction in
+-- both, and the choice between the two would then be a guess. When bytes
+-- with that zero are not a transaction, the error says that they were
+-- read in the extended format.
+--
+-- On a network without SegWit, read a transaction of a peer with
+-- 'Haskoin.Network.Data.getNetworkTx': Bitcoin Cash Node has the old
+-- format only.
 decodeTx :: ByteString -> Either String Tx
-decodeTx = decodeDirect $ do
-  tx <- deserialize
-  done <- isEmpty
-  unless done $ fail "Trailing bytes after transaction"
-  return tx
+decodeTx bytes = first extended (wholeTx deserialize bytes)
+  where
+    extended reason
+      | zeroAfterVersion && notRead =
+          "Read in the extended format of BIP 144, since the byte after the version is zero \
+          \(decodeLegacyTx reads a transaction with no inputs): "
+            <> reason
+      | otherwise = reason
+    zeroAfterVersion = B.take 1 (B.drop 4 bytes) == B.singleton 0x00
+    -- Bytes left over after a transaction are another fault
+    notRead = isLeft (decodeDirect deserialize bytes :: Either String Tx)
+
+-- | Read a transaction in the old format, without the marker, flags and
+-- witness of BIP 144, from bytes that hold the transaction and nothing
+-- else. It reads what 'decodeTx' does not: a transaction with no inputs.
+-- It does not read a transaction with a witness. Use it where the bytes
+-- are known to be in the old format: a transaction that waits for its
+-- inputs, the unsigned transaction of a PSBT, a transaction of a network
+-- without SegWit. 'parseLegacyTx' is the same reader for the front of a
+-- longer input.
+decodeLegacyTx :: ByteString -> Either String Tx
+decodeLegacyTx bytes = wholeTx parseLegacyTx bytes
+
+-- | Run a reader of a transaction on bytes that must hold the transaction
+-- and nothing else. It is inlined with both arguments, as 'decodeDirect'
+-- is, so that the reader is compiled for the monad that reads the bytes
+-- where they are: write a caller with its bytes, and not point-free, or it
+-- runs several times slower.
+wholeTx :: (forall m. (MonadGet m) => m Tx) -> ByteString -> Either String Tx
+wholeTx reader bytes = decodeDirect whole bytes
+  where
+    whole :: (MonadGet m) => m Tx
+    whole = do
+      tx <- reader
+      done <- isEmpty
+      unless done $ fail "Trailing bytes after transaction"
+      return tx
+{-# INLINE wholeTx #-}
 
 -- | A transaction from its hex. The hex must hold the transaction and
 -- nothing else, as @DecodeHexTx@ requires in Bitcoin Core.
@@ -341,6 +396,8 @@ witnessFlags = do
 -- the byte after an empty input list as the flags of BIP 144, as Bitcoin
 -- Core does when it allows a witness. Every count is bounded by
 -- 'maxListSize', as @ReadCompactSize@ bounds it in Bitcoin Core.
+-- 'decodeLegacyTx' runs it on bytes that hold a transaction and nothing
+-- else.
 parseLegacyTx :: (MonadGet m) => m Tx
 parseLegacyTx = do
   version <- getWord32le
