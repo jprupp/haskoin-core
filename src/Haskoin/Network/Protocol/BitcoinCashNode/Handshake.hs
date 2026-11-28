@@ -153,7 +153,7 @@ frameError = \case
   BadChecksum _ -> do
     emit Discourage (netProcessing 3910 "CHECKSUM ERROR")
     disconnect ProtocolViolation (netProcessing 3912 "DisconnectNode(pfrom->addr)")
-  BadPayload _ ->
+  BadPayload _ _ ->
     -- routed by the top module; never reached
     return ()
 

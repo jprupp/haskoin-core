@@ -270,8 +270,12 @@ data FrameError
     Oversized !ByteString !Word32
   | -- | the checksum does not match the payload
     BadChecksum !ByteString
-  | -- | the command is known but its payload does not parse
-    BadPayload !ByteString
+  | -- | the command is known but its payload does not parse: the command,
+    -- then the bytes of the payload. A node reads some payloads that the
+    -- parser of the library refuses, and with the bytes a machine can read
+    -- them as its node does. The Bitcoin Core machine does so for a
+    -- @sendcmpct@ with an announce byte above 1.
+    BadPayload !ByteString !ByteString
   deriving (Eq, Show, Read, Generic, NFData)
 
 -- | News from the rest of the node.

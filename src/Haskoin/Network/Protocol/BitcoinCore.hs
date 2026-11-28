@@ -156,12 +156,10 @@ step :: Options -> Env -> State -> Input -> (State, [Effect])
 step o e s input
   | s.disconnected = (s, [])
   | otherwise = runM o e s $ case input of
-      Receive m -> do
-        received
-        outboundVersionFirst
-        scoped (processMessage m)
-        _ <- maybeDiscourageAndDisconnect
-        return ()
+      Receive m -> message (processMessage m)
+      -- The one payload that the parser refuses and upstream reads to the
+      -- end: it is handled in @ProcessMessage@, as a message.
+      BadFrame (BadPayload "sendcmpct" p) -> message (refusedSendCmpct p)
       BadFrame err -> do
         received
         outboundVersionFirst
@@ -172,6 +170,12 @@ step o e s input
         when alive sendMessages
       Notify n -> notify n
   where
+    message handler = do
+      received
+      outboundVersionFirst
+      scoped handler
+      _ <- maybeDiscourageAndDisconnect
+      return ()
     received = do
       t <- now
       modifyS $ \st -> st {lastRecv = Just t}
@@ -188,15 +192,12 @@ processMessage m = do
   case m of
     MVersion v -> handleVersion v >> stop
     _ -> return ()
+  versionFirst
   s <- getS
-  when (s.peerVersion == Nothing) $ do
-    ignore $ netProcessing 4076 "non-version message before version handshake"
-    stop
   case m of
     MVerAck -> handleVerAck >> stop
     MSendHeaders -> handleSendHeaders >> stop
     MSendCompact sc -> handleSendCmpct sc >> stop
-    MOther "sendcmpct" p -> rawSendCmpct p >> stop
     MWtxidRelay -> handleWtxidRelay >> stop
     MSendAddrV2 -> handleSendAddrV2 >> stop
     MOther "feature" p -> handleFeature p >> stop
@@ -239,11 +240,24 @@ processMessage m = do
     MNotFound nf -> handleNotFound nf
     _ -> ignore $ netProcessing 5360 "Unknown message type"
 
--- | A @sendcmpct@ that the caller passes as raw bytes. t'SendCompact' reads
--- the announce byte as a flag, so the one rule it cannot carry, an announce
--- byte above 1, which is misbehaviour, is checked here (line 4172).
-rawSendCmpct :: B.ByteString -> M ()
-rawSendCmpct p =
+-- | The gate of every message but @version@: nothing is read before the
+-- peer has sent its @version@ (line 4074).
+versionFirst :: M ()
+versionFirst = do
+  s <- getS
+  when (s.peerVersion == Nothing) $ do
+    ignore $ netProcessing 4076 "non-version message before version handshake"
+    stop
+
+-- | A @sendcmpct@ whose payload the parser refused, read from its bytes as
+-- upstream reads it. 'Haskoin.Network.Message.getMessage' refuses an
+-- announce byte above 1 on Bitcoin, and t'SendCompact' holds a flag, so no
+-- message can carry that byte to the machine. Upstream reads both fields,
+-- then calls a byte above 1 misbehaviour (line 4172). A payload that is cut
+-- short throws before that, and is dropped as any other.
+refusedSendCmpct :: B.ByteString -> M ()
+refusedSendCmpct p = do
+  versionFirst
   case runGetS ((,) <$> getWord8 <*> getWord64le) p of
     Left _ -> ignore $ netProcessing 5493 "Exception caught"
     Right (hb, v)

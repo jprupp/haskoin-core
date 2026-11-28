@@ -1244,6 +1244,13 @@ from the `Env`; decisions that span peers, such as which peer to download a
 block from, which come in as notifications; and bytes, since a machine sees
 whole messages.
 
+When `getMessage` refuses the payload of a message, pass the machine
+`BadFrame (BadPayload command payload)`. A node reads some payloads that the
+parser refuses, and the bytes let a machine answer as its node does. The
+Bitcoin Core machine does this for a `sendcmpct` whose first byte is neither 0
+nor 1: Bitcoin Core discourages the address of the peer and disconnects, where
+it only drops another message that it cannot read.
+
 ## Module overview
 
 `import Haskoin` brings in everything below except the modules marked as

@@ -107,7 +107,8 @@ without the optional fields, an `inv` or `getdata` of more than 50000
 entries, an `addr` of more than 1000, `headers` of more than 2000, a locator
 of more than 101. The machine has the upstream rules for the messages when
 they are built directly, but a caller that parses bytes gets `BadPayload` for
-them, which the machine treats as a payload that does not parse.
+them, which the machine treats as a payload that does not parse. `BadPayload`
+carries the bytes of the payload, and this machine does not read them.
 
 [net:689]: https://gitlab.com/bitcoin-cash-node/bitcoin-cash-node/-/blob/07576013c91ff4a3a74acd85f189c69121cdad1b/src/net.cpp#L689
 [np:3876-3888]: https://gitlab.com/bitcoin-cash-node/bitcoin-cash-node/-/blob/07576013c91ff4a3a74acd85f189c69121cdad1b/src/net_processing.cpp#L3876-3888

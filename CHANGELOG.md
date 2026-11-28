@@ -7,11 +7,12 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
-This version breaks backwards compatibility in five places: the six
+This version breaks backwards compatibility in six places: the six
 functions that give a nested SegWit address take the network, six functions
 of the difficulty rules return `Either`, the map of the memory header store
 is keyed by the whole block hash, `bloomRelevantUpdate` takes the network,
-and `RejectCode` is a byte with names. See "Changed" below.
+`RejectCode` is a byte with names, and `BadPayload` carries the payload. See
+"Changed" below.
 
 ### Added
 
@@ -208,6 +209,30 @@ and `RejectCode` is a byte with names. See "Changed" below.
   last case for the other bytes: the compiler no longer knows the list as
   complete, so it does not warn when a case is missing. Another code is
   shown as `RejectCode 68`, and `Read` takes both forms.
+
+- **`BadPayload` carries the bytes of the payload, and the Bitcoin Core
+  machine reads a refused `sendcmpct` from them.** `BadPayload` is the input
+  of a protocol machine for a message whose payload the parser refused. It
+  held the command name only, so a machine could not tell why the parse
+  failed, and Bitcoin Core does not treat every such message alike. For a
+  `sendcmpct` it reads both fields, then discourages and disconnects the
+  peer for an announce byte above 1, where it only drops a payload that is
+  cut short. The machine dropped both. Its rule for the byte was reached
+  only by a hand-made `MOther "sendcmpct"`, which `getMessage` never gives.
+
+  The constructor now:
+
+  ```haskell
+  BadPayload !ByteString !ByteString -- the command, then the payload
+  ```
+
+  To migrate, pass the payload bytes of the message that did not parse as
+  the second field. The Bitcoin Core machine then gives the answer of the
+  node for a `sendcmpct`: nothing before the `version` of the peer,
+  misbehaviour for an announce byte above 1, a drop for a short payload. A
+  `MOther "sendcmpct"` is now an unknown message, as any `MOther`. The
+  Bitcoin Cash Node machine does not read the bytes: its node reads every
+  `sendcmpct` that has its nine bytes.
 
 ### Fixed
 

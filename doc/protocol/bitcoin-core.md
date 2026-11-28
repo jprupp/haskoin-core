@@ -78,7 +78,9 @@ close a connection (`fDisconnect`), nothing more is processed for it
 | A payload that does not parse throws; `ProcessMessages` catches it and drops the message. | [np 5492] | `badFrame` |
 
 What changed before the parse failed stays changed upstream; the machine sees only
-whole messages, so a `BadPayload` is a plain drop. Some library parsers fail where
+whole messages, so a `BadPayload` is a plain drop. The one exception is a
+`sendcmpct`, which the machine reads from the bytes that `BadPayload` carries: see
+"Announcements the peer makes". Some library parsers fail where
 Bitcoin Core would parse and then punish (a locator over 101 entries, more than
 2,000 headers, an inventory over 50,000 entries): to see the punishment, hand the
 machine the decoded message.
@@ -368,7 +370,7 @@ The library does not know `feature`: it arrives as `MOther "feature"`.
 - `sendheaders`, before or after `verack`: announce blocks to this peer with headers.
   Upstream: [np 4160]; Haskell: `handleSendHeaders`.
 - `sendcmpct` with announce above 1 is misbehaviour, even before `verack`. Upstream:
-  [np 4172]; Haskell: `rawSendCmpct`.
+  [np 4172]; Haskell: `refusedSendCmpct`.
 - `sendcmpct` of a version other than 2 is ignored; version 2 records whether the peer
   wants blocks pushed. Upstream: [np 4178], [np 4182]; Haskell: `handleSendCmpct`.
 - A block `inv` updates what the peer has; the last unknown one triggers a `getheaders`
@@ -376,9 +378,10 @@ The library does not know `feature`: it arrives as `MOther "feature"`.
   [np 4424]; Haskell: `blockInvs`.
 
 `getMessage` refuses a `sendcmpct` with an announce byte above 1 on a Bitcoin
-network, so a caller that parses bytes has a `BadPayload` for it, which the machine
-drops. The rule on announce values above 1 is checked only for a raw
-`MOther "sendcmpct"`.
+network, and `SendCompact` holds a flag, so no message carries that byte. The caller
+passes `BadFrame (BadPayload "sendcmpct" payload)`, and the machine reads the bytes
+as upstream does: behind the gate of the `version`, both fields first, then the rule
+on the announce byte. A payload that is cut short is dropped as any other.
 
 ### `getheaders`
 

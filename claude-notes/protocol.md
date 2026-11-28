@@ -31,4 +31,5 @@ Cash Node), their specs, the report in `doc/protocol/` and
   `shouldBe`, then delete the spec and run `stack build --dry-run`.
 - The library's parser refuses some payloads that a node handles itself (a
   `sendcmpct` announce byte above 1 on Bitcoin, a short `version`): the specs
-  send them as `MOther` or `BadFrame (BadPayload ...)`.
+  send them as `MOther` or `BadFrame (BadPayload cmd payload)`. Only the
+  Bitcoin Core machine reads that payload, for `sendcmpct` (`refusedSendCmpct`).
