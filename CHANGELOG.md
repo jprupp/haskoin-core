@@ -272,6 +272,18 @@ is keyed by the whole block hash, `bloomRelevantUpdate` takes the network,
   does. The order of two transactions that were written from different
   bytes does not change. The hash of a transaction is another number than
   before. `Show` and the field `witness` give the list as it was built.
+- **`putMessage` writes a transaction in the old format on a network
+  without SegWit.** It wrote a transaction with a witness in the extended
+  format of BIP 144 on every network. Bitcoin Cash Node has no witness
+  format: it reads the marker as an input count of zero and the flag as an
+  output count of one, and `getMessage` of that network reads the same
+  bytes the same way, as another transaction with no inputs. On a network
+  without SegWit, `putMessage` now writes the transactions of a `tx`, a
+  `block`, a `cmpctblock` and a `blocktxn` message without their witness,
+  as `getNetworkTx` reads them. The transaction keeps its id. Nothing
+  changes on a network with SegWit, nor for a transaction without witness.
+  The `Serial` instances of `Tx`, `Block`, `CompactBlock` and `BlockTxn`
+  take no network, and write the witness as before.
 - **`decodeTx` says which format it read when bytes with a zero after the
   version are not a transaction.** A transaction with no inputs and one
   output gave `Left "too few bytes"`, which does not say what happened. The

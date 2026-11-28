@@ -1116,6 +1116,10 @@ learn how many more bytes to take from the socket, and refuse a length above
 Where the two reference nodes read a message in different ways, `getMessage`
 reads it as the node of the network does:
 
+- A transaction is read and written in the extended format of BIP 144 on a
+  network with SegWit, and in the old format on a network without it. There
+  `putMessage` writes a transaction without its witness: Bitcoin Cash Node
+  would read the marker of BIP 144 as an input count of zero.
 - A `sendcmpct` whose first byte is neither 0 nor 1 fails on Bitcoin. BIP 152
   allows only those two values, and Bitcoin Core disconnects the peer that
   sends another one. On Bitcoin Cash any byte but 0 means "announce", as in

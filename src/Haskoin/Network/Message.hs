@@ -266,11 +266,42 @@ getPayload net cmd len =
     MCSendTxRcncl -> MSendTxRcncl <$> deserialize
     MCOther c -> MOther c <$> getByteString (fromIntegral len)
 
+-- | The message as the network carries it: on a network without SegWit,
+-- its transactions without their witness. A message whose transactions
+-- have no witness list is given back as it is, and not built again: that
+-- is every message that was read on such a network, and a block has
+-- thousands of transactions.
+carried :: Network -> Message -> Message
+carried net msg
+  | net.segWit = msg
+  | otherwise = case msg of
+      MTx tx | listed tx -> MTx (bare tx)
+      MBlock b | any listed b.txs -> MBlock (Block b.header (map bare b.txs))
+      MCompactBlock c
+        | any (listed . (.tx)) c.prefilled ->
+            let prefilled = [PrefilledTx p.index (bare p.tx) | p <- c.prefilled]
+             in MCompactBlock (CompactBlock c.header c.nonce c.shortIds prefilled)
+      MBlockTxn t | any listed t.transactions -> MBlockTxn (BlockTxn t.hash (map bare t.transactions))
+      _ -> msg
+  where
+    listed :: Tx -> Bool
+    listed tx = not (null tx.witness)
+    bare :: Tx -> Tx
+    bare tx = Tx tx.version tx.inputs tx.outputs [] tx.locktime
+
 -- | Serializer for network messages.
+--
+-- Transactions, in @tx@, @block@, @cmpctblock@ and @blocktxn@ messages, are
+-- written as 'getNetworkTx' reads them. On a network with SegWit that is
+-- the extended format of BIP 144 for a transaction with a witness. On a
+-- network without SegWit it is the old format, and a witness is not
+-- written: Bitcoin Cash Node has no witness format, and would read the
+-- marker of BIP 144 as an input count of zero, and so a transaction that
+-- nobody sent. The transaction keeps its id, which leaves the witness out.
 putMessage :: (MonadPut m) => Network -> Message -> m ()
 putMessage net msg = do
   let (cmd, payload) =
-        case msg of
+        case carried net msg of
           MVersion m -> (MCVersion, runPutS $ serialize m)
           MVerAck -> (MCVerAck, B.empty)
           MAddr m -> (MCAddr, runPutS $ serialize m)
